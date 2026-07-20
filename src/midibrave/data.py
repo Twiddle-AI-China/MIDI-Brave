@@ -823,7 +823,8 @@ class PairDataset(Dataset[dict[str, Any]]):
 
     def __init__(self, cfg: DataConfig, seed: int,
                  predictive: PredictiveConfig | None = None,
-                 rave_checkpoint_hash: str | None = None) -> None:
+                 rave_checkpoint_hash: str | None = None,
+                 load_rave_cache: bool | None = None) -> None:
         self.cfg = cfg
         self.seed = seed
         self.epoch = 0
@@ -855,8 +856,12 @@ class PairDataset(Dataset[dict[str, Any]]):
         self.training_update = 0
         self.predictive = predictive
         self.rave_checkpoint_hash = rave_checkpoint_hash
-        if (predictive is not None and predictive.require_rave_cache
-                and not rave_checkpoint_hash):
+        self.load_rave_cache = (predictive.require_rave_cache
+                                if load_rave_cache is None and predictive is not None
+                                else bool(load_rave_cache))
+        if self.load_rave_cache and predictive is None:
+            raise ValueError("RAVE cache loading requires predictive configuration")
+        if self.load_rave_cache and not rave_checkpoint_hash:
             raise ValueError("predictive RAVE cache requires a checkpoint hash")
 
     def set_epoch(self, epoch: int) -> None:
@@ -989,7 +994,7 @@ class PairDataset(Dataset[dict[str, Any]]):
         return torch.from_numpy(np.load(path).astype(np.float32))
 
     def _rave(self, record: SampleRecord, offset_samples: int) -> torch.Tensor:
-        if self.predictive is None or not self.predictive.require_rave_cache:
+        if self.predictive is None or not self.load_rave_cache:
             raise RuntimeError("RAVE cache was requested without predictive cache mode")
         frames = self.cfg.window_samples // self.predictive.samples_per_latent
         path = self.cache_root / "rave" / f"{record.cache_id}.npz"
@@ -1059,7 +1064,7 @@ class PairDataset(Dataset[dict[str, Any]]):
             "transpose_semitones_b": torch.tensor(0 if b.transpose_semitones is None else b.transpose_semitones,
                                                     dtype=torch.long),
         }
-        if self.predictive is not None and self.predictive.require_rave_cache:
+        if self.predictive is not None and self.load_rave_cache:
             result["rave_a"] = self._rave(a, int(window_a["crop_offset"].item()))
             result["rave_b"] = self._rave(b, int(window_b["crop_offset"].item()))
         return result

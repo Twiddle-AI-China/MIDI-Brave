@@ -42,6 +42,13 @@ def test_predictive_model_predicts_eight_future_frames():
     assert prediction.delta.shape == prediction.latent.shape
 
 
+def test_rave_pitch_adversary_is_training_only():
+    model = make_model()
+    latent = torch.randn(2, 16, 32)
+    logits = model.rave_pitch_logits(latent, reversal_scale=0.5)
+    assert logits.shape == (2, 128)
+
+
 def test_predictive_decoder_rejects_wrong_rave_channels():
     model = make_model()
     try:

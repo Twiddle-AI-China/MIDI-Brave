@@ -195,3 +195,17 @@ def test_cross_phase_warm_start_rejects_wrong_direction_and_manifest(tmp_path: P
         assert "warm-start manifest" in str(error)
     else:
         raise AssertionError("cross-phase manifest mismatch was accepted")
+
+
+def test_v2_resume_rejects_predictive_format5_with_migration_message(tmp_path: Path):
+    model = nn.Linear(2, 2)
+    optimizer = torch.optim.AdamW(model.parameters())
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    checkpoint = tmp_path / "predictive.pt"
+    torch.save({"format": 5, "predictive_contract": {"stage": "rave"}}, checkpoint)
+    try:
+        load_checkpoint(str(checkpoint), model, optimizer, scaler, 1)
+    except ValueError as error:
+        assert "format 5" in str(error) and "v3" in str(error)
+    else:
+        raise AssertionError("v2 trainer accepted a predictive v3 checkpoint")

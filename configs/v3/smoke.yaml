@@ -73,6 +73,10 @@ latent_loss:
   horizon_discount: 0.95
   statistic_floor: 0.0001
 train:
+  rave_steps: 4
+  predictor_steps: 4
+  rollout_steps: 4
+  gan_steps: 3
   phase1_steps: 4
   phase2_steps: 3
   batch_per_gpu: 1

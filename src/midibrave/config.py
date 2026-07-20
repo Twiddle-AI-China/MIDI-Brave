@@ -175,6 +175,10 @@ class TrainConfig:
     hard_example_fraction: float = 0.25
     hard_example_quantile: float = 0.75
     rolling_checkpoint_every: int = 0
+    rave_steps: int = 100000
+    predictor_steps: int = 100000
+    rollout_steps: int = 50000
+    gan_steps: int = 50000
 
 
 @dataclass(frozen=True)
@@ -244,6 +248,7 @@ class Config:
                        if isinstance(latent_loss_raw, dict) else None)
         data = DataConfig(**_section(raw, "data"))
         model = ModelConfig(**_section(raw, "model"))
+        train = TrainConfig(**_section(raw, "train"))
         if predictive is not None:
             if predictive.architecture != "predictive_rave_v1":
                 raise ValueError(f"unsupported predictive architecture: {predictive.architecture}")
@@ -263,12 +268,18 @@ class Config:
                 raise ValueError("clap_control_dim must equal model.timbre_dim")
             if model.midi_dim != 32:
                 raise ValueError("predictive_rave_v1 requires 32-D MIDI")
+            if any(value <= 0 for value in (
+                    train.rave_steps, train.predictor_steps,
+                    train.rollout_steps, train.gan_steps)):
+                raise ValueError("all predictive stage step counts must be positive")
+            if not 0.0 <= predictive.clap_gradient_fraction_max <= 1.0:
+                raise ValueError("clap_gradient_fraction_max must be between zero and one")
         return cls(
             seed=int(raw["seed"]),
             data=data,
             model=model,
             loss=LossConfig(**_section(raw, "loss")),
-            train=TrainConfig(**_section(raw, "train")),
+            train=train,
             source_path=str(path),
             predictive=predictive,
             latent_loss=latent_loss,

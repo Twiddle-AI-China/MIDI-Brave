@@ -9,7 +9,8 @@ from torch.nn import functional as F
 from .config import ModelConfig, PredictiveConfig
 from .latent_predictor import LatentPrediction, MultiHorizonPredictor
 from .model import (BraveDecoder, HarmonicExcitation, MidiConditioner,
-                    StochasticBandExcitation, TimbreAdapter)
+                    PitchAdversary, StochasticBandExcitation, TimbreAdapter,
+                    _GradientReverse)
 from .rave_encoder import RaveEncoder, RavePosterior
 
 
@@ -45,6 +46,8 @@ class PredictiveMidiBrave(nn.Module):
             predictive_config.rave_latent_dim, predictive_config.clap_control_dim,
             model_config.midi_dim, predictive_config.predictor_hidden_dim,
             predictive_config.history_frames, predictive_config.horizon_frames)
+        self.rave_pitch_adversary = PitchAdversary(
+            predictive_config.rave_latent_dim, classes=128)
         self.decoder = BraveDecoder(model_config, predictive_config.rave_latent_dim)
         self.excitation = HarmonicExcitation(
             sample_rate, model_config.excitation_harmonics, model_config.excitation_rms)
@@ -102,6 +105,13 @@ class PredictiveMidiBrave(nn.Module):
         return self.predictor(
             history, self.project_clap(clap, frames),
             self.midi_control(note, velocity, frames))
+
+    def rave_pitch_logits(self, latent: Tensor, reversal_scale: float = 1.0) -> Tensor:
+        if latent.ndim != 3 or latent.shape[1] != self.predictive_config.rave_latent_dim:
+            raise ValueError("RAVE latent shape does not match the pitch adversary")
+        pooled = latent.mean(dim=-1)
+        return self.rave_pitch_adversary(
+            _GradientReverse.apply(pooled, reversal_scale))
 
     def forward_reconstruction(self, audio: Tensor, clap: Tensor, note: Tensor,
                                velocity: Tensor, sample_encoder: bool = True,

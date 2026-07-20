@@ -9,6 +9,8 @@ import random
 import shutil
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -16,15 +18,399 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch import Tensor, nn
+from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
 from .config import Config
+from .calibration import (calibrate_loss_weights, cap_auxiliary_gradient,
+                          loss_gradient_norm)
 from .data import PairDataset
 from .losses import (BraveMultiScaleDiscriminator, FrozenClapReconstructionObjective,
-                     ReconstructionLoss, discriminator_hinge, feature_matching,
-                     generator_adversarial)
+                     MultiResolutionSTFTLoss, ReconstructionLoss,
+                     discriminator_hinge, feature_matching, generator_adversarial)
 from .model import ChannelRMSNorm, MidiBrave
+from .predictive_model import PredictiveMidiBrave
+from .predictive_losses import (LatentStatistics, overlap_loss,
+                                prediction_loss)
+
+
+class PredictiveStage(str, Enum):
+    RAVE = "rave"
+    PREDICTOR = "predictor"
+    ROLLOUT = "rollout"
+    GAN = "gan"
+
+
+@dataclass(frozen=True)
+class PredictiveLossSchedule:
+    rave_kl: float = 0.0
+    rave_pitch_adversary: float = 0.0
+    rollout: float = 0.0
+    teacher_forcing: float = 1.0
+    gan_adversarial: float = 0.0
+    gan_feature_matching: float = 0.0
+
+
+@dataclass(frozen=True)
+class PredictiveLatentObjective:
+    total: Tensor
+    components: dict[str, Tensor]
+    prediction: Tensor
+
+
+@dataclass(frozen=True)
+class PredictiveStageObjective:
+    total: Tensor
+    components: dict[str, Tensor]
+    generated_audio: Tensor | None = None
+    target_audio: Tensor | None = None
+
+
+def _linear_warmup(update: int, updates: int) -> float:
+    if update < 0:
+        raise ValueError("update must be non-negative")
+    return min(1.0, update / max(1, updates))
+
+
+def predictive_loss_schedule(config: Config, stage: PredictiveStage | str,
+                             update: int) -> PredictiveLossSchedule:
+    """Return stage-local loss weights; counters restart at each stage."""
+    stage = PredictiveStage(stage)
+    if config.predictive is None or config.latent_loss is None:
+        raise ValueError("predictive loss scheduling requires a v3 config")
+    predictive = config.predictive
+    losses = config.latent_loss
+    if stage is PredictiveStage.RAVE:
+        return PredictiveLossSchedule(
+            rave_kl=losses.rave_kl * _linear_warmup(
+                update, predictive.kl_warmup_updates),
+            rave_pitch_adversary=losses.rave_pitch_adversary * _linear_warmup(
+                update, predictive.pitch_adversary_warmup_updates),
+        )
+    if stage is PredictiveStage.ROLLOUT:
+        progress = _linear_warmup(update, predictive.rollout_warmup_updates)
+        return PredictiveLossSchedule(
+            rollout=losses.rollout * progress,
+            teacher_forcing=1.0 - progress * (1.0 - predictive.teacher_forcing_floor),
+        )
+    if stage is PredictiveStage.GAN:
+        return PredictiveLossSchedule(
+            teacher_forcing=predictive.teacher_forcing_floor,
+            gan_adversarial=losses.gan_adversarial,
+            gan_feature_matching=losses.gan_feature_matching,
+        )
+    return PredictiveLossSchedule()
+
+
+def configure_predictive_stage(model: PredictiveMidiBrave,
+                               stage: PredictiveStage | str,
+                               rollout_gate_passed: bool = False) -> set[str]:
+    """Freeze every module outside the ownership boundary of one stage."""
+    stage = PredictiveStage(stage)
+    owned = {
+        PredictiveStage.RAVE: {
+            "encoder", "rave_pitch_adversary", "clap_projection", "midi", "decoder"},
+        PredictiveStage.PREDICTOR: {"predictor"},
+        PredictiveStage.ROLLOUT: {"predictor", "clap_projection", "midi", "decoder"},
+        PredictiveStage.GAN: {"decoder", "predictor"} if rollout_gate_passed else {"decoder"},
+    }[stage]
+    trainable = set()
+    for name, parameter in model.named_parameters():
+        root = name.split(".", 1)[0]
+        parameter.requires_grad_(root in owned)
+        if parameter.requires_grad:
+            trainable.add(name)
+    return trainable
+
+
+def predictive_latent_objective(
+    model: PredictiveMidiBrave, batch: dict[str, Tensor], config: Config,
+    statistics: LatentStatistics,
+    calibrated_weights: dict[str, float] | None = None,
+) -> PredictiveLatentObjective:
+    """Direct K-step supervision from one recording, with block overlap."""
+    if config.predictive is None or config.latent_loss is None:
+        raise ValueError("latent prediction requires a v3 config")
+    p = config.predictive
+    losses = config.latent_loss
+    latent = batch["rave_a"]
+    required = p.history_frames + p.horizon_frames
+    if latent.ndim != 3 or latent.shape[1] != p.rave_latent_dim or latent.shape[-1] < required:
+        raise ValueError(
+            f"cached RAVE latent must contain at least {required} aligned frames")
+    history = latent[..., :p.history_frames]
+    target = latent[..., p.history_frames:required]
+    result = model.predict_future(
+        history, batch["clap_a"], batch["note_a"], batch["velocity_a"])
+    terms = prediction_loss(
+        result.latent, target, history, statistics, losses.horizon_discount)
+    components = {
+        "future": terms.future,
+        "delta": terms.delta,
+        "acceleration": terms.acceleration,
+    }
+    second_stop = p.history_frames + p.stride_frames + p.horizon_frames
+    if latent.shape[-1] >= second_stop and p.stride_frames < p.horizon_frames:
+        shifted_history = latent[..., p.stride_frames:p.history_frames + p.stride_frames]
+        shifted = model.predict_future(
+            shifted_history, batch["clap_a"], batch["note_a"], batch["velocity_a"])
+        components["overlap"] = overlap_loss(
+            result.latent, shifted.latent, p.stride_frames, statistics)
+    else:
+        components["overlap"] = result.latent.new_zeros(())
+    weights = calibrated_weights or {
+        "future": losses.future, "delta": losses.delta,
+        "acceleration": losses.acceleration, "overlap": losses.overlap,
+    }
+    if set(weights) != set(components):
+        raise ValueError("calibrated latent weights must cover every prediction loss")
+    total = sum(weights[name] * value for name, value in components.items())
+    return PredictiveLatentObjective(total, components, result.latent)
+
+
+def predictive_stage_objective(
+    model: PredictiveMidiBrave, batch: dict[str, Tensor], config: Config,
+    stage: PredictiveStage | str, update: int,
+    statistics: LatentStatistics | None = None,
+    calibrated_weights: dict[str, float] | None = None,
+    stft: MultiResolutionSTFTLoss | None = None,
+) -> PredictiveStageObjective:
+    """Compute one generator objective for any pre-GAN predictive stage."""
+    stage = PredictiveStage(stage)
+    if config.predictive is None or config.latent_loss is None:
+        raise ValueError("predictive stage objective requires a v3 config")
+    schedule = predictive_loss_schedule(config, stage, update)
+    losses = config.latent_loss
+    if stage is PredictiveStage.RAVE:
+        reconstruction = model.forward_reconstruction(
+            batch["audio_a"], batch["clap_a"], batch["note_a"],
+            batch["velocity_a"], sample_encoder=True,
+            excitation_seed=batch.get("excitation_seed_a"))
+        waveform = F.l1_loss(reconstruction.audio, batch["audio_a"])
+        spectral = (stft(reconstruction.audio, batch["audio_a"], batch.get("valid_samples_a"))
+                    if stft is not None else waveform.new_zeros(()))
+        pitch = F.cross_entropy(
+            model.rave_pitch_logits(reconstruction.posterior.latent),
+            batch["note_a"].long().clamp(0, 127))
+        components = {
+            "waveform": waveform, "spectral": spectral,
+            "rave_kl": reconstruction.posterior.kl,
+            "rave_pitch_adversary": pitch,
+        }
+        total = (waveform + config.loss.self_stft * spectral
+                 + schedule.rave_kl * components["rave_kl"]
+                 + schedule.rave_pitch_adversary * pitch)
+        return PredictiveStageObjective(
+            total, components, reconstruction.audio, batch["audio_a"])
+    if statistics is None:
+        raise ValueError(f"{stage.value} stage requires latent statistics")
+    latent_objective = predictive_latent_objective(
+        model, batch, config, statistics, calibrated_weights)
+    if stage is PredictiveStage.PREDICTOR:
+        return PredictiveStageObjective(
+            latent_objective.total, latent_objective.components)
+
+    p = config.predictive
+    latent = batch["rave_a"]
+    history = latent[..., :p.history_frames]
+    available = latent.shape[-1] - p.history_frames
+    rollout_frames = (available // p.stride_frames) * p.stride_frames
+    if rollout_frames <= 0:
+        raise ValueError("cached RAVE window is too short for rollout")
+    clap_future = model.project_clap(batch["clap_a"], rollout_frames)
+    midi_future = model.midi_control(
+        batch["note_a"], batch["velocity_a"], rollout_frames)
+    current = history
+    chunks = []
+    for start in range(0, rollout_frames, p.stride_frames):
+        stop = min(rollout_frames, start + p.horizon_frames)
+        clap_window = clap_future[..., start:stop]
+        midi_window = midi_future[..., start:stop]
+        if clap_window.shape[-1] < p.horizon_frames:
+            pad = p.horizon_frames - clap_window.shape[-1]
+            clap_window = torch.cat(
+                (clap_window, clap_window[..., -1:].expand(-1, -1, pad)), dim=-1)
+            midi_window = torch.cat(
+                (midi_window, midi_window[..., -1:].expand(-1, -1, pad)), dim=-1)
+        prediction = model.predictor(current, clap_window, midi_window).latent
+        consumed = prediction[..., :p.stride_frames]
+        chunks.append(consumed)
+        true = latent[..., p.history_frames + start:
+                      p.history_frames + start + p.stride_frames]
+        mixed = schedule.teacher_forcing * true + (1.0 - schedule.teacher_forcing) * consumed
+        current = torch.cat((current, mixed), dim=-1)[..., -p.history_frames:]
+    rollout = torch.cat(chunks, dim=-1)
+    target_rollout = latent[..., p.history_frames:p.history_frames + rollout_frames]
+    latent_scale, _, _ = statistics.scales(
+        latent.shape[1], latent.device, latent.dtype)
+    rollout_error = F.smooth_l1_loss(
+        (rollout - target_rollout) / latent_scale,
+        torch.zeros_like(rollout))
+    sequence = torch.cat((history, rollout), dim=-1)
+    generated = model.decode_latents(
+        sequence, batch["clap_a"], batch["note_a"], batch["velocity_a"],
+        batch.get("excitation_seed_a"))
+    samples = sequence.shape[-1] * p.samples_per_latent
+    target = batch["audio_a"][..., :samples]
+    future_start = p.history_frames * p.samples_per_latent
+    generated_future = generated[..., future_start:]
+    target_future = target[..., future_start:]
+    audio = F.l1_loss(generated_future, target_future)
+    spectral = (stft(generated_future, target_future)
+                if stft is not None else audio.new_zeros(()))
+    components = dict(latent_objective.components)
+    components.update({"rollout": rollout_error, "predicted_audio": audio,
+                       "predicted_spectral": spectral})
+    total = (latent_objective.total + schedule.rollout * rollout_error
+             + losses.predicted_audio * (audio + config.loss.self_stft * spectral))
+    return PredictiveStageObjective(total, components, generated_future, target_future)
+
+
+def predictive_checkpoint_contract(config: Config, stage: PredictiveStage | str,
+                                   latent_statistics_hash: str | None,
+                                   calibration_hash: str | None,
+                                   rollout_gate_passed: bool) -> dict[str, Any]:
+    if config.predictive is None:
+        raise ValueError("predictive checkpoint contract requires a v3 config")
+    predictive = config.predictive
+    manifest = Path(config.data.manifest)
+    return {
+        "architecture": predictive.architecture,
+        "stage": PredictiveStage(stage).value,
+        "encoder_frozen": PredictiveStage(stage) is not PredictiveStage.RAVE,
+        "rollout_gate_passed": bool(rollout_gate_passed),
+        "latent_statistics_hash": latent_statistics_hash,
+        "calibration_hash": calibration_hash,
+        "history_frames": predictive.history_frames,
+        "horizon_frames": predictive.horizon_frames,
+        "stride_frames": predictive.stride_frames,
+        "config_hash": _artifact_sha256(config.source_path),
+        "manifest_hash": _artifact_sha256(manifest) if manifest.is_file() else None,
+    }
+
+
+def validate_predictive_resume(payload: dict[str, Any],
+                               expected_contract: dict[str, Any]) -> None:
+    if int(payload.get("format", 0)) != 5:
+        raise ValueError("predictive exact resume requires checkpoint format 5")
+    actual = payload.get("predictive_contract")
+    if not isinstance(actual, dict):
+        raise ValueError("checkpoint is missing predictive contract")
+    for key, expected in expected_contract.items():
+        if actual.get(key) != expected:
+            label = key.replace("_", " ")
+            raise ValueError(
+                f"checkpoint {label} mismatch: {actual.get(key)!r} != {expected!r}")
+
+
+def save_predictive_checkpoint(
+    path: Path, model: nn.Module, optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler, contract: dict[str, Any], *,
+    stage_update: int, epoch: int, microbatch_offset: int,
+    scheduler_state: dict[str, Any] | None = None,
+    sampler_state: dict[str, Any] | None = None,
+    discriminator: nn.Module | None = None,
+    discriminator_optimizer: torch.optim.Optimizer | None = None,
+) -> None:
+    """Atomically save every state required for an exact v3 stage resume."""
+    if stage_update < 0 or epoch < 0 or microbatch_offset < 0:
+        raise ValueError("predictive checkpoint counters must be non-negative")
+    local_rng = _rng_state()
+    if dist.is_available() and dist.is_initialized():
+        rng_states: list[Any] = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(rng_states, local_rng)
+        if dist.get_rank() != 0:
+            return
+    else:
+        rng_states = [local_rng]
+    payload: dict[str, Any] = {
+        "format": 5,
+        "predictive_contract": dict(contract),
+        "stage_update": stage_update,
+        "epoch": epoch,
+        "microbatch_offset": microbatch_offset,
+        "world_size": (dist.get_world_size()
+                       if dist.is_available() and dist.is_initialized() else 1),
+        "model": unwrap(model).state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scaler": scaler.state_dict(),
+        "scheduler_state": scheduler_state or {},
+        "sampler_state": sampler_state or {},
+        "rng_by_rank": rng_states,
+    }
+    if discriminator is not None:
+        payload["discriminator"] = unwrap(discriminator).state_dict()
+        payload["discriminator_arch"] = getattr(
+            unwrap(discriminator), "architecture_id", type(unwrap(discriminator)).__name__)
+    if discriminator_optimizer is not None:
+        payload["discriminator_optimizer"] = discriminator_optimizer.state_dict()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(path)
+
+
+def load_predictive_checkpoint(
+    path: str | Path, model: nn.Module, optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler, expected_contract: dict[str, Any],
+    discriminator: nn.Module | None = None,
+    discriminator_optimizer: torch.optim.Optimizer | None = None,
+) -> dict[str, Any]:
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        raise ValueError("predictive checkpoint must be a mapping")
+    validate_predictive_resume(payload, expected_contract)
+    world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+    if int(payload.get("world_size", 1)) != world_size:
+        raise ValueError("predictive exact resume requires the same DDP world size")
+    if discriminator is not None:
+        missing = {"discriminator", "discriminator_optimizer", "discriminator_arch"} - payload.keys()
+        if missing or discriminator_optimizer is None:
+            raise ValueError(f"GAN exact resume is missing state: {sorted(missing)}")
+        expected_arch = getattr(unwrap(discriminator), "architecture_id", None)
+        if payload["discriminator_arch"] != expected_arch:
+            raise ValueError("checkpoint discriminator architecture mismatch")
+    unwrap(model).load_state_dict(payload["model"])
+    optimizer.load_state_dict(payload["optimizer"])
+    scaler.load_state_dict(payload["scaler"])
+    if discriminator is not None and discriminator_optimizer is not None:
+        unwrap(discriminator).load_state_dict(payload["discriminator"])
+        discriminator_optimizer.load_state_dict(payload["discriminator_optimizer"])
+    rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+    rng_states = payload.get("rng_by_rank")
+    return {
+        "stage_update": payload["stage_update"], "epoch": payload["epoch"],
+        "microbatch_offset": payload["microbatch_offset"],
+        "scheduler_state": payload["scheduler_state"],
+        "sampler_state": payload["sampler_state"],
+        "rng": rng_states[rank] if rng_states else payload.get("rng"),
+    }
+
+
+def load_predictive_warm_start(path: str | Path, model: PredictiveMidiBrave,
+                               config: Config, target_stage: PredictiveStage | str) -> None:
+    """Load only model weights from the immediately preceding v3 stage."""
+    target_stage = PredictiveStage(target_stage)
+    expected_source = {
+        PredictiveStage.PREDICTOR: PredictiveStage.RAVE,
+        PredictiveStage.ROLLOUT: PredictiveStage.PREDICTOR,
+        PredictiveStage.GAN: PredictiveStage.ROLLOUT,
+    }.get(target_stage)
+    if expected_source is None:
+        raise ValueError("RAVE stage does not accept a predictive warm start")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict) or int(payload.get("format", 0)) != 5:
+        raise ValueError("predictive warm start requires checkpoint format 5")
+    contract = payload.get("predictive_contract")
+    if not isinstance(contract, dict) or contract.get("stage") != expected_source.value:
+        raise ValueError(
+            f"{target_stage.value} warm start requires a {expected_source.value} checkpoint")
+    expected = predictive_checkpoint_contract(config, target_stage, None, None, False)
+    for key in ("architecture", "history_frames", "horizon_frames", "stride_frames"):
+        if contract.get(key) != expected[key]:
+            raise ValueError(f"warm-start {key.replace('_', ' ')} mismatch")
+    model.load_state_dict(payload["model"])
 
 
 def distributed_setup() -> tuple[int, int, int, torch.device]:
@@ -148,6 +534,9 @@ def load_checkpoint(path: str, model: nn.Module, optimizer: torch.optim.Optimize
                     precision_state: dict[str, Any] | None = None,
                     ) -> tuple[int, int, int, int, int, dict[str, Any] | None]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
+    if int(payload.get("format", 0)) == 5:
+        raise ValueError(
+            "checkpoint format 5 belongs to predictive v3; use --stage instead of --phase")
     same_phase = int(payload["phase"]) == phase
     if same_phase and int(payload.get("format", 0)) != 4:
         raise ValueError("exact resume requires checkpoint format 4; use the old checkpoint only as a warm start")
@@ -542,6 +931,387 @@ def _inject_clap_gradients(output: Any, injections: dict[str, dict[str, Tensor |
             selected.detach().float() - reference.float()).abs().amax()
         diagnostics[f"{name}_clap_effective_weight"] = raw_loss.new_tensor(weight)
     return addition, diagnostics
+
+
+def _artifact_sha256(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def load_predictive_statistics(path: str | Path, config: Config,
+                               ) -> tuple[LatentStatistics, str, str]:
+    if config.predictive is None or config.latent_loss is None:
+        raise ValueError("latent statistics require a v3 config")
+    with np.load(path, allow_pickle=False) as values:
+        required = {"latent_std", "delta_std", "acceleration_std",
+                    "checkpoint_hash", "samples_per_latent"}
+        missing = required - set(values.files)
+        if missing:
+            raise ValueError(f"latent statistics are missing fields: {sorted(missing)}")
+        hop = int(values["samples_per_latent"].item())
+        if hop != config.predictive.samples_per_latent:
+            raise ValueError("latent statistics samples per latent mismatch")
+        arrays = [torch.from_numpy(values[name].astype(np.float32, copy=True))
+                  for name in ("latent_std", "delta_std", "acceleration_std")]
+        checkpoint_hash = str(values["checkpoint_hash"].item())
+    statistics = LatentStatistics(*arrays, floor=config.latent_loss.statistic_floor)
+    statistics.scales(config.predictive.rave_latent_dim, torch.device("cpu"), torch.float32)
+    return statistics, checkpoint_hash, _artifact_sha256(path)
+
+
+def save_predictive_calibration(path: str | Path, weights: dict[str, float],
+                                statistics_hash: str, batches: int) -> str:
+    if batches <= 0 or not weights:
+        raise ValueError("predictive calibration is empty")
+    payload = {"format": 1, "statistics_hash": statistics_hash,
+               "batches": batches, "weights": weights}
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                         encoding="utf-8")
+    temporary.replace(destination)
+    return _artifact_sha256(destination)
+
+
+def load_predictive_calibration(path: str | Path, statistics_hash: str,
+                                ) -> tuple[dict[str, float], str]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if payload.get("format") != 1:
+        raise ValueError("unsupported predictive calibration format")
+    if payload.get("statistics_hash") != statistics_hash:
+        raise ValueError("calibration statistics hash mismatch")
+    weights = payload.get("weights")
+    required = {"future", "delta", "acceleration", "overlap"}
+    if not isinstance(weights, dict) or set(weights) != required:
+        raise ValueError("calibration weights do not match predictive losses")
+    parsed = {name: float(value) for name, value in weights.items()}
+    if any(not math.isfinite(value) or value <= 0 for value in parsed.values()):
+        raise ValueError("calibration weights must be finite and positive")
+    return parsed, _artifact_sha256(path)
+
+
+def calibrate_predictive_latent_weights(
+    model: PredictiveMidiBrave, batches: Any, config: Config,
+    statistics: LatentStatistics, device: torch.device,
+) -> tuple[dict[str, float], int]:
+    if config.predictive is None or config.latent_loss is None:
+        raise ValueError("predictive calibration requires a v3 config")
+    initial = {
+        "future": config.latent_loss.future,
+        "delta": config.latent_loss.delta,
+        "acceleration": config.latent_loss.acceleration,
+        "overlap": config.latent_loss.overlap,
+    }
+    total_initial = sum(initial.values())
+    shares = {name: value / total_initial for name, value in initial.items()}
+    samples: dict[str, list[float]] = {name: [] for name in initial}
+    count = 0
+    for raw_batch in batches:
+        batch = move_batch(raw_batch, device)
+        objective = predictive_latent_objective(model, batch, config, statistics)
+        for name, component in objective.components.items():
+            norm = loss_gradient_norm(component, objective.prediction)
+            samples[name].append(float(norm.detach().cpu()))
+        count += 1
+        if count >= config.predictive.calibration_batches:
+            break
+    if count != config.predictive.calibration_batches:
+        raise ValueError(
+            f"calibration requires {config.predictive.calibration_batches} batches, got {count}")
+    return calibrate_loss_weights(samples, shares, initial, anchor="future"), count
+
+
+def _predictive_stage_steps(config: Config, stage: PredictiveStage) -> int:
+    return {
+        PredictiveStage.RAVE: config.train.rave_steps,
+        PredictiveStage.PREDICTOR: config.train.predictor_steps,
+        PredictiveStage.ROLLOUT: config.train.rollout_steps,
+        PredictiveStage.GAN: config.train.gan_steps,
+    }[stage]
+
+
+def _repeat_batches(loader: DataLoader, dataset: PairDataset,
+                    sampler: DistributedSampler, start_epoch: int = 0):
+    epoch = start_epoch
+    while True:
+        dataset.set_epoch(epoch)
+        sampler.set_epoch(epoch)
+        yield from loader
+        epoch += 1
+
+
+def train_predictive(
+    config_path: str, stage: PredictiveStage | str,
+    max_steps: int | None = None, resume: str | None = None,
+    warm_start: str | None = None, statistics_path: str | None = None,
+    calibration_path: str | None = None, rollout_gate_passed: bool = False,
+) -> None:
+    """Four-stage CUDA trainer for encoder-free predictive deployment."""
+    config = Config.load(config_path)
+    stage = PredictiveStage(stage)
+    if config.predictive is None or config.latent_loss is None:
+        raise ValueError("--stage requires a predictive v3 config")
+    if resume and warm_start:
+        raise ValueError("exact resume and warm start are mutually exclusive")
+    if stage is not PredictiveStage.RAVE and not resume and not warm_start:
+        raise ValueError(f"{stage.value} stage requires --warm-start or --resume")
+    rank, _, world_size, device = distributed_setup()
+    seed_everything(config.seed, rank)
+    torch.backends.cudnn.benchmark = True
+
+    stats: LatentStatistics | None = None
+    cache_checkpoint_hash: str | None = None
+    statistics_hash: str | None = None
+    if stage is not PredictiveStage.RAVE:
+        statistics_path = statistics_path or str(
+            Path(config.data.cache_root) / "rave-statistics.npz")
+        stats, cache_checkpoint_hash, statistics_hash = load_predictive_statistics(
+            statistics_path, config)
+        stats = LatentStatistics(
+            stats.latent_std.to(device), stats.delta_std.to(device),
+            stats.acceleration_std.to(device), stats.floor)
+        if (stage is PredictiveStage.PREDICTOR and warm_start
+                and _artifact_sha256(warm_start) != cache_checkpoint_hash):
+            raise ValueError("RAVE cache checkpoint hash does not match predictor warm start")
+
+    model = PredictiveMidiBrave(
+        config.model, config.predictive, config.data.window_samples,
+        config.data.sample_rate).to(device)
+    if warm_start:
+        load_predictive_warm_start(warm_start, model, config, stage)
+    configure_predictive_stage(model, stage, rollout_gate_passed)
+    if world_size > 1:
+        for value in model.state_dict().values():
+            dist.broadcast(value, src=0)
+
+    load_cache = stage is not PredictiveStage.RAVE
+    dataset = PairDataset(
+        config.data, config.seed, config.predictive, cache_checkpoint_hash,
+        load_rave_cache=load_cache)
+    sampler = DistributedSampler(
+        dataset, num_replicas=world_size, rank=rank, shuffle=True,
+        seed=config.seed, drop_last=True)
+    loader_kwargs: dict[str, Any] = {
+        "batch_size": config.train.batch_per_gpu, "sampler": sampler,
+        "num_workers": config.data.num_workers, "pin_memory": True,
+        "drop_last": True,
+    }
+    if config.data.num_workers:
+        loader_kwargs.update(
+            persistent_workers=True, prefetch_factor=config.data.prefetch_factor)
+    loader = DataLoader(dataset, **loader_kwargs)
+    if not len(loader):
+        raise ValueError("predictive training has no complete batches")
+
+    calibrated_weights: dict[str, float] | None = None
+    calibration_hash: str | None = None
+    if stage is not PredictiveStage.RAVE:
+        assert statistics_hash is not None and stats is not None
+        calibration_path = calibration_path or str(
+            Path(config.data.cache_root) / "predictive-calibration.json")
+        if Path(calibration_path).is_file():
+            calibrated_weights, calibration_hash = load_predictive_calibration(
+                calibration_path, statistics_hash)
+        elif stage is PredictiveStage.PREDICTOR and not resume:
+            if rank == 0:
+                calibrated_weights, batches = calibrate_predictive_latent_weights(
+                    model, _repeat_batches(loader, dataset, sampler), config, stats, device)
+                save_predictive_calibration(
+                    calibration_path, calibrated_weights, statistics_hash, batches)
+            if world_size > 1:
+                dist.barrier()
+            calibrated_weights, calibration_hash = load_predictive_calibration(
+                calibration_path, statistics_hash)
+        else:
+            raise FileNotFoundError(
+                f"missing fixed predictive calibration artifact: {calibration_path}")
+
+    contract = predictive_checkpoint_contract(
+        config, stage, statistics_hash, calibration_hash, rollout_gate_passed)
+    if resume:
+        resume_payload = torch.load(resume, map_location="cpu", weights_only=False)
+        if not isinstance(resume_payload, dict):
+            raise ValueError("predictive checkpoint must be a mapping")
+        # Deliberately validate immutable contracts before optimizer creation.
+        validate_predictive_resume(resume_payload, contract)
+
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not trainable:
+        raise ValueError(f"{stage.value} stage has no trainable parameters")
+    optimizer_kwargs: dict[str, Any] = {"betas": (0.8, 0.99)}
+    if config.train.fused_adamw:
+        optimizer_kwargs["fused"] = True
+    optimizer = torch.optim.AdamW(trainable, lr=config.train.lr, **optimizer_kwargs)
+    scaler = torch.amp.GradScaler(
+        "cuda", init_scale=config.train.grad_scaler_init_scale,
+        growth_interval=config.train.grad_scaler_growth_interval)
+    discriminator: nn.Module | None = None
+    discriminator_optimizer: torch.optim.Optimizer | None = None
+    if stage is PredictiveStage.GAN:
+        discriminator = BraveMultiScaleDiscriminator().to(device)
+        if world_size > 1:
+            discriminator = DDP(discriminator, device_ids=[device.index],
+                                output_device=device.index, broadcast_buffers=False)
+        discriminator_optimizer = torch.optim.AdamW(
+            discriminator.parameters(), lr=config.train.discriminator_lr,
+            betas=(0.8, 0.99))
+
+    stage_update = 0
+    epoch = 0
+    microbatch_offset = 0
+    if resume:
+        restored = load_predictive_checkpoint(
+            resume, model, optimizer, scaler, contract,
+            discriminator, discriminator_optimizer)
+        stage_update = int(restored["stage_update"])
+        epoch = int(restored["epoch"])
+        microbatch_offset = int(restored["microbatch_offset"])
+        dataset.load_sampler_state_dict(restored["sampler_state"])
+        if restored["rng"] is not None:
+            _restore_rng(restored["rng"])
+
+    configured_steps = _predictive_stage_steps(config, stage)
+    target_updates = configured_steps if max_steps is None else min(configured_steps, max_steps)
+    if stage_update > target_updates:
+        raise ValueError("checkpoint exceeds requested predictive update limit")
+    run_dir = Path(config.train.output_dir) / config.train.run_name / stage.value
+    if rank == 0:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(run_dir)
+    else:
+        writer = None
+    stft = MultiResolutionSTFTLoss((2048, 1024, 512, 256, 128)).to(device)
+    clap_objective = None
+    if config.latent_loss.clap_control > 0 and config.data.clap_checkpoint:
+        clap_objective = FrozenClapReconstructionObjective(
+            config.data.clap_checkpoint, config.data.sample_rate, device,
+            maximum_gradient_norm=0.0)
+
+    optimizer.zero_grad(set_to_none=True)
+    accumulated = 0
+    while stage_update < target_updates:
+        dataset.set_epoch(epoch)
+        sampler.set_epoch(epoch)
+        for batch_index, raw_batch in enumerate(loader):
+            if batch_index < microbatch_offset:
+                continue
+            batch = move_batch(raw_batch, device)
+            lr = cosine_lr(
+                stage_update, target_updates, config.train.warmup_steps,
+                config.train.lr, config.train.min_lr)
+            for group in optimizer.param_groups:
+                group["lr"] = lr
+            with torch.autocast("cuda", dtype=torch.float16):
+                objective = predictive_stage_objective(
+                    unwrap(model), batch, config, stage, stage_update, stats,
+                    calibrated_weights, stft)
+                total = objective.total
+                if discriminator is not None:
+                    assert objective.generated_audio is not None
+                    discriminator.requires_grad_(False)
+                    fake_outputs = discriminator(objective.generated_audio)
+                    with torch.no_grad():
+                        real_outputs = discriminator(objective.target_audio)
+                    schedule = predictive_loss_schedule(config, stage, stage_update)
+                    adversarial = generator_adversarial(fake_outputs)
+                    matching = feature_matching(real_outputs, fake_outputs)
+                    total = (total + schedule.gan_adversarial * adversarial
+                             + schedule.gan_feature_matching * matching)
+                    discriminator.requires_grad_(True)
+                else:
+                    adversarial = matching = total.new_zeros(())
+
+            clap_loss = total.new_zeros(())
+            if clap_objective is not None and objective.generated_audio is not None:
+                generated = objective.generated_audio
+                target = objective.target_audio
+                assert target is not None
+                valid = torch.full(
+                    (generated.shape[0],), generated.shape[-1], device=device,
+                    dtype=torch.long)
+                clap_result = clap_objective.waveform_gradients(generated, target, valid)
+                reference_gradient, = torch.autograd.grad(
+                    total, generated, retain_graph=True)
+                auxiliary = (clap_result.gradients
+                             * config.latent_loss.clap_control / generated.shape[0])
+                auxiliary = cap_auxiliary_gradient(
+                    auxiliary, reference_gradient,
+                    config.predictive.clap_gradient_fraction_max)
+                surrogate = (generated.float() * auxiliary.float()).sum()
+                clap_loss = clap_result.losses.mean()
+                total = (total + surrogate - surrogate.detach()
+                         + (config.latent_loss.clap_control * clap_loss).detach())
+
+            scaler.scale(total / config.train.grad_accum).backward()
+            accumulated += 1
+            microbatch_offset = batch_index + 1
+            if accumulated < config.train.grad_accum:
+                continue
+            scaler.unscale_(optimizer)
+            if world_size > 1:
+                for parameter in trainable:
+                    if parameter.grad is not None:
+                        dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)
+                        parameter.grad.div_(world_size)
+            torch.nn.utils.clip_grad_norm_(trainable, config.train.grad_clip)
+            previous_scale = scaler.get_scale()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            accumulated = 0
+            step_applied = scaler.get_scale() >= previous_scale
+            if not step_applied:
+                continue
+
+            if discriminator is not None and discriminator_optimizer is not None:
+                assert objective.generated_audio is not None and objective.target_audio is not None
+                discriminator_optimizer.zero_grad(set_to_none=True)
+                with torch.autocast("cuda", dtype=torch.float16):
+                    real_outputs = discriminator(objective.target_audio.detach())
+                    fake_outputs = discriminator(objective.generated_audio.detach())
+                    discriminator_loss = discriminator_hinge(real_outputs, fake_outputs)
+                discriminator_loss.backward()
+                torch.nn.utils.clip_grad_norm_(discriminator.parameters(), config.train.grad_clip)
+                discriminator_optimizer.step()
+            else:
+                discriminator_loss = total.new_zeros(())
+
+            stage_update += 1
+            dataset.set_training_update(stage_update)
+            if writer is not None and stage_update % config.train.log_every == 0:
+                writer.add_scalar("loss/total", float(total.detach()), stage_update)
+                writer.add_scalar("loss/clap_control", float(clap_loss), stage_update)
+                writer.add_scalar("loss/adversarial", float(adversarial.detach()), stage_update)
+                writer.add_scalar("loss/feature_matching", float(matching.detach()), stage_update)
+                writer.add_scalar("loss/discriminator", float(discriminator_loss.detach()), stage_update)
+                writer.add_scalar("train/lr", lr, stage_update)
+                for name, value in objective.components.items():
+                    writer.add_scalar(f"loss/{name}", float(value.detach()), stage_update)
+            should_checkpoint = (
+                stage_update == target_updates
+                or (config.train.checkpoint_every > 0
+                    and stage_update % config.train.checkpoint_every == 0))
+            if should_checkpoint:
+                save_predictive_checkpoint(
+                    run_dir / f"update-{stage_update:08d}.pt", model, optimizer,
+                    scaler, contract, stage_update=stage_update, epoch=epoch,
+                    microbatch_offset=microbatch_offset,
+                    scheduler_state={"lr": lr, "stage_update": stage_update},
+                    sampler_state=dataset.sampler_state_dict(),
+                    discriminator=discriminator,
+                    discriminator_optimizer=discriminator_optimizer)
+            if stage_update >= target_updates:
+                break
+        if stage_update >= target_updates:
+            break
+        epoch += 1
+        microbatch_offset = 0
+    if writer is not None:
+        writer.close()
+    if world_size > 1:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 def train(config_path: str, phase: int, max_steps: int | None = None,
@@ -1084,18 +1854,33 @@ def train(config_path: str, phase: int, max_steps: int | None = None,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MidiBrave two-phase DDP trainer")
+    parser = argparse.ArgumentParser(description="MidiBrave v2/v3 DDP trainer")
     parser.add_argument("--config", required=True)
-    parser.add_argument("--phase", type=int, choices=(1, 2), required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--phase", type=int, choices=(1, 2))
+    mode.add_argument("--stage", choices=tuple(stage.value for stage in PredictiveStage))
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--max-effective-updates", type=int)
     parser.add_argument("--resume")
+    parser.add_argument("--warm-start")
+    parser.add_argument("--latent-statistics")
+    parser.add_argument("--calibration")
+    parser.add_argument("--rollout-gate-passed", action="store_true")
     args = parser.parse_args()
     if args.max_steps is not None and args.max_effective_updates is not None:
         parser.error("use only one of --max-steps and --max-effective-updates")
     limit = (args.max_effective_updates
              if args.max_effective_updates is not None else args.max_steps)
-    train(args.config, args.phase, limit, args.resume)
+    if args.stage:
+        train_predictive(
+            args.config, args.stage, limit, args.resume, args.warm_start,
+            args.latent_statistics, args.calibration,
+            args.rollout_gate_passed)
+    else:
+        if args.warm_start or args.latent_statistics or args.calibration or args.rollout_gate_passed:
+            parser.error("predictive stage options cannot be used with --phase")
+        assert args.phase is not None
+        train(args.config, args.phase, limit, args.resume)
 
 
 if __name__ == "__main__":
