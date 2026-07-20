@@ -89,6 +89,54 @@ midibrave-train --config configs/smoke.yaml --phase 2 --max-effective-updates 3 
 
 GPU work on Octopus must run through SLURM and Docker. See `scripts/`.
 
+## Predictive RAVE + CLAP runtime (v3)
+
+The v3 path restores a causal RAVE encoder during training, concatenates its
+16-D latent with user-controlled 256-D CLAP and 32-D MIDI controls, and learns
+an eight-frame continuation head. Each runtime call consumes four frames
+(`4 * 128 = 512` samples) while retaining a 16-frame history. Production export
+contains no RAVE encoder and no CLAP audio encoder: it starts from a validated
+training-data seed bank and continues the RAVE latent sequence directly.
+
+Run the stages in order. Replace checkpoint names and `<RAVE_SHA256>` with the
+actual archived artifact and its SHA-256 digest:
+
+```bash
+midibrave fixture --root fixtures/generated --samples 65536
+midibrave preprocess --config configs/v3/smoke.yaml --stage all --device cuda \
+  --clap-checkpoint /data/model_weights/laion-clap/music_audioset_epoch_15_esc_90.14.pt
+
+midibrave-train --config configs/v3/smoke.yaml --stage rave
+midibrave cache-rave --config configs/v3/smoke.yaml \
+  --checkpoint artifacts/predictive-smoke/predictive_rave_v1_smoke/rave/update-00000004.pt
+midibrave build-seed-bank --config configs/v3/smoke.yaml \
+  --checkpoint-hash <RAVE_SHA256> --output artifacts/predictive-smoke/seed-bank
+
+midibrave-train --config configs/v3/smoke.yaml --stage predictor \
+  --warm-start artifacts/predictive-smoke/predictive_rave_v1_smoke/rave/update-00000004.pt
+midibrave-train --config configs/v3/smoke.yaml --stage rollout \
+  --warm-start artifacts/predictive-smoke/predictive_rave_v1_smoke/predictor/update-00000004.pt
+midibrave-train --config configs/v3/smoke.yaml --stage gan \
+  --warm-start artifacts/predictive-smoke/predictive_rave_v1_smoke/rollout/update-00000004.pt \
+  --rollout-gate-passed
+
+midibrave-evaluate --config configs/v3/smoke.yaml \
+  --checkpoint artifacts/predictive-smoke/predictive_rave_v1_smoke/rollout/update-00000004.pt \
+  --output artifacts/predictive-smoke/evaluation --pairs 2
+midibrave export-predictive --config configs/v3/smoke.yaml \
+  --checkpoint artifacts/predictive-smoke/predictive_rave_v1_smoke/gan/update-00000003.pt \
+  --seed-bank artifacts/predictive-smoke/seed-bank \
+  --output artifacts/predictive-smoke/runtime.pt
+```
+
+The predictor stage automatically calibrates fixed loss weights from the
+configured calibration batches. Latent, delta, acceleration, and overlap losses
+must use the future of the same recording; cross-recording latent MSE is invalid
+because phase and texture trajectories are not aligned. Rollout evaluation
+reports 1/8/32/128-step quality metrics, but gates only numerical safety,
+variance collapse/explosion, the 512-sample stride, and underruns until measured
+quality baselines are established.
+
 Build the image and cache frozen preprocessing models under `/data/model_weights`:
 
 ```bash

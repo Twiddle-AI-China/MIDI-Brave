@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -15,9 +17,252 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, Subset
 
 from .config import Config
-from .data import PairDataset, load_manifest, midi_to_hz
+from .data import (PairDataset, configured_roots, load_audio, load_manifest,
+                   midi_to_hz, record_audio_path)
 from .losses import MultiResolutionSTFTLoss, rms_db
 from .model import MidiBrave
+from .predictive_losses import LatentStatistics
+from .predictive_model import PredictiveMidiBrave
+
+
+PREDICTIVE_HORIZONS = (1, 8, 32, 128)
+
+
+def _finite_scalar(value: Tensor) -> float | None:
+    item = float(value.detach().float().cpu())
+    return item if math.isfinite(item) else None
+
+
+def _dominant_frequency(audio: Tensor, sample_rate: int) -> Tensor:
+    value = audio.float().squeeze(1)
+    spectrum = torch.fft.rfft(value, dim=-1).abs()
+    if spectrum.shape[-1] > 1:
+        spectrum[..., 0] = 0
+    index = spectrum.argmax(dim=-1)
+    return index.float() * sample_rate / max(1, value.shape[-1])
+
+
+def predictive_rollout_report(
+    predicted_latent: Tensor, reference_latent: Tensor,
+    predicted_audio: Tensor, reference_audio: Tensor,
+    statistics: LatentStatistics, stride_frames: int,
+    samples_per_latent: int, elapsed_seconds: float,
+    sample_rate: int = 44100,
+    clap_embeddings: dict[int, tuple[Tensor, Tensor]] | None = None,
+    runtime_underruns: int = 0,
+) -> dict[str, Any]:
+    """Aggregate fixed-horizon rollout metrics and safety-only gates."""
+    if predicted_latent.shape != reference_latent.shape or predicted_latent.ndim != 3:
+        raise ValueError("rollout latents must share [batch, channels, frames]")
+    if predicted_audio.shape != reference_audio.shape or predicted_audio.ndim != 3:
+        raise ValueError("rollout audio must share [batch, 1, samples]")
+    if stride_frames <= 0 or samples_per_latent <= 0 or elapsed_seconds < 0:
+        raise ValueError("invalid rollout timing contract")
+    required_frames = max(PREDICTIVE_HORIZONS) * stride_frames
+    required_samples = required_frames * samples_per_latent
+    if (predicted_latent.shape[-1] < required_frames
+            or predicted_audio.shape[-1] < required_samples):
+        raise ValueError("rollout does not cover the 128-step evaluation horizon")
+    latent_scale, delta_scale, _ = statistics.scales(
+        predicted_latent.shape[1], predicted_latent.device, predicted_latent.dtype)
+    horizons: dict[str, dict[str, float | int | None]] = {}
+    all_variance_ratios = []
+    total_non_finite = 0
+    for steps in PREDICTIVE_HORIZONS:
+        frames = steps * stride_frames
+        samples = frames * samples_per_latent
+        predicted_z = predicted_latent[..., :frames]
+        reference_z = reference_latent[..., :frames]
+        predicted_wave = predicted_audio[..., :samples]
+        reference_wave = reference_audio[..., :samples]
+        non_finite = int((~torch.isfinite(predicted_z)).sum().item()
+                         + (~torch.isfinite(predicted_wave)).sum().item())
+        total_non_finite = max(total_non_finite, non_finite)
+        safe_z = torch.nan_to_num(predicted_z)
+        safe_wave = torch.nan_to_num(predicted_wave)
+        latent_error = ((safe_z - reference_z) / latent_scale).square().mean().sqrt()
+        if frames > 1:
+            delta_error = ((safe_z.diff(dim=-1) - reference_z.diff(dim=-1))
+                           / delta_scale).square().mean().sqrt()
+        else:
+            delta_error = latent_error.new_zeros(())
+        predicted_variance = safe_z.var(dim=-1, unbiased=False).mean()
+        reference_variance = reference_z.var(dim=-1, unbiased=False).mean().clamp_min(1e-8)
+        variance_ratio = predicted_variance / reference_variance
+        all_variance_ratios.append(float(variance_ratio.detach().cpu()))
+        predicted_spectrum = torch.fft.rfft(safe_wave.float(), dim=-1).abs().clamp_min(1e-7)
+        reference_spectrum = torch.fft.rfft(reference_wave.float(), dim=-1).abs().clamp_min(1e-7)
+        stft = (predicted_spectrum.log() - reference_spectrum.log()).abs().mean()
+        predicted_f0 = _dominant_frequency(safe_wave, sample_rate).clamp_min(1e-6)
+        reference_f0 = _dominant_frequency(reference_wave, sample_rate).clamp_min(1e-6)
+        cents = (1200.0 * torch.log2(predicted_f0 / reference_f0)).abs().mean()
+        rms_error = (rms_db(safe_wave) - rms_db(reference_wave)).abs().mean()
+        clap_cosine = None
+        if clap_embeddings is not None and steps in clap_embeddings:
+            predicted_clap, reference_clap = clap_embeddings[steps]
+            clap_cosine = _finite_scalar(F.cosine_similarity(
+                predicted_clap.float(), reference_clap.float(), dim=-1).mean())
+        audio_seconds = samples / sample_rate
+        proportional_elapsed = elapsed_seconds * steps / max(PREDICTIVE_HORIZONS)
+        horizons[str(steps)] = {
+            "normalized_latent_error": _finite_scalar(latent_error),
+            "normalized_delta_error": _finite_scalar(delta_error),
+            "variance_ratio": _finite_scalar(variance_ratio),
+            "stft": _finite_scalar(stft),
+            "f0_cents": _finite_scalar(cents),
+            "rms_error_db": _finite_scalar(rms_error),
+            "clap_cosine": clap_cosine,
+            "non_finite_count": non_finite,
+            "realtime_factor": proportional_elapsed / max(audio_seconds, 1e-12),
+        }
+    failures = []
+    if total_non_finite:
+        failures.append("non_finite")
+    if any(not 0.25 <= value <= 4.0 for value in all_variance_ratios):
+        failures.append("variance_ratio")
+    if stride_frames != 4:
+        failures.append("control_stride")
+    if runtime_underruns:
+        failures.append("runtime_underrun")
+    return {
+        "schema": 1,
+        "control_stride_frames": stride_frames,
+        "control_stride_samples": stride_frames * samples_per_latent,
+        "horizons": horizons,
+        "gate": {
+            "passed": not failures,
+            "failures": failures,
+            "variance_ratio_range": [0.25, 4.0],
+            "non_finite_count": total_non_finite,
+            "runtime_underruns": runtime_underruns,
+        },
+    }
+
+
+@torch.no_grad()
+def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str,
+                        sequences: int = 8, device_name: str = "cuda") -> dict[str, Any]:
+    """Evaluate true cached continuations for 1/8/32/128 rolling steps."""
+    from .trainer import load_predictive_statistics
+
+    config = Config.load(config_path)
+    if config.predictive is None:
+        raise ValueError("predictive evaluation requires a v3 config")
+    if sequences <= 0:
+        raise ValueError("predictive evaluation sequence count must be positive")
+    device = torch.device(device_name)
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict) or int(payload.get("format", 0)) != 5:
+        raise ValueError("predictive evaluation requires checkpoint format 5")
+    contract = payload.get("predictive_contract")
+    if not isinstance(contract, dict) or contract.get("stage") not in {"rollout", "gan"}:
+        raise ValueError("predictive evaluation requires a rollout or GAN checkpoint")
+    statistics, rave_checkpoint_hash, statistics_hash = load_predictive_statistics(
+        Path(config.data.cache_root) / "rave-statistics.npz", config)
+    if contract.get("latent_statistics_hash") != statistics_hash:
+        raise ValueError("evaluation statistics do not match the checkpoint")
+    statistics = LatentStatistics(
+        statistics.latent_std.to(device), statistics.delta_std.to(device),
+        statistics.acceleration_std.to(device), statistics.floor)
+    model = PredictiveMidiBrave(
+        config.model, config.predictive, config.data.window_samples,
+        config.data.sample_rate).to(device)
+    model.load_state_dict(payload["model"])
+    model.eval()
+    records = load_manifest(config.data.manifest)
+    roots = configured_roots(config.data, config.data.manifest)
+    p = config.predictive
+    rollout_frames = max(PREDICTIVE_HORIZONS) * p.stride_frames
+    total_frames = p.history_frames + rollout_frames
+    reports = []
+    seed_rows = []
+    for record in records:
+        cache_path = Path(config.data.cache_root) / "rave" / f"{record.cache_id}.npz"
+        if not cache_path.is_file():
+            continue
+        with np.load(cache_path, allow_pickle=False) as cached:
+            latent = cached["latent"].astype(np.float32, copy=True)
+            if (str(cached["checkpoint_hash"].item()) != rave_checkpoint_hash
+                    or int(cached["hop"].item()) != p.samples_per_latent
+                    or str(cached["sample_id"].item()) != record.sample_id
+                    or latent.shape[0] != p.rave_latent_dim
+                    or latent.shape[-1] < total_frames):
+                continue
+        audio = load_audio(record_audio_path(record, roots), config.data.sample_rate)
+        required_samples = total_frames * p.samples_per_latent
+        if len(audio) < required_samples:
+            continue
+        clap = np.load(
+            Path(config.data.cache_root) / "clap" / f"{record.cache_id}.npy").astype(np.float32)
+        history = torch.from_numpy(latent[:, :p.history_frames]).unsqueeze(0).to(device)
+        clap_tensor = torch.from_numpy(clap).unsqueeze(0).to(device)
+        note = torch.tensor([record.midi_note], device=device)
+        velocity = torch.tensor([record.velocity], device=device, dtype=torch.float32)
+        chunks = []
+        current = history
+        started = time.perf_counter()
+        for _ in range(max(PREDICTIVE_HORIZONS)):
+            prediction = model.predict_future(current, clap_tensor, note, velocity).latent
+            consumed = prediction[..., :p.stride_frames]
+            chunks.append(consumed)
+            current = torch.cat((current, consumed), dim=-1)[..., -p.history_frames:]
+        predicted_latent = torch.cat(chunks, dim=-1)
+        decoded = model.decode_latents(
+            torch.cat((history, predicted_latent), dim=-1),
+            clap_tensor, note, velocity)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elapsed = time.perf_counter() - started
+        future_start = p.history_frames * p.samples_per_latent
+        predicted_audio = decoded[..., future_start:]
+        reference_audio = torch.from_numpy(
+            audio[future_start:required_samples].copy()).view(1, 1, -1).to(device)
+        reference_latent = torch.from_numpy(
+            latent[:, p.history_frames:total_frames]).unsqueeze(0).to(device)
+        report = predictive_rollout_report(
+            predicted_latent, reference_latent, predicted_audio, reference_audio,
+            statistics, p.stride_frames, p.samples_per_latent, elapsed,
+            config.data.sample_rate)
+        reports.append(report)
+        seed_rows.append({"sample_id": record.sample_id, "seed_distance": 0.0})
+        if len(reports) >= sequences:
+            break
+    if not reports:
+        raise ValueError("no cached render is long enough for a 128-step rollout")
+    horizons: dict[str, dict[str, float | int | None]] = {}
+    metric_names = tuple(reports[0]["horizons"]["1"])
+    for horizon in (str(value) for value in PREDICTIVE_HORIZONS):
+        aggregate: dict[str, float | int | None] = {}
+        for name in metric_names:
+            values = [report["horizons"][horizon][name] for report in reports]
+            finite = [float(value) for value in values
+                      if value is not None and math.isfinite(float(value))]
+            aggregate[name] = (sum(finite) / len(finite) if finite else None)
+        horizons[horizon] = aggregate
+    failures = sorted({failure for report in reports for failure in report["gate"]["failures"]})
+    output = {
+        "schema": 1, "config": str(Path(config_path).resolve()),
+        "checkpoint": str(Path(checkpoint_path).resolve()),
+        "checkpoint_sha256": hashlib.sha256(Path(checkpoint_path).read_bytes()).hexdigest(),
+        "latent_statistics_sha256": statistics_hash,
+        "calibration_sha256": contract.get("calibration_hash"),
+        "evaluated_sequences": len(reports), "seeds": seed_rows,
+        "control_stride_frames": p.stride_frames,
+        "control_stride_samples": p.stride_frames * p.samples_per_latent,
+        "horizons": horizons,
+        "gate": {"passed": not failures, "failures": failures,
+                 "variance_ratio_range": [0.25, 4.0]},
+        "notes": {
+            "quality_thresholds": "reported only; establish thresholds from measured baselines",
+            "clap_cosine": "null unless a frozen evaluation CLAP encoder is supplied",
+        },
+    }
+    destination = Path(output_path)
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "predictive-metrics.json").write_text(
+        json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(output, sort_keys=True))
+    return output
 
 
 class MetricStore:
@@ -517,9 +762,15 @@ def main() -> None:
     parser.add_argument("--examples", type=int, default=24)
     parser.add_argument("--grid-presets", type=int, default=6)
     parser.add_argument("--velocity-pairs", type=int, default=64)
+    parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
-    evaluate(args.config, args.checkpoint, args.output, args.pairs,
-             args.batch_size, args.examples, args.grid_presets, args.velocity_pairs)
+    config = Config.load(args.config)
+    if config.is_predictive:
+        evaluate_predictive(
+            args.config, args.checkpoint, args.output, args.pairs, args.device)
+    else:
+        evaluate(args.config, args.checkpoint, args.output, args.pairs,
+                 args.batch_size, args.examples, args.grid_presets, args.velocity_pairs)
 
 
 if __name__ == "__main__":

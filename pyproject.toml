@@ -19,6 +19,7 @@ test = ["pytest==8.3.5"]
 [project.scripts]
 midibrave = "midibrave.cli:main"
 midibrave-train = "midibrave.trainer:main"
+midibrave-evaluate = "midibrave.evaluate:main"
 
 [build-system]
 requires = ["hatchling"]
