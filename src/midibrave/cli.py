@@ -13,6 +13,8 @@ from .data import (SampleRecord, assign_splits, cache_audio_regions,
                    cache_clap_embeddings, cache_pitch_features, finalize_cache_manifest,
                    load_manifest, prepare_serum_manifests, validate_manifest,
                    write_manifest)
+from .latent_cache import cache_rave_latents_from_checkpoint, load_latent_window
+from .seed_bank import SeedBank
 from .selection import run_selection
 
 
@@ -80,6 +82,44 @@ def create_fixture(root: str | Path, sample_rate: int = 44100,
     return manifest
 
 
+def build_seed_bank_from_cache(config: Config, checkpoint_hash: str,
+                               output: str | Path) -> dict[str, object]:
+    if config.predictive is None:
+        raise ValueError("seed bank generation requires a predictive config")
+    records = load_manifest(config.data.manifest)
+    cache_root = Path(config.data.cache_root)
+    latents = []
+    clap = []
+    notes = []
+    velocities = []
+    sample_ids = []
+    for record in records:
+        latent = load_latent_window(
+            cache_root / "rave" / f"{record.cache_id}.npz",
+            record.sample_id, 0, config.predictive.history_frames,
+            config.predictive.rave_latent_dim,
+            config.predictive.samples_per_latent, checkpoint_hash)
+        clap_value = np.load(cache_root / "clap" / f"{record.cache_id}.npy").astype(np.float32)
+        latents.append(latent)
+        clap.append(clap_value)
+        notes.append(record.midi_note)
+        velocities.append(record.velocity)
+        sample_ids.append(record.sample_id)
+    metadata = {
+        "schema": 1,
+        "latent_dim": config.predictive.rave_latent_dim,
+        "history_frames": config.predictive.history_frames,
+        "samples_per_latent": config.predictive.samples_per_latent,
+        "checkpoint_hash": checkpoint_hash,
+        "architecture": config.predictive.architecture,
+    }
+    bank = SeedBank(np.stack(latents), np.stack(clap), np.asarray(notes),
+                    np.asarray(velocities), sample_ids, metadata)
+    bank.save(output)
+    return {"seeds": len(sample_ids), "output": str(Path(output).resolve()),
+            "metadata": metadata}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="midibrave")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -115,6 +155,14 @@ def main() -> None:
     select.add_argument("--stage", choices=("inventory", "clap", "assign", "all"),
                         default="all")
     select.add_argument("--device", default="cuda")
+    seed_bank = subparsers.add_parser("build-seed-bank")
+    seed_bank.add_argument("--config", required=True)
+    seed_bank.add_argument("--checkpoint-hash", required=True)
+    seed_bank.add_argument("--output", required=True)
+    rave_cache = subparsers.add_parser("cache-rave")
+    rave_cache.add_argument("--config", required=True)
+    rave_cache.add_argument("--checkpoint", required=True)
+    rave_cache.add_argument("--device", default="cuda")
     args = parser.parse_args()
     if args.command == "fixture":
         print(json.dumps({"manifest": str(create_fixture(args.root, samples=args.samples))}))
@@ -137,6 +185,14 @@ def main() -> None:
     elif args.command == "select-timbres":
         print(json.dumps(run_selection(args.config, args.stage, args.device),
                          ensure_ascii=False, sort_keys=True))
+    elif args.command == "build-seed-bank":
+        print(json.dumps(build_seed_bank_from_cache(
+            Config.load(args.config), args.checkpoint_hash, args.output),
+            ensure_ascii=False, sort_keys=True))
+    elif args.command == "cache-rave":
+        print(json.dumps(cache_rave_latents_from_checkpoint(
+            Config.load(args.config), args.checkpoint, args.device),
+            ensure_ascii=False, sort_keys=True))
     else:
         config = Config.load(args.config)
         result = {}

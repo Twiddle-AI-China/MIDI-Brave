@@ -14,7 +14,8 @@ import torch
 from scipy.signal import resample_poly
 from torch.utils.data import Dataset
 
-from .config import DataConfig
+from .config import DataConfig, PredictiveConfig
+from .latent_cache import load_latent_window
 
 
 REQUIRED_FIELDS = {
@@ -820,7 +821,9 @@ def finalize_cache_manifest(manifest: str | Path, cfg: DataConfig,
 class PairDataset(Dataset[dict[str, Any]]):
     PAIR_SEQUENCE = ("pitch", "pitch", "velocity", "pitch_velocity")
 
-    def __init__(self, cfg: DataConfig, seed: int) -> None:
+    def __init__(self, cfg: DataConfig, seed: int,
+                 predictive: PredictiveConfig | None = None,
+                 rave_checkpoint_hash: str | None = None) -> None:
         self.cfg = cfg
         self.seed = seed
         self.epoch = 0
@@ -850,6 +853,11 @@ class PairDataset(Dataset[dict[str, Any]]):
         self.velocity_reference_rms_db: dict[str, float] = {}
         self.difficulty_ema: dict[str, float] = {group_id: 0.0 for group_id in self.group_ids}
         self.training_update = 0
+        self.predictive = predictive
+        self.rave_checkpoint_hash = rave_checkpoint_hash
+        if (predictive is not None and predictive.require_rave_cache
+                and not rave_checkpoint_hash):
+            raise ValueError("predictive RAVE cache requires a checkpoint hash")
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
@@ -980,6 +988,19 @@ class PairDataset(Dataset[dict[str, Any]]):
             raise FileNotFoundError(f"missing CLAP cache: {path}")
         return torch.from_numpy(np.load(path).astype(np.float32))
 
+    def _rave(self, record: SampleRecord, offset_samples: int) -> torch.Tensor:
+        if self.predictive is None or not self.predictive.require_rave_cache:
+            raise RuntimeError("RAVE cache was requested without predictive cache mode")
+        frames = self.cfg.window_samples // self.predictive.samples_per_latent
+        path = self.cache_root / "rave" / f"{record.cache_id}.npz"
+        latent = load_latent_window(
+            path, record.sample_id, offset_samples, frames,
+            self.predictive.rave_latent_dim,
+            self.predictive.samples_per_latent,
+            self.rave_checkpoint_hash or "",
+        )
+        return torch.from_numpy(latent)
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         rng = random.Random(self.seed + self.epoch * 1_000_003 + index)
         requested_mode = self.PAIR_SEQUENCE[index % len(self.PAIR_SEQUENCE)]
@@ -998,7 +1019,7 @@ class PairDataset(Dataset[dict[str, Any]]):
             a, b = b, a
         window_a = self._window(a, rng)
         window_b = self._window(b, rng)
-        return {
+        result = {
             "audio_a": window_a["audio"],
             "audio_b": window_b["audio"],
             "clap_a": self._clap(a),
@@ -1038,6 +1059,10 @@ class PairDataset(Dataset[dict[str, Any]]):
             "transpose_semitones_b": torch.tensor(0 if b.transpose_semitones is None else b.transpose_semitones,
                                                     dtype=torch.long),
         }
+        if self.predictive is not None and self.predictive.require_rave_cache:
+            result["rave_a"] = self._rave(a, int(window_a["crop_offset"].item()))
+            result["rave_b"] = self._rave(b, int(window_b["crop_offset"].item()))
+        return result
 
 
 def midi_to_hz(note: torch.Tensor, a4: float = 440.0) -> torch.Tensor:
