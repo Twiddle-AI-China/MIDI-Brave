@@ -178,6 +178,42 @@ class TrainConfig:
 
 
 @dataclass(frozen=True)
+class PredictiveConfig:
+    architecture: str
+    rave_latent_dim: int
+    clap_control_dim: int
+    samples_per_latent: int
+    history_frames: int
+    horizon_frames: int
+    stride_frames: int
+    predictor_hidden_dim: int = 128
+    require_rave_cache: bool = False
+    kl_warmup_updates: int = 10000
+    pitch_adversary_warmup_updates: int = 5000
+    rollout_warmup_updates: int = 5000
+    teacher_forcing_floor: float = 0.25
+    calibration_batches: int = 128
+    clap_gradient_fraction_max: float = 0.15
+
+
+@dataclass(frozen=True)
+class LatentLossConfig:
+    future: float = 1.0
+    delta: float = 0.5
+    acceleration: float = 0.05
+    rollout: float = 0.5
+    overlap: float = 0.1
+    predicted_audio: float = 0.25
+    clap_control: float = 0.5
+    rave_kl: float = 0.0001
+    rave_pitch_adversary: float = 0.02
+    gan_adversarial: float = 0.05
+    gan_feature_matching: float = 0.5
+    horizon_discount: float = 0.95
+    statistic_floor: float = 0.0001
+
+
+@dataclass(frozen=True)
 class Config:
     seed: int
     data: DataConfig
@@ -185,6 +221,12 @@ class Config:
     loss: LossConfig
     train: TrainConfig
     source_path: str
+    predictive: PredictiveConfig | None = None
+    latent_loss: LatentLossConfig | None = None
+
+    @property
+    def is_predictive(self) -> bool:
+        return self.predictive is not None
 
     @classmethod
     def load(cls, path: str | Path) -> "Config":
@@ -192,11 +234,42 @@ class Config:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("config root must be a mapping")
+        predictive_raw = raw.get("predictive")
+        latent_loss_raw = raw.get("latent_loss")
+        if (predictive_raw is None) != (latent_loss_raw is None):
+            raise ValueError("predictive and latent_loss sections must be configured together")
+        predictive = (PredictiveConfig(**predictive_raw)
+                      if isinstance(predictive_raw, dict) else None)
+        latent_loss = (LatentLossConfig(**latent_loss_raw)
+                       if isinstance(latent_loss_raw, dict) else None)
+        data = DataConfig(**_section(raw, "data"))
+        model = ModelConfig(**_section(raw, "model"))
+        if predictive is not None:
+            if predictive.architecture != "predictive_rave_v1":
+                raise ValueError(f"unsupported predictive architecture: {predictive.architecture}")
+            if not 0 < predictive.stride_frames <= predictive.horizon_frames:
+                raise ValueError("stride_frames must satisfy 0 < stride_frames <= horizon_frames")
+            if predictive.history_frames <= 0 or predictive.horizon_frames <= 0:
+                raise ValueError("history_frames and horizon_frames must be positive")
+            decoder_hop = model.pqmf_bands
+            for ratio in model.ratios:
+                decoder_hop *= ratio
+            if predictive.samples_per_latent != decoder_hop:
+                raise ValueError(
+                    f"samples_per_latent must equal decoder hop {decoder_hop}")
+            if data.window_samples % predictive.samples_per_latent:
+                raise ValueError("window_samples must be divisible by samples_per_latent")
+            if predictive.clap_control_dim != model.timbre_dim:
+                raise ValueError("clap_control_dim must equal model.timbre_dim")
+            if model.midi_dim != 32:
+                raise ValueError("predictive_rave_v1 requires 32-D MIDI")
         return cls(
             seed=int(raw["seed"]),
-            data=DataConfig(**_section(raw, "data")),
-            model=ModelConfig(**_section(raw, "model")),
+            data=data,
+            model=model,
             loss=LossConfig(**_section(raw, "loss")),
             train=TrainConfig(**_section(raw, "train")),
             source_path=str(path),
+            predictive=predictive,
+            latent_loss=latent_loss,
         )
