@@ -326,11 +326,15 @@ class FusionProjection(nn.Module):
         )
 
     def forward(self, z_timbre: Tensor, z_midi: Tensor,
-                static_condition: bool = False) -> Tensor:
+                static_condition: bool = False,
+                z_rave: Tensor | None = None) -> Tensor:
+        conditions = ((z_timbre, z_midi) if z_rave is None
+                      else (z_rave, z_timbre, z_midi))
         if static_condition:
-            fused = self.net(torch.cat((z_timbre[..., :1], z_midi[..., :1]), dim=1))
+            fused = self.net(torch.cat(
+                tuple(condition[..., :1] for condition in conditions), dim=1))
             return fused.expand(-1, -1, z_midi.shape[-1])
-        return self.net(torch.cat((z_timbre, z_midi), dim=1))
+        return self.net(torch.cat(conditions, dim=1))
 
 
 class ConditionalOutputGain(nn.Module):
@@ -364,14 +368,18 @@ class ConditionalOutputGain(nn.Module):
 
 
 class BraveDecoder(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, rave_latent_dim: int = 0):
         super().__init__()
         self.ratios = config.ratios
         channels = [config.capacity * 16, config.capacity * 8, config.capacity * 4,
                     config.capacity * 2, config.capacity]
         if len(channels) != len(config.ratios) + 1:
             raise ValueError("decoder ratios must contain exactly four stages")
-        self.fusion = FusionProjection(config.timbre_dim + config.midi_dim, channels[0])
+        if rave_latent_dim < 0:
+            raise ValueError("rave_latent_dim must be non-negative")
+        self.rave_latent_dim = rave_latent_dim
+        self.fusion = FusionProjection(
+            rave_latent_dim + config.timbre_dim + config.midi_dim, channels[0])
         self.pqmf_dtype = config.pqmf_dtype
         self.blocks = nn.ModuleList()
         self.projections = nn.ModuleList()
@@ -412,12 +420,20 @@ class BraveDecoder(nn.Module):
         return levels
 
     def forward(self, z_timbre: Tensor, z_midi: Tensor, excitation: Tensor,
-                output_samples: int) -> Tensor:
+                output_samples: int, z_rave: Tensor | None = None) -> Tensor:
+        if self.rave_latent_dim:
+            if z_rave is None or z_rave.ndim != 3 or z_rave.shape[1] != self.rave_latent_dim:
+                raise ValueError(
+                    f"RAVE latent must have {self.rave_latent_dim} channels")
+            if z_rave.shape[0] != z_midi.shape[0] or z_rave.shape[-1] != z_midi.shape[-1]:
+                raise ValueError("RAVE and MIDI latent sequences must align")
+        elif z_rave is not None:
+            raise ValueError("legacy decoder does not accept a RAVE latent")
         expected_excitation_frames = z_midi.shape[-1] * int(np.prod(self.ratios))
         if excitation.shape[1] != self.pqmf.bands or excitation.shape[-1] != expected_excitation_frames:
             raise ValueError("PQMF excitation is not aligned with decoder rates")
         excitation_levels = self.conditioning_levels(excitation)
-        x = self.fusion(z_timbre, z_midi, self.static_condition_fast_path)
+        x = self.fusion(z_timbre, z_midi, self.static_condition_fast_path, z_rave)
         for ratio, blocks, anti_alias, projection, excitation_level in zip(
                 self.ratios, self.blocks, self.anti_alias, self.projections,
                 excitation_levels):
