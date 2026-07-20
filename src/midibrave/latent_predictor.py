@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 from torch import Tensor, nn
@@ -9,14 +9,12 @@ from torch.nn import functional as F
 from .model import CausalConv1d, ChannelRMSNorm
 
 
-@dataclass(frozen=True)
-class LatentPrediction:
+class LatentPrediction(NamedTuple):
     delta: Tensor
     latent: Tensor
 
 
-@dataclass(frozen=True)
-class RolloutResult:
+class RolloutResult(NamedTuple):
     latent: Tensor
     history: Tensor
 
@@ -66,12 +64,14 @@ class MultiHorizonPredictor(nn.Module):
             raise ValueError("history must have shape [batch, rave_dim, history_frames]")
         if history.shape[-1] != self.history_frames:
             raise ValueError(f"history must contain exactly {self.history_frames} frames")
-        expected_clap = (history.shape[0], self.clap_dim, self.horizon_frames)
-        expected_midi = (history.shape[0], self.midi_dim, self.horizon_frames)
-        if tuple(clap_future.shape) != expected_clap:
-            raise ValueError(f"CLAP future must have shape {expected_clap}")
-        if tuple(midi_future.shape) != expected_midi:
-            raise ValueError(f"MIDI future must have shape {expected_midi}")
+        if (clap_future.ndim != 3 or clap_future.shape[0] != history.shape[0]
+                or clap_future.shape[1] != self.clap_dim
+                or clap_future.shape[2] != self.horizon_frames):
+            raise ValueError("CLAP future has the wrong runtime shape")
+        if (midi_future.ndim != 3 or midi_future.shape[0] != history.shape[0]
+                or midi_future.shape[1] != self.midi_dim
+                or midi_future.shape[2] != self.horizon_frames):
+            raise ValueError("MIDI future has the wrong runtime shape")
 
     def forward(self, history: Tensor, clap_future: Tensor,
                 midi_future: Tensor) -> LatentPrediction:

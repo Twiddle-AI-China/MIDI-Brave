@@ -19,13 +19,13 @@ class CausalConv1d(nn.Conv1d):
 
     def forward(self, x: Tensor) -> Tensor:
         pad = self.dilation[0] * (self.kernel_size[0] - 1)
-        if not pad:
-            return super().forward(x)
-        if self.causal_pad_mode == "constant":
-            x = F.pad(x, (pad, 0))
-        else:
-            x = F.pad(x, (pad, 0), mode=self.causal_pad_mode)
-        return super().forward(x)
+        if pad:
+            if self.causal_pad_mode == "constant":
+                x = F.pad(x, (pad, 0))
+            else:
+                x = F.pad(x, (pad, 0), mode=self.causal_pad_mode)
+        return F.conv1d(x, self.weight, self.bias, self.stride, self.padding,
+                        self.dilation, self.groups)
 
 
 class ChannelRMSNorm(nn.Module):
@@ -37,9 +37,14 @@ class ChannelRMSNorm(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         dtype = x.dtype
-        with torch.autocast(device_type=x.device.type, enabled=False):
+        if torch.jit.is_scripting():
             value = x.float()
             value = value * torch.rsqrt(value.square().mean(dim=1, keepdim=True) + self.epsilon)
+        else:
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                value = x.float()
+                value = value * torch.rsqrt(
+                    value.square().mean(dim=1, keepdim=True) + self.epsilon)
         return value.to(dtype=dtype)
 
 
@@ -102,6 +107,12 @@ class ResidualBlock(nn.Module):
             # convolution on Tensor Cores, but perform the small tail and the
             # residual addition in FP32. This adds no parameters and preserves
             # checkpoint/optimizer compatibility.
+            if torch.jit.is_scripting():
+                x = x.float()
+                y = self.conv2(y.float())
+                y = self.film(y, z_midi.float(), static_condition=static_midi)
+                y = self.excitation_film(y, excitation.float())
+                return (x + y) * (2.0**-0.5)
             with torch.autocast(device_type=x.device.type, enabled=False):
                 x = x.float()
                 y = self.conv2(y.float())
@@ -328,13 +339,15 @@ class FusionProjection(nn.Module):
     def forward(self, z_timbre: Tensor, z_midi: Tensor,
                 static_condition: bool = False,
                 z_rave: Tensor | None = None) -> Tensor:
-        conditions = ((z_timbre, z_midi) if z_rave is None
-                      else (z_rave, z_timbre, z_midi))
         if static_condition:
-            fused = self.net(torch.cat(
-                tuple(condition[..., :1] for condition in conditions), dim=1))
+            fused_input = (torch.cat((z_timbre[..., :1], z_midi[..., :1]), dim=1)
+                           if z_rave is None else torch.cat(
+                               (z_rave[..., :1], z_timbre[..., :1], z_midi[..., :1]), dim=1))
+            fused = self.net(fused_input)
             return fused.expand(-1, -1, z_midi.shape[-1])
-        return self.net(torch.cat(conditions, dim=1))
+        fused_input = (torch.cat((z_timbre, z_midi), dim=1) if z_rave is None
+                       else torch.cat((z_rave, z_timbre, z_midi), dim=1))
+        return self.net(fused_input)
 
 
 class ConditionalOutputGain(nn.Module):
@@ -371,6 +384,7 @@ class BraveDecoder(nn.Module):
     def __init__(self, config: ModelConfig, rave_latent_dim: int = 0):
         super().__init__()
         self.ratios = config.ratios
+        self.total_ratio = math.prod(config.ratios)
         channels = [config.capacity * 16, config.capacity * 8, config.capacity * 4,
                     config.capacity * 2, config.capacity]
         if len(channels) != len(config.ratios) + 1:
@@ -429,7 +443,7 @@ class BraveDecoder(nn.Module):
                 raise ValueError("RAVE and MIDI latent sequences must align")
         elif z_rave is not None:
             raise ValueError("legacy decoder does not accept a RAVE latent")
-        expected_excitation_frames = z_midi.shape[-1] * int(np.prod(self.ratios))
+        expected_excitation_frames = z_midi.shape[-1] * self.total_ratio
         if excitation.shape[1] != self.pqmf.bands or excitation.shape[-1] != expected_excitation_frames:
             raise ValueError("PQMF excitation is not aligned with decoder rates")
         excitation_levels = self.conditioning_levels(excitation)

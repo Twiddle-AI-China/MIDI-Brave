@@ -14,6 +14,7 @@ from .data import (SampleRecord, assign_splits, cache_audio_regions,
                    load_manifest, prepare_serum_manifests, validate_manifest,
                    write_manifest)
 from .latent_cache import cache_rave_latents_from_checkpoint, load_latent_window
+from .export_predictive import export_predictive_runtime
 from .seed_bank import SeedBank
 from .selection import run_selection
 
@@ -163,6 +164,12 @@ def main() -> None:
     rave_cache.add_argument("--config", required=True)
     rave_cache.add_argument("--checkpoint", required=True)
     rave_cache.add_argument("--device", default="cuda")
+    export_predictive = subparsers.add_parser("export-predictive")
+    export_predictive.add_argument("--config", required=True)
+    export_predictive.add_argument("--checkpoint", required=True)
+    export_predictive.add_argument("--seed-bank", required=True)
+    export_predictive.add_argument("--output", required=True)
+    export_predictive.add_argument("--device", default="cpu")
     args = parser.parse_args()
     if args.command == "fixture":
         print(json.dumps({"manifest": str(create_fixture(args.root, samples=args.samples))}))
@@ -192,6 +199,10 @@ def main() -> None:
     elif args.command == "cache-rave":
         print(json.dumps(cache_rave_latents_from_checkpoint(
             Config.load(args.config), args.checkpoint, args.device),
+            ensure_ascii=False, sort_keys=True))
+    elif args.command == "export-predictive":
+        print(json.dumps(export_predictive_runtime(
+            args.config, args.checkpoint, args.seed_bank, args.output, args.device),
             ensure_ascii=False, sort_keys=True))
     else:
         config = Config.load(args.config)
