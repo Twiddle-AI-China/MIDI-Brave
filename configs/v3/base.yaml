@@ -99,6 +99,11 @@ predictive:
   teacher_forcing_floor: 0.25
   calibration_batches: 128
   clap_gradient_fraction_max: 0.15
+  predictor_control_start_updates: 1000
+  predictor_control_every_updates: 4
+  predictor_control_warmup_updates: 1000
+  predictor_control_rollout_frames: 128
+  predictor_control_gradient_fraction_max: 0.25
 latent_loss:
   future: 1.0
   delta: 0.5

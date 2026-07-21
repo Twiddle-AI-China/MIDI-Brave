@@ -198,6 +198,11 @@ class PredictiveConfig:
     teacher_forcing_floor: float = 0.25
     calibration_batches: int = 128
     clap_gradient_fraction_max: float = 0.15
+    predictor_control_start_updates: int = 1000
+    predictor_control_every_updates: int = 4
+    predictor_control_warmup_updates: int = 1000
+    predictor_control_rollout_frames: int = 128
+    predictor_control_gradient_fraction_max: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -276,6 +281,20 @@ class Config:
                 raise ValueError("all predictive stage step counts must be positive")
             if not 0.0 <= predictive.clap_gradient_fraction_max <= 1.0:
                 raise ValueError("clap_gradient_fraction_max must be between zero and one")
+            if predictive.predictor_control_start_updates < 0:
+                raise ValueError("predictor_control_start_updates must be non-negative")
+            if predictive.predictor_control_every_updates <= 0:
+                raise ValueError("predictor_control_every_updates must be positive")
+            if predictive.predictor_control_warmup_updates <= 0:
+                raise ValueError("predictor_control_warmup_updates must be positive")
+            if (predictive.predictor_control_rollout_frames < predictive.horizon_frames
+                    or predictive.predictor_control_rollout_frames % predictive.stride_frames):
+                raise ValueError(
+                    "predictor_control_rollout_frames must be at least horizon_frames "
+                    "and divisible by stride_frames")
+            if not 0.0 <= predictive.predictor_control_gradient_fraction_max <= 1.0:
+                raise ValueError(
+                    "predictor_control_gradient_fraction_max must be between zero and one")
             assert latent_loss is not None
             if (latent_loss.clap_counterfactual < 0.0
                     or latent_loss.rave_swap_source_rejection < 0.0):
