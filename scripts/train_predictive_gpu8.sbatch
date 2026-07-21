@@ -46,7 +46,7 @@ fi
 
 echo "=== PREDICTIVE TRAIN stage=$stage resume=${latest:-none} max_steps=${max_steps:-configured} ==="
 srun --kill-on-bad-exit=1 --cpu-bind=cores docker run --rm \
-  --gpus "device=${CUDA_VISIBLE_DEVICES}" --shm-size=24g --ulimit memlock=-1 \
+  --gpus "\"device=${CUDA_VISIBLE_DEVICES}\"" --shm-size=24g --ulimit memlock=-1 \
   -v "$repo":/workspace/MidiBrave:ro -v /data:/data \
   -e PYTHONPATH=/workspace/MidiBrave/src -e OMP_NUM_THREADS=1 -e MKL_NUM_THREADS=1 \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
