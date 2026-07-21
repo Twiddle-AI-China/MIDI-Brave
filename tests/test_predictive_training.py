@@ -12,6 +12,7 @@ from midibrave.predictive_model import PredictiveMidiBrave
 from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
                                _predictive_scaler_step,
                                _latent_style_interpolation_loss,
+                               _latent_style_matching_loss,
                                _predictor_rollout_stability_objective,
                                _seed_washout_loss,
                                _validate_predictor_warm_start_cache,
@@ -68,10 +69,12 @@ class _RecordingSwapPitch(torch.nn.Module):
         super().__init__()
         self.notes = None
         self.note_calls = []
+        self.confidence_calls = []
 
     def forward(self, audio, note, confidence, valid):
         self.notes = note.detach().clone()
         self.note_calls.append(self.notes)
+        self.confidence_calls.append(confidence.detach().clone())
         return audio.float().square().mean()
 
     def source_rejection(self, audio, target_note, source_note,
@@ -136,34 +139,41 @@ def _model(config: Config) -> PredictiveMidiBrave:
 
 def test_counterfactual_assignment_splits_batch_and_avoids_same_preset():
     presets = ["a", "a", "b", "b", "c", "c"]
+    notes = torch.tensor([48, 60, 48, 61, 60, 72])
+    velocities = torch.tensor([64.0, 90.0, 80.0, 100.0, 95.0, 70.0])
 
     midi, timbre, target = counterfactual_control_assignment(
-        presets, torch.device("cpu"))
+        presets, notes, velocities, torch.device("cpu"))
 
     assert torch.equal(midi, torch.tensor([True, True, True, False, False, False]))
     assert not (midi & timbre).any()
     assert torch.equal(midi | timbre, torch.ones(6, dtype=torch.bool))
     for index in timbre.nonzero().flatten().tolist():
         assert presets[index] != presets[int(target[index])]
+    assert target[3].item() == 4  # nearest pitch, then nearest velocity
+    assert target[4].item() == 1  # exact-pitch target wins
+    assert target[5].item() == 3  # nearest available cross-preset pitch
 
 
 def test_counterfactual_assignment_falls_back_to_midi_without_cross_preset():
     midi, timbre, target = counterfactual_control_assignment(
-        ["a", "a", "a", "a"], torch.device("cpu"))
+        ["a", "a", "a", "a"], torch.tensor([48, 60, 72, 84]),
+        torch.tensor([64.0, 80.0, 96.0, 112.0]), torch.device("cpu"))
 
     assert midi.all()
     assert not timbre.any()
     assert torch.equal(target, torch.arange(4))
 
 
-def test_midi_swap_weights_boost_low_and_large_intervals_then_normalize():
+def test_midi_swap_weights_boost_pitch_extremes_and_large_intervals_then_normalize():
     value = midi_swap_example_weights(
-        torch.tensor([60, 60, 60]), torch.tensor([55, 40, 72]),
-        torch.tensor([True, True, True]))
+        torch.tensor([60, 60, 65, 60]), torch.tensor([55, 40, 67, 72]),
+        torch.tensor([True, True, True, True]))
 
     assert value.mean().item() == pytest.approx(1.0)
     assert value[1] > value[0]
     assert value[2] > value[0]
+    assert value[3] > value[2]
 
 
 def test_midi_swap_weights_keep_inactive_examples_zero():
@@ -192,6 +202,22 @@ def test_latent_style_interpolation_has_exact_source_and_target_endpoints():
     assert source_loss.item() < 1e-7
     assert target_loss.item() < 1e-7
     assert wrong_loss.item() > 0.1
+
+
+def test_latent_style_matching_penalizes_collapsed_rollout():
+    torch.manual_seed(23)
+    target = torch.randn(3, 16, 32) * 1.5 + 0.25
+    collapsed = torch.zeros_like(target, requires_grad=True)
+    statistics = LatentStatistics(
+        torch.ones(16), torch.ones(16), torch.ones(16))
+
+    matched = _latent_style_matching_loss(target, target, statistics)
+    collapsed_loss = _latent_style_matching_loss(collapsed, target, statistics)
+
+    assert matched.item() < 1e-7
+    assert collapsed_loss.item() > 0.1
+    collapsed_loss.backward()
+    assert torch.isfinite(collapsed.grad).all()
 
 
 def test_latent_style_and_seed_washout_stay_finite_for_large_amp_values():
@@ -704,6 +730,7 @@ def test_predictor_midi_control_is_sparse_and_updates_only_predictor():
         statistics, swap_pitch=pitch)
     assert torch.equal(pitch.note_calls[0], batch["note_b"][:2])
     assert torch.equal(pitch.note_calls[1], batch["note_a"][2:])
+    assert pitch.confidence_calls[0][0].mean() > pitch.confidence_calls[0][1].mean()
     assert torch.equal(pitch.source_notes, batch["note_a"][:2])
     assert torch.equal(pitch.target_notes, batch["note_b"][:2])
     assert active.components["predictor_continuation_total"].item() > 0.0

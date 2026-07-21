@@ -57,18 +57,26 @@ class PredictiveLossSchedule:
 
 
 def counterfactual_control_assignment(
-        preset_ids: list[str], device: torch.device) -> tuple[Tensor, Tensor, Tensor]:
-    """Split one batch and assign deterministic cross-preset timbre targets."""
+        preset_ids: list[str], notes: Tensor, velocities: Tensor,
+        device: torch.device) -> tuple[Tensor, Tensor, Tensor]:
+    """Split a batch and choose pitch-aligned cross-preset timbre targets."""
     count = len(preset_ids)
+    if notes.shape != (count,) or velocities.shape != (count,):
+        raise ValueError("counterfactual notes and velocities must match the batch")
     indices = torch.arange(count, device=device)
     midi = indices < (count + 1) // 2
-    target = indices.clone()
-    for index in range(count):
-        for offset in range(1, count):
-            candidate = (index + offset) % count
-            if preset_ids[candidate] != preset_ids[index]:
-                target[index] = candidate
-                break
+    cross_preset = torch.tensor(
+        [[source != candidate for candidate in preset_ids]
+         for source in preset_ids], device=device, dtype=torch.bool)
+    note = notes.to(device=device, dtype=torch.float32)
+    velocity = velocities.to(device=device, dtype=torch.float32)
+    # CLAP contains pitch as well as timbre. Prefer the same note, then the
+    # closest velocity, so a timbre edit does not quietly fight fixed MIDI.
+    score = (note[:, None] - note[None, :]).abs() * 256.0
+    score = score + (velocity[:, None] - velocity[None, :]).abs()
+    score = score.masked_fill(~cross_preset, torch.inf)
+    best = score.argmin(dim=1)
+    target = torch.where(cross_preset.any(dim=1), best, indices)
     timbre = ~midi & target.ne(indices)
     midi = ~timbre
     return midi, timbre, target
@@ -76,9 +84,10 @@ def counterfactual_control_assignment(
 
 def midi_swap_example_weights(
         note_a: Tensor, note_b: Tensor, active: Tensor) -> Tensor:
-    """Emphasize low and large-interval swaps without changing batch scale."""
+    """Emphasize pitch extremes and large swaps without changing batch scale."""
     active_float = active.to(dtype=torch.float32)
     value = (1.0 + note_b.lt(48).to(torch.float32)
+             + note_b.ge(60).to(torch.float32)
              + note_b.sub(note_a).abs().ge(12).to(torch.float32)) * active_float
     return value / value.sum().clamp_min(1.0) * active_float.sum().clamp_min(1.0)
 
@@ -96,6 +105,7 @@ class PredictorRolloutStabilityObjective:
     future: Tensor
     delta: Tensor
     acceleration: Tensor
+    style: Tensor
     rollout: Tensor
 
 
@@ -154,6 +164,24 @@ def _latent_style_interpolation_loss(
     return (distance("mean") + distance("rms")
             + 0.25 * distance("delta_rms")
             + 0.1 * distance("covariance"))
+
+
+def _latent_style_matching_loss(
+        generated: Tensor, target: Tensor,
+        statistics: LatentStatistics) -> Tensor:
+    """Match same-recording moments without forcing framewise averaging."""
+    if generated.shape != target.shape:
+        raise ValueError("latent style matching requires equal shapes")
+    generated_style = _latent_style_statistics(generated, statistics)
+    target_style = _latent_style_statistics(target, statistics)
+    return (
+        F.smooth_l1_loss(generated_style.mean, target_style.mean)
+        + F.smooth_l1_loss(generated_style.rms, target_style.rms)
+        + 0.25 * F.smooth_l1_loss(
+            generated_style.delta_rms, target_style.delta_rms)
+        + 0.1 * F.smooth_l1_loss(
+            generated_style.covariance, target_style.covariance)
+    )
 
 
 def _seed_washout_loss(
@@ -226,7 +254,8 @@ def predictor_counterfactual_rollout(
         raise ValueError("rave_a does not contain a valid predictor history")
     history = source_latent[..., :predictive.history_frames]
     midi_mask, timbre_mask, target_index = counterfactual_control_assignment(
-        list(batch["preset_id"]), history.device)
+        list(batch["preset_id"]), batch["note_a"], batch["velocity_a"],
+        history.device)
     target_clap = batch["clap_a"].clone()
     timbre_alpha = target_clap.new_zeros(target_clap.shape[0])
     timbre_positions = timbre_mask.nonzero().flatten()
@@ -285,8 +314,11 @@ def _predictor_rollout_stability_objective(
     weights = config.latent_loss
     total = (weights.future * losses.future + weights.delta * losses.delta
              + weights.acceleration * losses.acceleration)
+    style = (_latent_style_matching_loss(result.latent, target, statistics)
+             if weights.predictor_rollout_style > 0.0 else total.new_zeros(()))
     return PredictorRolloutStabilityObjective(
-        total, losses.future, losses.delta, losses.acceleration, result.latent)
+        total, losses.future, losses.delta, losses.acceleration, style,
+        result.latent)
 
 
 def _linear_warmup(update: int, updates: int) -> float:
@@ -455,7 +487,8 @@ def predictive_stage_objective(
                 if "preset_id" not in batch:
                     raise ValueError("counterfactual controls require preset_id")
                 midi_mask, timbre_mask, target_index = counterfactual_control_assignment(
-                    list(batch["preset_id"]), reconstruction.audio.device)
+                    list(batch["preset_id"]), batch["note_a"],
+                    batch["velocity_a"], reconstruction.audio.device)
                 clap = batch["clap_a"].clone()
                 clap[timbre_mask] = batch["clap_a"].index_select(
                     0, target_index[timbre_mask])
@@ -469,7 +502,8 @@ def predictive_stage_objective(
                 components["midi_swap_pitch"] = swap_pitch(
                     counterfactual_audio[midi_mask], batch["note_b"][midi_mask],
                     batch["pitch_confidence_a"][midi_mask]
-                    * changed[midi_mask, None].to(batch["pitch_confidence_a"]),
+                    * changed[midi_mask, None].to(batch["pitch_confidence_a"])
+                    * weights[midi_mask, None].to(batch["pitch_confidence_a"]),
                     batch["pitch_valid_mask_a"][midi_mask])
                 components["midi_swap_source_rejection"] = swap_pitch.source_rejection(
                     counterfactual_audio[midi_mask], batch["note_b"][midi_mask],
@@ -529,11 +563,13 @@ def predictive_stage_objective(
         zero = latent_objective.total.new_zeros(())
         stability = None
         primary_total = latent_objective.total
-        if losses.predictor_rollout_stability > 0.0:
+        if (losses.predictor_rollout_stability > 0.0
+                or losses.predictor_rollout_style > 0.0):
             stability = _predictor_rollout_stability_objective(
                 model, batch, config, statistics)
             primary_total = (primary_total
-                             + losses.predictor_rollout_stability * stability.total)
+                             + losses.predictor_rollout_stability * stability.total
+                             + losses.predictor_rollout_style * stability.style)
         components.update({
             "predictor_continuation_total": latent_objective.total,
             "predictor_rollout_stability_total": (
@@ -544,6 +580,8 @@ def predictive_stage_objective(
                 stability.delta if stability is not None else zero),
             "predictor_rollout_stability_acceleration": (
                 stability.acceleration if stability is not None else zero),
+            "predictor_rollout_stability_style": (
+                stability.style if stability is not None else zero),
             "predictor_midi_swap_pitch": zero,
             "predictor_midi_swap_source_rejection": zero,
             "predictor_midi_control_total": zero,
@@ -580,7 +618,8 @@ def predictive_stage_objective(
         pitch = swap_pitch(
             counterfactual.audio[midi_mask], batch["note_b"][midi_mask],
             batch["pitch_confidence_a"][midi_mask]
-            * changed[midi_mask, None].to(batch["pitch_confidence_a"]),
+            * changed[midi_mask, None].to(batch["pitch_confidence_a"])
+            * weights[midi_mask, None].to(batch["pitch_confidence_a"]),
             batch["pitch_valid_mask_a"][midi_mask])
         source_rejection = swap_pitch.source_rejection(
             counterfactual.audio[midi_mask], batch["note_b"][midi_mask],

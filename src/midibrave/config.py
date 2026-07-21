@@ -218,6 +218,7 @@ class LatentLossConfig:
     clap_counterfactual: float = 0.0
     rave_swap_source_rejection: float = 0.0
     predictor_rollout_stability: float = 0.0
+    predictor_rollout_style: float = 0.0
     predictor_midi_style: float = 0.0
     predictor_timbre_style: float = 0.0
     predictor_seed_washout: float = 0.0
@@ -312,6 +313,7 @@ class Config:
                 raise ValueError("counterfactual loss weights must be non-negative")
             if any(value < 0.0 for value in (
                     latent_loss.predictor_rollout_stability,
+                    latent_loss.predictor_rollout_style,
                     latent_loss.predictor_midi_style,
                     latent_loss.predictor_timbre_style,
                     latent_loss.predictor_seed_washout)):

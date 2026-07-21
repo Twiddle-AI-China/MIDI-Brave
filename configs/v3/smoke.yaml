@@ -75,6 +75,7 @@ latent_loss:
   clap_counterfactual: 0.0
   rave_swap_source_rejection: 0.0
   predictor_rollout_stability: 0.0
+  predictor_rollout_style: 0.0
   predictor_midi_style: 0.0
   predictor_timbre_style: 0.0
   predictor_seed_washout: 0.0

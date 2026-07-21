@@ -1,4 +1,4 @@
-seed: 20260720
+seed: 20260722
 data:
   manifest: /data/midibrave-v3/manifests/pad50-strict.jsonl
   cache_root: /data/midibrave-v3/cache/pad50-phase15-5k
@@ -99,9 +99,9 @@ predictive:
   clap_gradient_fraction_max: 0.15
   predictor_control_start_updates: 0
   predictor_control_every_updates: 4
-  predictor_control_warmup_updates: 500
+  predictor_control_warmup_updates: 100
   predictor_control_rollout_frames: 128
-  predictor_control_gradient_fraction_max: 0.10
+  predictor_control_gradient_fraction_max: 0.20
   predictor_timbre_interpolation_steps: 4
 latent_loss:
   future: 1.0
@@ -110,14 +110,14 @@ latent_loss:
   rollout: 0.5
   overlap: 0.1
   predicted_audio: 0.25
-  clap_control: 0.25
-  clap_counterfactual: 0.5
-  rave_swap_source_rejection: 0.1
-  predictor_rollout_stability: 1.0
-  predictor_rollout_style: 0.0
-  predictor_midi_style: 0.5
-  predictor_timbre_style: 1.0
-  predictor_seed_washout: 0.5
+  clap_control: 0.5
+  clap_counterfactual: 1.0
+  rave_swap_source_rejection: 0.25
+  predictor_rollout_stability: 0.5
+  predictor_rollout_style: 1.0
+  predictor_midi_style: 1.0
+  predictor_timbre_style: 1.5
+  predictor_seed_washout: 1.0
   rave_kl: 0.0001
   rave_pitch_adversary: 0.02
   gan_adversarial: 0.05
@@ -126,24 +126,24 @@ latent_loss:
   statistic_floor: 0.0001
 train:
   rave_steps: 100000
-  predictor_steps: 4000
+  predictor_steps: 2000
   rollout_steps: 50000
   gan_steps: 50000
   phase1_steps: 20000
   phase2_steps: 2000
-  batch_per_gpu: 28
+  batch_per_gpu: 64
   grad_accum: 1
-  lr: 5.0e-05
-  min_lr: 1.0e-05
-  warmup_steps: 200
+  lr: 2.0e-05
+  min_lr: 5.0e-06
+  warmup_steps: 50
   phase2_generator_lr: 1.0e-05
   phase2_condition_lr: 1.0e-06
   discriminator_lr: 5.0e-05
   pitch_adversary_start: 5000
   pitch_adversary_ramp: 5000
   grad_clip: 1.0
-  checkpoint_every: 1000
+  checkpoint_every: 500
   log_every: 20
   output_dir: /data/midibrave-v3/runs
-  run_name: pad50_phase2b_stable_controls_from_p2_1k_v3
+  run_name: pad50_phase2c_control_recovery_from_p2b_3k
   precision: amp_fp16

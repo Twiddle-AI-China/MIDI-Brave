@@ -36,9 +36,21 @@ def test_v3_predictive_contract_is_exact():
     assert config.latent_loss.delta == 0.5
     assert config.latent_loss.acceleration == 0.05
     assert config.latent_loss.predictor_rollout_stability == 0.0
+    assert config.latent_loss.predictor_rollout_style == 0.0
     assert config.latent_loss.predictor_midi_style == 0.0
     assert config.latent_loss.predictor_timbre_style == 0.0
     assert config.latent_loss.predictor_seed_washout == 0.0
+
+
+def test_phase2c_enables_control_recovery_without_small_batches():
+    config = Config.load("configs/v3/octopus_pad50_phase2c.yaml")
+    assert config.predictive is not None
+    assert config.latent_loss is not None
+    assert config.train.batch_per_gpu == 64
+    assert config.predictive.predictor_control_gradient_fraction_max == 0.20
+    assert config.latent_loss.predictor_rollout_style == 1.0
+    assert config.latent_loss.predictor_rollout_stability == 0.5
+    assert config.train.checkpoint_every == 500
 
 
 def test_v3_rejects_stride_beyond_horizon(tmp_path: Path):
@@ -86,6 +98,7 @@ def test_v3_rejects_invalid_predictor_control_schedule(
 
 @pytest.mark.parametrize("field", [
     "predictor_rollout_stability",
+    "predictor_rollout_style",
     "predictor_midi_style",
     "predictor_timbre_style",
     "predictor_seed_washout",
