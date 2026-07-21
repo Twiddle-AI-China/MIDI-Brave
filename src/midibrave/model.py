@@ -424,13 +424,7 @@ class BraveDecoder(nn.Module):
         self.output = CausalConv1d(channels[-1], config.pqmf_bands, 7)
         self.pqmf = PQMF(config.pqmf_bands, config.pqmf_taps)
         self.static_condition_fast_path = config.static_condition_fast_path
-        self.numeric_audit_enabled = False
-        self.last_numeric_audit: dict[str, Tensor] = {}
-
-    def _record_numeric_audit(self, name: str, value: Tensor) -> None:
-        if self.numeric_audit_enabled:
-            self.last_numeric_audit[name] = (
-                ~torch.isfinite(value.detach())).sum()
+        self.fp32_tail = bool(config.decoder_fp32_tail)
 
     def conditioning_levels(self, excitation: Tensor) -> list[Tensor]:
         levels = [excitation]
@@ -454,30 +448,30 @@ class BraveDecoder(nn.Module):
         if excitation.shape[1] != self.pqmf.bands or excitation.shape[-1] != expected_excitation_frames:
             raise ValueError("PQMF excitation is not aligned with decoder rates")
         excitation_levels = self.conditioning_levels(excitation)
-        if self.numeric_audit_enabled:
-            self.last_numeric_audit = {}
         x = self.fusion(z_timbre, z_midi, self.static_condition_fast_path, z_rave)
-        self._record_numeric_audit("fusion", x)
-        for stage_index, (ratio, blocks, anti_alias, projection, excitation_level) in enumerate(zip(
+        for ratio, blocks, anti_alias, projection, excitation_level in zip(
                 self.ratios, self.blocks, self.anti_alias, self.projections,
-                excitation_levels)):
+                excitation_levels):
             if ratio > 1:
                 x = F.interpolate(x, scale_factor=ratio, mode="nearest")
                 x = anti_alias(x)
             x = F.silu(projection(x))
-            self._record_numeric_audit(f"stage{stage_index}_projection", x)
             if excitation_level.shape[-1] != x.shape[-1]:
                 raise ValueError("excitation pyramid does not match an upsampling stage")
             midi_level = (z_midi[..., :1] if self.static_condition_fast_path else
                           F.interpolate(z_midi, size=x.shape[-1], mode="nearest"))
             excitation_level = excitation_level.to(dtype=x.dtype)
-            for block_index, block in enumerate(blocks):
+            for block in blocks:
                 x = block(x, midi_level, excitation_level,
                           static_midi=self.static_condition_fast_path)
-                self._record_numeric_audit(
-                    f"stage{stage_index}_block{block_index}", x)
-        subbands = self.output(x)
-        self._record_numeric_audit("subbands", subbands)
+        if self.fp32_tail:
+            if torch.jit.is_scripting():
+                subbands = self.output(x.float())
+            else:
+                with torch.autocast(device_type=x.device.type, enabled=False):
+                    subbands = self.output(x.float())
+        else:
+            subbands = self.output(x)
         if self.pqmf_dtype == "fp32":
             with torch.autocast(device_type=x.device.type, enabled=False):
                 waveform = self.pqmf.synthesis(subbands.float(), output_samples)
@@ -485,9 +479,7 @@ class BraveDecoder(nn.Module):
             waveform = self.pqmf.synthesis(subbands, output_samples)
         else:
             raise ValueError(f"unknown pqmf_dtype: {self.pqmf_dtype}")
-        waveform = torch.tanh(waveform)
-        self._record_numeric_audit("waveform", waveform)
-        return waveform
+        return torch.tanh(waveform)
 
 
 class PitchAdversary(nn.Module):

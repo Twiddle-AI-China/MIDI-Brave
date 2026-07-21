@@ -32,20 +32,21 @@ def test_predictive_model_concatenates_rave_clap_and_midi():
     assert result.audio.shape == (2, 1, 4096)
 
 
-def test_predictive_decoder_numeric_audit_records_stage_boundaries():
+def test_predictive_decoder_fp32_tail_includes_output_convolution():
     model = make_model()
-    model.decoder.numeric_audit_enabled = True
-    model.forward_reconstruction(
-        torch.randn(2, 1, 4096), torch.randn(2, 512),
-        torch.tensor([48, 60]), torch.tensor([50.0, 127.0]),
-        sample_encoder=False)
+    output_dtypes = []
+    hook = model.decoder.output.register_forward_hook(
+        lambda _module, _inputs, output: output_dtypes.append(output.dtype))
+    try:
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            model.forward_reconstruction(
+                torch.randn(2, 1, 4096), torch.randn(2, 512),
+                torch.tensor([48, 60]), torch.tensor([50.0, 127.0]),
+                sample_encoder=False)
+    finally:
+        hook.remove()
 
-    assert "fusion" in model.decoder.last_numeric_audit
-    assert "stage0_projection" in model.decoder.last_numeric_audit
-    assert "stage0_block2" in model.decoder.last_numeric_audit
-    assert "subbands" in model.decoder.last_numeric_audit
-    assert "waveform" in model.decoder.last_numeric_audit
-    assert all(value.item() == 0 for value in model.decoder.last_numeric_audit.values())
+    assert output_dtypes == [torch.float32]
 
 
 def test_predictive_model_predicts_eight_future_frames():
