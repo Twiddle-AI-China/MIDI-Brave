@@ -39,13 +39,15 @@ def predictive_rave_quality_gate(
         "swap_f0_median_cents": 100.0,
         "swap_f0_p90_cents": 200.0,
         "midi_swap_following": 0.90,
-        "swap_clap_cosine": 0.90,
+        "reconstruction_clap_cosine": 0.80,
+        "clap_control_following": 0.90,
     }
     failures = []
     reconstruction = metrics.get("reconstruction_f0_absolute_cents", {})
     swapped = metrics.get("swap_f0_absolute_cents", {})
     following = metrics.get("midi_swap_following", {})
-    clap = metrics.get("swap_clap_cosine", {})
+    reconstruction_clap = metrics.get("reconstruction_clap_cosine", {})
+    clap_following = metrics.get("clap_control_following", {})
     if float(reconstruction.get("median", math.inf)) > thresholds[
             "reconstruction_f0_median_cents"]:
         failures.append("reconstruction_f0_median")
@@ -58,8 +60,12 @@ def predictive_rave_quality_gate(
         failures.append("swap_f0_p90")
     if float(following.get("mean", -math.inf)) < thresholds["midi_swap_following"]:
         failures.append("midi_swap_following")
-    if float(clap.get("median", -math.inf)) < thresholds["swap_clap_cosine"]:
-        failures.append("swap_clap_cosine")
+    if float(reconstruction_clap.get("median", -math.inf)) < thresholds[
+            "reconstruction_clap_cosine"]:
+        failures.append("reconstruction_clap_cosine")
+    if float(clap_following.get("mean", -math.inf)) < thresholds[
+            "clap_control_following"]:
+        failures.append("clap_control_following")
     if nonfinite_count:
         failures.append("non_finite")
     return {"passed": not failures, "failures": sorted(failures),
@@ -524,8 +530,9 @@ def evaluate_predictive_rave(
                in pitch_modes][:pairs]
     if not indices:
         raise ValueError("predictive RAVE evaluation found no cross-note validation pairs")
+    evaluation_batch_size = max(batch_size, 8)
     loader = DataLoader(
-        Subset(dataset, indices), batch_size=batch_size, shuffle=False,
+        Subset(dataset, indices), batch_size=evaluation_batch_size, shuffle=False,
         num_workers=2, pin_memory=True, persistent_workers=True)
 
     model = PredictiveMidiBrave(
@@ -556,6 +563,7 @@ def evaluate_predictive_rave(
         swap_note = batch["note_b"][:current]
         velocity = batch["velocity_a"][:current]
         clap_control = batch["clap_a"][:current]
+        preset_ids = list(raw_batch["preset_id"][:current])
         valid = batch["valid_samples_a"][:current]
         seed = batch.get("excitation_seed_a")
         if seed is not None:
@@ -567,9 +575,23 @@ def evaluate_predictive_rave(
                 posterior.latent, clap_control, note, velocity, seed)
             swapped = model.decode_latents(
                 posterior.latent, clap_control, swap_note, velocity, seed)
+            target_index = torch.arange(current, device=device)
+            for index, preset_id in enumerate(preset_ids):
+                for offset in range(1, current):
+                    candidate = (index + offset) % current
+                    if preset_ids[candidate] != preset_id:
+                        target_index[index] = candidate
+                        break
+            timbre_valid_mask = target_index.ne(
+                torch.arange(current, device=device))
+            timbre_control = clap_control.index_select(0, target_index)
+            counterfactual_timbre = model.decode_latents(
+                posterior.latent, timbre_control, note, velocity, seed)
 
         nonfinite_count += int((~torch.isfinite(reconstruction)).sum().item())
         nonfinite_count += int((~torch.isfinite(swapped)).sum().item())
+        nonfinite_count += int((~torch.isfinite(
+            counterfactual_timbre[timbre_valid_mask])).sum().item())
         safe_reconstruction = torch.nan_to_num(reconstruction.float())
         safe_swapped = torch.nan_to_num(swapped.float())
         masked_target = mask_audio(audio.float(), valid)
@@ -621,6 +643,23 @@ def evaluate_predictive_rave(
             reconstruction_embedding, target_embedding, dim=-1))
         metrics.add("swap_clap_cosine", F.cosine_similarity(
             swapped_embedding, reconstruction_embedding, dim=-1))
+        if bool(timbre_valid_mask.any().item()):
+            masked_counterfactual = mask_audio(
+                torch.nan_to_num(counterfactual_timbre.float()), valid)
+            generated_timbre_embedding = clap._embedding(
+                masked_counterfactual[timbre_valid_mask],
+                valid[timbre_valid_mask], role="generated")
+            target_timbre_embedding = F.normalize(
+                timbre_control[timbre_valid_mask].float(), dim=-1)
+            source_timbre_embedding = F.normalize(
+                clap_control[timbre_valid_mask].float(), dim=-1)
+            target_cosine = F.cosine_similarity(
+                generated_timbre_embedding, target_timbre_embedding, dim=-1)
+            source_cosine = F.cosine_similarity(
+                generated_timbre_embedding, source_timbre_embedding, dim=-1)
+            metrics.add("clap_control_target_cosine", target_cosine)
+            metrics.add("clap_control_source_cosine", source_cosine)
+            metrics.add("clap_control_following", target_cosine.gt(source_cosine).float())
         metrics.add("rave_pitch_adversary_accuracy", model.rave_pitch_logits(
             posterior.latent.float(), reversal_scale=0.0).argmax(-1).eq(note).float())
 
@@ -653,6 +692,7 @@ def evaluate_predictive_rave(
         "listening_examples": saved,
         "notes": {
             "swap": "same RAVE latent and CLAP control; only MIDI note is replaced",
+            "clap_control": "same RAVE latent and MIDI note; CLAP control is replaced by a different preset",
             "gate": "early Phase-1 quality gate; failures require diagnosis before caching",
         },
     }

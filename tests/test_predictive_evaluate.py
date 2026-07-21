@@ -46,12 +46,13 @@ def test_collapsed_variance_and_nonfinite_fail_gate():
     assert "non_finite" in invalid["gate"]["failures"]
 
 
-def test_predictive_rave_gate_requires_pitch_following_and_timbre_preservation():
+def test_predictive_rave_gate_requires_pitch_and_counterfactual_timbre_following():
     metrics = {
         "reconstruction_f0_absolute_cents": {"median": 30.0, "p90": 80.0},
         "swap_f0_absolute_cents": {"median": 60.0, "p90": 150.0},
         "midi_swap_following": {"mean": 0.95},
-        "swap_clap_cosine": {"median": 0.92},
+        "reconstruction_clap_cosine": {"median": 0.82},
+        "clap_control_following": {"mean": 0.92},
     }
     passed = predictive_rave_quality_gate(metrics, nonfinite_count=0)
     assert passed["passed"] is True
@@ -60,3 +61,10 @@ def test_predictive_rave_gate_requires_pitch_following_and_timbre_preservation()
     failed = predictive_rave_quality_gate(metrics, nonfinite_count=1)
     assert failed["passed"] is False
     assert failed["failures"] == ["midi_swap_following", "non_finite"]
+
+    metrics["midi_swap_following"]["mean"] = 0.95
+    metrics["reconstruction_clap_cosine"]["median"] = 0.79
+    metrics["clap_control_following"]["mean"] = 0.89
+    failed = predictive_rave_quality_gate(metrics, nonfinite_count=0)
+    assert failed["failures"] == [
+        "clap_control_following", "reconstruction_clap_cosine"]
