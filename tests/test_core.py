@@ -120,6 +120,30 @@ def test_clap_waveform_gradient_injection_matches_direct_chain_rule():
     assert torch.allclose(decoder.weight.grad, direct_gradient, rtol=1e-4, atol=1e-6)
 
 
+def test_clap_control_gradient_targets_embedding_and_reports_following():
+    objective = FrozenClapReconstructionObjective(
+        None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
+        encoder=_FakeDifferentiableClap())
+    prediction = torch.randn(2, 1, 1024)
+    target_audio = torch.randn(2, 1, 1024)
+    source_audio = torch.randn(2, 1, 1024)
+    valid = torch.full((2,), 1024, dtype=torch.long)
+    with torch.no_grad():
+        target = objective._embedding(target_audio, valid, role="target")
+        source = objective._embedding(source_audio, valid, role="target")
+
+    result = objective.waveform_gradients_to_embeddings(
+        prediction, target, source, valid)
+
+    assert result.gradients.shape == prediction.shape
+    assert torch.isfinite(result.gradients).all()
+    assert result.gradients.abs().sum().item() > 0
+    assert result.target_cosine.shape == (2,)
+    assert result.source_cosine.shape == (2,)
+    assert torch.equal(
+        result.following, result.target_cosine.gt(result.source_cosine))
+
+
 class _NonFiniteClap(nn.Module):
     def get_audio_embedding_from_data(self, waveforms, use_tensor=True):
         assert use_tensor

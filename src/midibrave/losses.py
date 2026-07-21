@@ -63,6 +63,15 @@ class ClapWaveformGradient:
     health: ClapHealth
 
 
+@dataclass
+class ClapControlGradient(ClapWaveformGradient):
+    """Frozen-CLAP counterfactual control values and waveform gradients."""
+
+    target_cosine: Tensor
+    source_cosine: Tensor
+    following: Tensor
+
+
 class FrozenClapReconstructionObjective(nn.Module):
     """Window-aligned differentiable CLAP reconstruction objective.
 
@@ -198,6 +207,54 @@ class FrozenClapReconstructionObjective(nn.Module):
         return ClapWaveformGradient(
             losses.detach(), gradients.detach(), norms.detach(), clipped_norms.detach(),
             ClapHealth.zeros(prediction))
+
+    def waveform_gradients_to_embeddings(
+            self, prediction: Tensor, target_embedding: Tensor,
+            source_embedding: Tensor, valid_samples: Tensor,
+            margin: float = 0.1) -> ClapControlGradient:
+        """Move generated audio toward target control and away from source."""
+        expected = (prediction.shape[0],)
+        if target_embedding.ndim != 2 or source_embedding.shape != target_embedding.shape:
+            raise ValueError("CLAP source and target embeddings must have shape [B,D]")
+        if target_embedding.shape[0] != prediction.shape[0]:
+            raise ValueError("CLAP control embedding batch must match prediction")
+        if valid_samples.shape != expected:
+            raise ValueError("CLAP valid_samples must have shape [B]")
+        target = F.normalize(target_embedding.detach().float(), dim=-1)
+        source = F.normalize(source_embedding.detach().float(), dim=-1)
+        if not bool(torch.isfinite(target).all().item()
+                    and torch.isfinite(source).all().item()):
+            raise RuntimeError("cached CLAP control embedding is non-finite")
+        generated = prediction.detach().float().requires_grad_(True)
+        try:
+            generated_embedding = self._embedding(
+                generated, valid_samples, role="generated")
+        except _NonFiniteClapEmbedding as error:
+            losses = prediction.new_zeros(prediction.shape[0])
+            gradients = prediction.new_zeros(prediction.shape)
+            norms = prediction.new_zeros(prediction.shape[0])
+            cosine = prediction.new_zeros(prediction.shape[0])
+            return ClapControlGradient(
+                losses, gradients, norms, norms.clone(), error.health,
+                cosine, cosine.clone(), torch.zeros_like(cosine, dtype=torch.bool))
+        target_cosine = F.cosine_similarity(generated_embedding, target, dim=-1)
+        source_cosine = F.cosine_similarity(generated_embedding, source, dim=-1)
+        losses = ((1.0 - target_cosine).clamp_min(0.0)
+                  + F.relu(source_cosine - target_cosine + margin))
+        gradients, = torch.autograd.grad(losses.sum(), generated, allow_unused=False)
+        if not bool(torch.isfinite(losses).all().item()
+                    and torch.isfinite(gradients).all().item()):
+            raise RuntimeError("CLAP control loss or waveform gradient is non-finite")
+        norms = gradients.flatten(1).norm(dim=1)
+        if self.maximum_gradient_norm > 0:
+            scale = (self.maximum_gradient_norm / norms.clamp_min(1e-12)).clamp(max=1.0)
+            gradients = gradients * scale[:, None, None]
+        clipped_norms = gradients.flatten(1).norm(dim=1)
+        return ClapControlGradient(
+            losses.detach(), gradients.detach(), norms.detach(),
+            clipped_norms.detach(), ClapHealth.zeros(prediction),
+            target_cosine.detach(), source_cosine.detach(),
+            target_cosine.detach().gt(source_cosine.detach()))
 
 
 class MultiResolutionSTFTLoss(nn.Module):
