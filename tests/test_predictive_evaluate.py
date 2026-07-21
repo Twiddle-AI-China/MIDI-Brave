@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from midibrave.evaluate import predictive_rollout_report
+from midibrave.evaluate import (predictive_rave_quality_gate,
+                                predictive_rollout_report)
 from midibrave.predictive_losses import LatentStatistics
 
 
@@ -43,3 +44,19 @@ def test_collapsed_variance_and_nonfinite_fail_gate():
         statistics, 4, 8, 0.1)
     assert invalid["gate"]["passed"] is False
     assert "non_finite" in invalid["gate"]["failures"]
+
+
+def test_predictive_rave_gate_requires_pitch_following_and_timbre_preservation():
+    metrics = {
+        "reconstruction_f0_absolute_cents": {"median": 30.0, "p90": 80.0},
+        "swap_f0_absolute_cents": {"median": 60.0, "p90": 150.0},
+        "midi_swap_following": {"mean": 0.95},
+        "swap_clap_cosine": {"median": 0.92},
+    }
+    passed = predictive_rave_quality_gate(metrics, nonfinite_count=0)
+    assert passed["passed"] is True
+
+    metrics["midi_swap_following"]["mean"] = 0.5
+    failed = predictive_rave_quality_gate(metrics, nonfinite_count=1)
+    assert failed["passed"] is False
+    assert failed["failures"] == ["midi_swap_following", "non_finite"]

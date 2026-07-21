@@ -19,13 +19,51 @@ from torch.utils.data import DataLoader, Subset
 from .config import Config
 from .data import (PairDataset, configured_roots, load_audio, load_manifest,
                    midi_to_hz, record_audio_path)
-from .losses import MultiResolutionSTFTLoss, rms_db
+from .losses import (FrozenClapReconstructionObjective,
+                     MultiResolutionSTFTLoss, rms_db)
 from .model import MidiBrave
 from .predictive_losses import LatentStatistics
 from .predictive_model import PredictiveMidiBrave
 
 
 PREDICTIVE_HORIZONS = (1, 8, 32, 128)
+
+
+def predictive_rave_quality_gate(
+        metrics: dict[str, dict[str, float | int]],
+        nonfinite_count: int) -> dict[str, Any]:
+    """Gate the RAVE representation before caching it for predictor training."""
+    thresholds = {
+        "reconstruction_f0_median_cents": 50.0,
+        "reconstruction_f0_p90_cents": 100.0,
+        "swap_f0_median_cents": 100.0,
+        "swap_f0_p90_cents": 200.0,
+        "midi_swap_following": 0.90,
+        "swap_clap_cosine": 0.90,
+    }
+    failures = []
+    reconstruction = metrics.get("reconstruction_f0_absolute_cents", {})
+    swapped = metrics.get("swap_f0_absolute_cents", {})
+    following = metrics.get("midi_swap_following", {})
+    clap = metrics.get("swap_clap_cosine", {})
+    if float(reconstruction.get("median", math.inf)) > thresholds[
+            "reconstruction_f0_median_cents"]:
+        failures.append("reconstruction_f0_median")
+    if float(reconstruction.get("p90", math.inf)) > thresholds[
+            "reconstruction_f0_p90_cents"]:
+        failures.append("reconstruction_f0_p90")
+    if float(swapped.get("median", math.inf)) > thresholds["swap_f0_median_cents"]:
+        failures.append("swap_f0_median")
+    if float(swapped.get("p90", math.inf)) > thresholds["swap_f0_p90_cents"]:
+        failures.append("swap_f0_p90")
+    if float(following.get("mean", -math.inf)) < thresholds["midi_swap_following"]:
+        failures.append("midi_swap_following")
+    if float(clap.get("median", -math.inf)) < thresholds["swap_clap_cosine"]:
+        failures.append("swap_clap_cosine")
+    if nonfinite_count:
+        failures.append("non_finite")
+    return {"passed": not failures, "failures": sorted(failures),
+            "thresholds": thresholds, "non_finite_count": int(nonfinite_count)}
 
 
 def _finite_scalar(value: Tensor) -> float | None:
@@ -456,6 +494,179 @@ def save_examples(root: Path, offset: int, batch: dict[str, Any], self_audio: Te
 
 
 @torch.no_grad()
+def evaluate_predictive_rave(
+    config_path: str, checkpoint_path: str, output_path: str,
+    pairs: int = 32, batch_size: int = 2, examples: int = 8,
+    device_name: str = "cuda",
+) -> dict[str, Any]:
+    """Evaluate reconstruction and counterfactual MIDI control in the RAVE stage."""
+    if pairs <= 0 or batch_size <= 0 or examples < 0:
+        raise ValueError("predictive RAVE evaluation counts must be positive")
+    device = torch.device(device_name)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("predictive RAVE evaluation requires an allocated CUDA device")
+    config = Config.load(config_path)
+    if config.predictive is None:
+        raise ValueError("predictive RAVE evaluation requires a v3 config")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    contract = checkpoint.get("predictive_contract", {})
+    if int(checkpoint.get("format", 0)) != 5 or contract.get("stage") != "rave":
+        raise ValueError("predictive RAVE evaluation requires a format-5 RAVE checkpoint")
+
+    # The current Pad50 manifest contains train rows only.  Keep this a fixed,
+    # deterministic diagnostic subset and label it honestly in the report.
+    data_config = replace(config.data, repeats=1, num_workers=2)
+    dataset = PairDataset(
+        data_config, config.seed + 30000, config.predictive, load_rave_cache=False)
+    pitch_modes = {"pitch", "pitch_velocity"}
+    indices = [index for index in range(len(dataset))
+               if PairDataset.PAIR_SEQUENCE[index % len(PairDataset.PAIR_SEQUENCE)]
+               in pitch_modes][:pairs]
+    if not indices:
+        raise ValueError("predictive RAVE evaluation found no cross-note validation pairs")
+    loader = DataLoader(
+        Subset(dataset, indices), batch_size=batch_size, shuffle=False,
+        num_workers=2, pin_memory=True, persistent_workers=True)
+
+    model = PredictiveMidiBrave(
+        config.model, config.predictive, config.data.window_samples,
+        config.data.sample_rate).to(device)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    stft = MultiResolutionSTFTLoss().to(device)
+    clap = FrozenClapReconstructionObjective(
+        config.data.clap_checkpoint, config.data.sample_rate, device,
+        maximum_gradient_norm=0.0)
+    metrics = MetricStore()
+    output = Path(output_path)
+    example_root = output / "examples"
+    example_root.mkdir(parents=True, exist_ok=True)
+    evaluated = 0
+    saved = 0
+    nonfinite_count = 0
+    rows = []
+
+    for raw_batch in loader:
+        if evaluated >= pairs:
+            break
+        batch = move_batch(raw_batch, device)
+        current = min(batch["audio_a"].shape[0], pairs - evaluated)
+        audio = batch["audio_a"][:current]
+        note = batch["note_a"][:current]
+        swap_note = batch["note_b"][:current]
+        velocity = batch["velocity_a"][:current]
+        clap_control = batch["clap_a"][:current]
+        valid = batch["valid_samples_a"][:current]
+        seed = batch.get("excitation_seed_a")
+        if seed is not None:
+            seed = seed[:current]
+        with torch.autocast(device_type=device.type, dtype=torch.float16,
+                            enabled=device.type == "cuda"):
+            posterior = model.encode_audio(audio, sample=False)
+            reconstruction = model.decode_latents(
+                posterior.latent, clap_control, note, velocity, seed)
+            swapped = model.decode_latents(
+                posterior.latent, clap_control, swap_note, velocity, seed)
+
+        nonfinite_count += int((~torch.isfinite(reconstruction)).sum().item())
+        nonfinite_count += int((~torch.isfinite(swapped)).sum().item())
+        safe_reconstruction = torch.nan_to_num(reconstruction.float())
+        safe_swapped = torch.nan_to_num(swapped.float())
+        masked_target = mask_audio(audio.float(), valid)
+        masked_reconstruction = mask_audio(safe_reconstruction, valid)
+        masked_swapped = mask_audio(safe_swapped, valid)
+        metrics.add("reconstruction_l1", (masked_reconstruction - masked_target)
+                    .abs().mean(dim=(-1, -2)))
+        metrics.add("reconstruction_mr_stft", stft(
+            masked_reconstruction, masked_target, valid))
+        lsd, upper = spectral_metrics(
+            masked_reconstruction, masked_target, config.data.sample_rate)
+        metrics.add("reconstruction_lsd_db", lsd)
+        metrics.add("reconstruction_upper_band_energy_error_db", upper)
+        metrics.add("reconstruction_rms_error_db", (
+            rms_db(masked_reconstruction, valid) - rms_db(masked_target, valid)).abs())
+
+        pitch_results = {}
+        for prefix, waveform, pitch_note in (
+                ("target", masked_target, note),
+                ("reconstruction", masked_reconstruction, note),
+                ("swap", masked_swapped, swap_note)):
+            errors, medians, periodicity = pitch_measurements_by_sample(
+                waveform, pitch_note, config.data.sample_rate,
+                config.data.pitch_hop_length)
+            add_pitch_metrics(metrics, prefix, errors, periodicity,
+                              pitch_note, velocity)
+            pitch_results[prefix] = (errors, medians, periodicity)
+
+        for index, median in enumerate(pitch_results["swap"][1]):
+            if median is None:
+                continue
+            source_offset = 100.0 * float((swap_note[index] - note[index]).item())
+            metrics.add("midi_swap_following",
+                        float(abs(median) < abs(median + source_offset)))
+            rows.append({
+                "sample_id": raw_batch["sample_id_a"][index],
+                "source_note": int(note[index].item()),
+                "swap_note": int(swap_note[index].item()),
+                "reconstruction_median_cents": pitch_results[
+                    "reconstruction"][1][index],
+                "swap_median_cents": median,
+            })
+
+        target_embedding = clap._embedding(masked_target, valid, role="target")
+        reconstruction_embedding = clap._embedding(
+            masked_reconstruction, valid, role="generated")
+        swapped_embedding = clap._embedding(masked_swapped, valid, role="generated")
+        metrics.add("reconstruction_clap_cosine", F.cosine_similarity(
+            reconstruction_embedding, target_embedding, dim=-1))
+        metrics.add("swap_clap_cosine", F.cosine_similarity(
+            swapped_embedding, reconstruction_embedding, dim=-1))
+        metrics.add("rave_pitch_adversary_accuracy", model.rave_pitch_logits(
+            posterior.latent, reversal_scale=0.0).argmax(-1).eq(note).float())
+
+        while saved < min(examples, evaluated + current):
+            index = saved - evaluated
+            stem = (f"{saved:04d}-{raw_batch['sample_id_a'][index]}-"
+                    f"n{int(note[index])}-to-n{int(swap_note[index])}")
+            for suffix, waveform in (("target", masked_target[index]),
+                                     ("reconstruction", masked_reconstruction[index]),
+                                     ("swap", masked_swapped[index])):
+                sf.write(example_root / f"{stem}-{suffix}.wav",
+                         waveform.squeeze().cpu().numpy(), config.data.sample_rate,
+                         subtype="FLOAT")
+            saved += 1
+        evaluated += current
+
+    summary = metrics.summary()
+    gate = predictive_rave_quality_gate(summary, nonfinite_count)
+    report = {
+        "schema": 1,
+        "config": str(Path(config_path).resolve()),
+        "checkpoint": str(Path(checkpoint_path).resolve()),
+        "checkpoint_sha256": hashlib.sha256(Path(checkpoint_path).read_bytes()).hexdigest(),
+        "stage_update": int(checkpoint["stage_update"]),
+        "evaluation_split": data_config.split,
+        "independent_holdout": False,
+        "evaluated_pairs": evaluated,
+        "metrics": summary,
+        "gate": gate,
+        "listening_examples": saved,
+        "notes": {
+            "swap": "same RAVE latent and CLAP control; only MIDI note is replaced",
+            "gate": "early Phase-1 quality gate; failures require diagnosis before caching",
+        },
+    }
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "metrics.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (output / "pitch_diagnostics.jsonl").write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8")
+    print(json.dumps(report, sort_keys=True))
+    return report
+
+
+@torch.no_grad()
 def generate_grid(model: MidiBrave, dataset: PairDataset, config: Config,
                   output: Path, preset_count: int) -> dict[str, Any]:
     preset_rows = {}
@@ -766,8 +977,15 @@ def main() -> None:
     args = parser.parse_args()
     config = Config.load(args.config)
     if config.is_predictive:
-        evaluate_predictive(
-            args.config, args.checkpoint, args.output, args.pairs, args.device)
+        checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        stage = checkpoint.get("predictive_contract", {}).get("stage")
+        if stage == "rave":
+            evaluate_predictive_rave(
+                args.config, args.checkpoint, args.output, args.pairs,
+                args.batch_size, args.examples, args.device)
+        else:
+            evaluate_predictive(
+                args.config, args.checkpoint, args.output, args.pairs, args.device)
     else:
         evaluate(args.config, args.checkpoint, args.output, args.pairs,
                  args.batch_size, args.examples, args.grid_presets, args.velocity_pairs)
