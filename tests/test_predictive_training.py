@@ -9,6 +9,8 @@ from midibrave.config import Config
 from midibrave.predictive_model import PredictiveMidiBrave
 from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
                                _predictive_scaler_step,
+                               counterfactual_control_assignment,
+                               midi_swap_example_weights,
                                predictive_checkpoint_contract,
                                predictive_loss_schedule,
                                predictive_latent_objective,
@@ -77,6 +79,47 @@ def _model(config: Config) -> PredictiveMidiBrave:
     return PredictiveMidiBrave(
         config.model, config.predictive, config.data.window_samples,
         config.data.sample_rate)
+
+
+def test_counterfactual_assignment_splits_batch_and_avoids_same_preset():
+    presets = ["a", "a", "b", "b", "c", "c"]
+
+    midi, timbre, target = counterfactual_control_assignment(
+        presets, torch.device("cpu"))
+
+    assert torch.equal(midi, torch.tensor([True, True, True, False, False, False]))
+    assert not (midi & timbre).any()
+    assert torch.equal(midi | timbre, torch.ones(6, dtype=torch.bool))
+    for index in timbre.nonzero().flatten().tolist():
+        assert presets[index] != presets[int(target[index])]
+
+
+def test_counterfactual_assignment_falls_back_to_midi_without_cross_preset():
+    midi, timbre, target = counterfactual_control_assignment(
+        ["a", "a", "a", "a"], torch.device("cpu"))
+
+    assert midi.all()
+    assert not timbre.any()
+    assert torch.equal(target, torch.arange(4))
+
+
+def test_midi_swap_weights_boost_low_and_large_intervals_then_normalize():
+    value = midi_swap_example_weights(
+        torch.tensor([60, 60, 60]), torch.tensor([55, 40, 72]),
+        torch.tensor([True, True, True]))
+
+    assert value.mean().item() == pytest.approx(1.0)
+    assert value[1] > value[0]
+    assert value[2] > value[0]
+
+
+def test_midi_swap_weights_keep_inactive_examples_zero():
+    value = midi_swap_example_weights(
+        torch.tensor([60, 60, 60]), torch.tensor([55, 40, 72]),
+        torch.tensor([True, False, True]))
+
+    assert value[1].item() == 0.0
+    assert value.sum().item() == pytest.approx(2.0)
 
 
 @pytest.mark.parametrize(

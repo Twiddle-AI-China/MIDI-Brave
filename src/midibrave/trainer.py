@@ -55,6 +55,33 @@ class PredictiveLossSchedule:
     gan_feature_matching: float = 0.0
 
 
+def counterfactual_control_assignment(
+        preset_ids: list[str], device: torch.device) -> tuple[Tensor, Tensor, Tensor]:
+    """Split one batch and assign deterministic cross-preset timbre targets."""
+    count = len(preset_ids)
+    indices = torch.arange(count, device=device)
+    midi = indices < (count + 1) // 2
+    target = indices.clone()
+    for index in range(count):
+        for offset in range(1, count):
+            candidate = (index + offset) % count
+            if preset_ids[candidate] != preset_ids[index]:
+                target[index] = candidate
+                break
+    timbre = ~midi & target.ne(indices)
+    midi = ~timbre
+    return midi, timbre, target
+
+
+def midi_swap_example_weights(
+        note_a: Tensor, note_b: Tensor, active: Tensor) -> Tensor:
+    """Emphasize low and large-interval swaps without changing batch scale."""
+    active_float = active.to(dtype=torch.float32)
+    value = (1.0 + note_b.lt(48).to(torch.float32)
+             + note_b.sub(note_a).abs().ge(12).to(torch.float32)) * active_float
+    return value / value.sum().clamp_min(1.0) * active_float.sum().clamp_min(1.0)
+
+
 @dataclass(frozen=True)
 class PredictiveLatentObjective:
     total: Tensor
