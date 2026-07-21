@@ -30,6 +30,7 @@ from .losses import (BraveMultiScaleDiscriminator, ClapHealth,
                      ClapWaveformGradient,
                      FrozenClapReconstructionObjective,
                      MultiResolutionSTFTLoss, ReconstructionLoss,
+                     SpectralPitchObjective,
                      discriminator_hinge, feature_matching, generator_adversarial)
 from .model import ChannelRMSNorm, MidiBrave
 from .predictive_model import PredictiveMidiBrave
@@ -178,6 +179,7 @@ def predictive_stage_objective(
     statistics: LatentStatistics | None = None,
     calibrated_weights: dict[str, float] | None = None,
     stft: MultiResolutionSTFTLoss | None = None,
+    swap_pitch: nn.Module | None = None,
 ) -> PredictiveStageObjective:
     """Compute one generator objective for any pre-GAN predictive stage."""
     stage = PredictiveStage(stage)
@@ -201,9 +203,30 @@ def predictive_stage_objective(
             "rave_kl": reconstruction.posterior.kl,
             "rave_pitch_adversary": pitch,
         }
+        midi_swap_audio = None
+        if config.loss.cross_pitch > 0.0:
+            if swap_pitch is None:
+                raise ValueError("RAVE MIDI swap supervision requires a pitch objective")
+            required = {"note_b", "pitch_confidence_a", "pitch_valid_mask_a"}
+            missing = required - batch.keys()
+            if missing:
+                raise ValueError(f"RAVE MIDI swap batch is missing: {sorted(missing)}")
+            midi_swap_audio = model.decode_latents(
+                reconstruction.posterior.latent, batch["clap_a"], batch["note_b"],
+                batch["velocity_a"], batch.get("excitation_seed_a"))
+            changed = batch["note_a"].ne(batch["note_b"]).to(
+                batch["pitch_confidence_a"].dtype)[:, None]
+            components["midi_swap_pitch"] = swap_pitch(
+                midi_swap_audio, batch["note_b"],
+                batch["pitch_confidence_a"] * changed,
+                batch["pitch_valid_mask_a"])
+        else:
+            components["midi_swap_pitch"] = waveform.new_zeros(())
         total = (waveform + config.loss.self_stft * spectral
                  + schedule.rave_kl * components["rave_kl"]
-                 + schedule.rave_pitch_adversary * pitch)
+                 + schedule.rave_pitch_adversary * pitch
+                 + config.loss.cross_pitch * config.loss.analytic_pitch
+                 * components["midi_swap_pitch"])
         return PredictiveStageObjective(
             total, components, reconstruction.audio, batch["audio_a"], {
                 "input_audio": batch["audio_a"],
@@ -215,6 +238,8 @@ def predictive_stage_objective(
                 "midi_control": reconstruction.midi,
                 "excitation": reconstruction.excitation,
                 "decoder_audio": reconstruction.audio,
+                **({"midi_swap_audio": midi_swap_audio}
+                   if midi_swap_audio is not None else {}),
             })
     if statistics is None:
         raise ValueError(f"{stage.value} stage requires latent statistics")
@@ -1319,6 +1344,9 @@ def train_predictive(
     else:
         writer = None
     stft = MultiResolutionSTFTLoss((2048, 1024, 512, 256, 128)).to(device)
+    swap_pitch = (SpectralPitchObjective(config.data.sample_rate).to(device)
+                  if stage is PredictiveStage.RAVE and config.loss.cross_pitch > 0
+                  else None)
     clap_objective = None
     if config.latent_loss.clap_control > 0 and config.data.clap_checkpoint:
         clap_objective = FrozenClapReconstructionObjective(
@@ -1346,7 +1374,7 @@ def train_predictive(
             with torch.autocast("cuda", dtype=torch.float16):
                 objective = predictive_stage_objective(
                     unwrap(model), batch, config, stage, stage_update, stats,
-                    calibrated_weights, stft)
+                    calibrated_weights, stft, swap_pitch)
                 total = objective.total
                 if discriminator is not None:
                     assert objective.generated_audio is not None

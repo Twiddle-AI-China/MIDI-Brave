@@ -35,6 +35,16 @@ class _RecordingScaler:
         self.updates.append(new_scale)
 
 
+class _RecordingSwapPitch(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.notes = None
+
+    def forward(self, audio, note, confidence, valid):
+        self.notes = note.detach().clone()
+        return audio.float().square().mean()
+
+
 def test_predictive_nonfinite_global_gradient_never_steps_optimizer():
     scaler = _RecordingScaler()
 
@@ -118,6 +128,35 @@ def test_predictive_loss_schedule_reaches_configured_weights():
     assert gan.gan_adversarial == pytest.approx(config.latent_loss.gan_adversarial)
     assert gan.gan_feature_matching == pytest.approx(
         config.latent_loss.gan_feature_matching)
+
+
+def test_rave_objective_supervises_counterfactual_midi_note_swap():
+    config = _config()
+    model = _model(config)
+    configure_predictive_stage(model, PredictiveStage.RAVE)
+    pitch = _RecordingSwapPitch()
+    frames = config.data.window_samples // config.data.pitch_hop_length
+    batch = {
+        "audio_a": torch.randn(2, 1, config.data.window_samples),
+        "clap_a": torch.randn(2, config.model.clap_dim),
+        "note_a": torch.tensor([48, 60]),
+        "note_b": torch.tensor([55, 67]),
+        "velocity_a": torch.tensor([80.0, 100.0]),
+        "pitch_confidence_a": torch.ones(2, frames),
+        "pitch_valid_mask_a": torch.ones(2, frames, dtype=torch.bool),
+        "valid_samples_a": torch.full((2,), config.data.window_samples),
+        "excitation_seed_a": torch.tensor([1, 2]),
+    }
+
+    objective = predictive_stage_objective(
+        model, batch, config, PredictiveStage.RAVE, 4, swap_pitch=pitch)
+
+    assert torch.equal(pitch.notes, batch["note_b"])
+    assert objective.components["midi_swap_pitch"].item() > 0
+    assert objective.diagnostic_tensors["midi_swap_audio"].shape == batch["audio_a"].shape
+    objective.total.backward()
+    assert any(parameter.grad is not None for parameter in model.midi.parameters())
+    assert any(parameter.grad is not None for parameter in model.decoder.parameters())
 
 
 def test_format5_contract_rejects_stage_and_artifact_mismatch():
