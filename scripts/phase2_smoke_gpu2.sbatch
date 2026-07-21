@@ -37,7 +37,6 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores docker run --rm \
   -e PYTHONPATH=/workspace/MidiBrave/src \
   -e OMP_NUM_THREADS=1 -e MKL_NUM_THREADS=1 \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
-  -e MIDIBRAVE_DETECT_ANOMALY=1 \
   -e NCCL_DEBUG=WARN -e NCCL_IB_DISABLE=1 -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   -w /workspace/MidiBrave "$image" \
   torchrun --standalone --nproc_per_node=2 -m midibrave.trainer \
