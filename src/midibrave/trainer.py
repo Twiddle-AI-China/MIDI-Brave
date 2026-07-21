@@ -369,13 +369,16 @@ def load_predictive_checkpoint(
     scaler: torch.amp.GradScaler, expected_contract: dict[str, Any],
     discriminator: nn.Module | None = None,
     discriminator_optimizer: torch.optim.Optimizer | None = None,
+    allow_world_size_change: bool = False,
 ) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict):
         raise ValueError("predictive checkpoint must be a mapping")
     validate_predictive_resume(payload, expected_contract)
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
-    if int(payload.get("world_size", 1)) != world_size:
+    checkpoint_world_size = int(payload.get("world_size", 1))
+    world_size_changed = checkpoint_world_size != world_size
+    if world_size_changed and not allow_world_size_change:
         raise ValueError("predictive exact resume requires the same DDP world size")
     if discriminator is not None:
         missing = {"discriminator", "discriminator_optimizer", "discriminator_arch"} - payload.keys()
@@ -392,12 +395,22 @@ def load_predictive_checkpoint(
         discriminator_optimizer.load_state_dict(payload["discriminator_optimizer"])
     rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
     rng_states = payload.get("rng_by_rank")
+    if world_size_changed:
+        epoch = int(payload["epoch"]) + 1
+        microbatch_offset = 0
+        rng = None
+    else:
+        epoch = int(payload["epoch"])
+        microbatch_offset = int(payload["microbatch_offset"])
+        rng = rng_states[rank] if rng_states else payload.get("rng")
     return {
-        "stage_update": payload["stage_update"], "epoch": payload["epoch"],
-        "microbatch_offset": payload["microbatch_offset"],
+        "stage_update": payload["stage_update"], "epoch": epoch,
+        "microbatch_offset": microbatch_offset,
         "scheduler_state": payload["scheduler_state"],
         "sampler_state": payload["sampler_state"],
-        "rng": rng_states[rank] if rng_states else payload.get("rng"),
+        "rng": rng, "world_size_changed": world_size_changed,
+        "checkpoint_world_size": checkpoint_world_size,
+        "world_size": world_size,
     }
 
 
@@ -1158,6 +1171,7 @@ def train_predictive(
     max_steps: int | None = None, resume: str | None = None,
     warm_start: str | None = None, statistics_path: str | None = None,
     calibration_path: str | None = None, rollout_gate_passed: bool = False,
+    allow_world_size_change: bool = False,
 ) -> None:
     """Four-stage CUDA trainer for encoder-free predictive deployment."""
     config = Config.load(config_path)
@@ -1275,13 +1289,23 @@ def train_predictive(
     if resume:
         restored = load_predictive_checkpoint(
             resume, model, optimizer, scaler, contract,
-            discriminator, discriminator_optimizer)
+            discriminator, discriminator_optimizer,
+            allow_world_size_change=allow_world_size_change)
         stage_update = int(restored["stage_update"])
         epoch = int(restored["epoch"])
         microbatch_offset = int(restored["microbatch_offset"])
         dataset.load_sampler_state_dict(restored["sampler_state"])
         if restored["rng"] is not None:
             _restore_rng(restored["rng"])
+        if rank == 0 and restored["world_size_changed"]:
+            print(json.dumps({
+                "event": "predictive_elastic_resume",
+                "checkpoint_world_size": restored["checkpoint_world_size"],
+                "world_size": restored["world_size"],
+                "stage_update": stage_update,
+                "epoch": epoch,
+                "microbatch_offset": microbatch_offset,
+            }, sort_keys=True), flush=True)
 
     configured_steps = _predictive_stage_steps(config, stage)
     target_updates = configured_steps if max_steps is None else min(configured_steps, max_steps)
@@ -2058,6 +2082,7 @@ def main() -> None:
     parser.add_argument("--latent-statistics")
     parser.add_argument("--calibration")
     parser.add_argument("--rollout-gate-passed", action="store_true")
+    parser.add_argument("--allow-world-size-change", action="store_true")
     args = parser.parse_args()
     if args.max_steps is not None and args.max_effective_updates is not None:
         parser.error("use only one of --max-steps and --max-effective-updates")
@@ -2067,9 +2092,10 @@ def main() -> None:
         train_predictive(
             args.config, args.stage, limit, args.resume, args.warm_start,
             args.latent_statistics, args.calibration,
-            args.rollout_gate_passed)
+            args.rollout_gate_passed, args.allow_world_size_change)
     else:
-        if args.warm_start or args.latent_statistics or args.calibration or args.rollout_gate_passed:
+        if (args.warm_start or args.latent_statistics or args.calibration
+                or args.rollout_gate_passed or args.allow_world_size_change):
             parser.error("predictive stage options cannot be used with --phase")
         assert args.phase is not None
         train(args.config, args.phase, limit, args.resume)

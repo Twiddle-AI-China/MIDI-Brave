@@ -171,6 +171,42 @@ def test_format5_checkpoint_restores_exact_training_state(tmp_path: Path):
     assert restored["sampler_state"] == {"epoch": 2}
 
 
+def test_predictive_elastic_resume_preserves_training_state_and_resets_rank_state(
+        tmp_path: Path):
+    config = _config()
+    model = _model(config)
+    configure_predictive_stage(model, PredictiveStage.PREDICTOR)
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad], lr=1e-3)
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    contract = predictive_checkpoint_contract(
+        config, PredictiveStage.PREDICTOR, "stats", "calibration", False)
+    destination = tmp_path / "predictive.pt"
+    save_predictive_checkpoint(
+        destination, model, optimizer, scaler, contract,
+        stage_update=7, epoch=2, microbatch_offset=3,
+        scheduler_state={"last_update": 7},
+        sampler_state={"training_update": 7})
+    payload = torch.load(destination, map_location="cpu", weights_only=False)
+    payload["world_size"] = 4
+    payload["rng_by_rank"] = payload["rng_by_rank"] * 4
+    torch.save(payload, destination)
+
+    with pytest.raises(ValueError, match="same DDP world size"):
+        load_predictive_checkpoint(
+            destination, model, optimizer, scaler, contract)
+
+    restored = load_predictive_checkpoint(
+        destination, model, optimizer, scaler, contract,
+        allow_world_size_change=True)
+    assert restored["stage_update"] == 7
+    assert restored["epoch"] == 3
+    assert restored["microbatch_offset"] == 0
+    assert restored["sampler_state"] == {"training_update": 7}
+    assert restored["rng"] is None
+    assert restored["world_size_changed"] is True
+
+
 def test_predictor_objective_uses_same_recording_future_and_backpropagates():
     config = _config()
     model = _model(config)
