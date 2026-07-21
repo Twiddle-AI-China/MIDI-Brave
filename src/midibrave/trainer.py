@@ -441,15 +441,15 @@ def load_predictive_checkpoint(
 
 def load_predictive_warm_start(path: str | Path, model: PredictiveMidiBrave,
                                config: Config, target_stage: PredictiveStage | str) -> None:
-    """Load only model weights from the immediately preceding v3 stage."""
+    """Load model weights for a new stage or a fresh RAVE fine-tune."""
     target_stage = PredictiveStage(target_stage)
     expected_source = {
+        PredictiveStage.RAVE: PredictiveStage.RAVE,
         PredictiveStage.PREDICTOR: PredictiveStage.RAVE,
         PredictiveStage.ROLLOUT: PredictiveStage.PREDICTOR,
         PredictiveStage.GAN: PredictiveStage.ROLLOUT,
     }.get(target_stage)
-    if expected_source is None:
-        raise ValueError("RAVE stage does not accept a predictive warm start")
+    assert expected_source is not None
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or int(payload.get("format", 0)) != 5:
         raise ValueError("predictive warm start requires checkpoint format 5")

@@ -14,6 +14,7 @@ from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
                                predictive_latent_objective,
                                predictive_stage_objective,
                                load_predictive_checkpoint,
+                               load_predictive_warm_start,
                                load_predictive_calibration,
                                save_predictive_calibration,
                                save_predictive_checkpoint,
@@ -181,6 +182,28 @@ def test_predictive_resume_rejects_legacy_format():
         _config(), PredictiveStage.RAVE, None, None, False)
     with pytest.raises(ValueError, match="format 5"):
         validate_predictive_resume({"format": 4}, expected)
+
+
+def test_rave_checkpoint_can_warm_start_a_new_rave_finetune(tmp_path: Path):
+    config = _config()
+    source = _model(config)
+    configure_predictive_stage(source, PredictiveStage.RAVE)
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in source.parameters() if parameter.requires_grad], lr=1e-3)
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    contract = predictive_checkpoint_contract(
+        config, PredictiveStage.RAVE, None, None, False)
+    checkpoint = tmp_path / "rave.pt"
+    save_predictive_checkpoint(
+        checkpoint, source, optimizer, scaler, contract,
+        stage_update=28_000, epoch=4, microbatch_offset=3,
+        scheduler_state={"stage_update": 28_000}, sampler_state={"epoch": 4})
+
+    target = _model(config)
+    load_predictive_warm_start(checkpoint, target, config, PredictiveStage.RAVE)
+
+    for name, value in source.state_dict().items():
+        assert torch.equal(target.state_dict()[name], value)
 
 
 def test_format5_checkpoint_restores_exact_training_state(tmp_path: Path):
