@@ -1319,7 +1319,7 @@ def train_predictive(
             for group in optimizer.param_groups:
                 group["lr"] = lr
             unwrap(model).decoder.numeric_audit_enabled = (
-                stage is PredictiveStage.RAVE and stage_update >= 14080)
+                stage is PredictiveStage.RAVE and stage_update >= 14000)
             with torch.autocast("cuda", dtype=torch.float16):
                 objective = predictive_stage_objective(
                     unwrap(model), batch, config, stage, stage_update, stats,
