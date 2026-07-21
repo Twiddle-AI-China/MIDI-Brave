@@ -209,6 +209,8 @@ class LatentLossConfig:
     overlap: float = 0.1
     predicted_audio: float = 0.25
     clap_control: float = 0.5
+    clap_counterfactual: float = 0.0
+    rave_swap_source_rejection: float = 0.0
     rave_kl: float = 0.0001
     rave_pitch_adversary: float = 0.02
     gan_adversarial: float = 0.05
@@ -274,6 +276,10 @@ class Config:
                 raise ValueError("all predictive stage step counts must be positive")
             if not 0.0 <= predictive.clap_gradient_fraction_max <= 1.0:
                 raise ValueError("clap_gradient_fraction_max must be between zero and one")
+            assert latent_loss is not None
+            if (latent_loss.clap_counterfactual < 0.0
+                    or latent_loss.rave_swap_source_rejection < 0.0):
+                raise ValueError("counterfactual loss weights must be non-negative")
         return cls(
             seed=int(raw["seed"]),
             data=data,

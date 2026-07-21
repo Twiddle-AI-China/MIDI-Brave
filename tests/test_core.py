@@ -27,6 +27,7 @@ from midibrave.model import (ConditionalOutputGain, FiLM, FixedAntiAlias,
 from midibrave.trainer import (_clap_health_metrics, _merge_clap_health,
                                _pitch_adversary_scale,
                                _predictive_clap_auxiliary,
+                               _predictive_clap_auxiliaries,
                                _self_branch_schedule, _tensor_health_metrics)
 
 
@@ -261,6 +262,26 @@ def test_skipped_clap_does_not_cap_against_nonfinite_reference_gradient():
         maximum_fraction=0.25)
 
     assert torch.equal(auxiliary, torch.zeros_like(generated))
+
+
+def test_reconstruction_and_counterfactual_clap_share_one_gradient_cap():
+    reconstruction = torch.ones(2, 1, 4, requires_grad=True)
+    counterfactual = torch.ones(2, 1, 4, requires_grad=True)
+    total = reconstruction.sum() + 2.0 * counterfactual.sum()
+    requested = (torch.full_like(reconstruction, 10.0),
+                 torch.full_like(counterfactual, 10.0))
+
+    capped = _predictive_clap_auxiliaries(
+        total, (reconstruction, counterfactual), requested, 0.2)
+
+    combined = torch.cat([value.flatten() for value in capped])
+    reference = torch.cat([
+        torch.ones_like(reconstruction).flatten(),
+        torch.full_like(counterfactual, 2.0).flatten(),
+    ])
+    assert combined.norm() <= reference.norm() * 0.2 + 1e-6
+    assert capped[0].shape == reconstruction.shape
+    assert capped[1].shape == counterfactual.shape
 
 
 def test_tensor_health_metrics_identifies_first_nonfinite_pipeline_value():

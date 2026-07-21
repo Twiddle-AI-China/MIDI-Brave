@@ -66,6 +66,8 @@ latent_loss:
   overlap: 0.1
   predicted_audio: 0.25
   clap_control: 0.5
+  clap_counterfactual: 0.0
+  rave_swap_source_rejection: 0.0
   rave_kl: 0.0001
   rave_pitch_adversary: 0.02
   gan_adversarial: 0.05

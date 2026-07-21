@@ -231,6 +231,7 @@ def predictive_stage_objective(
             "rave_pitch_adversary": pitch,
         }
         midi_swap_audio = None
+        counterfactual_diagnostics: dict[str, Tensor] = {}
         if config.loss.cross_pitch > 0.0:
             if swap_pitch is None:
                 raise ValueError("RAVE MIDI swap supervision requires a pitch objective")
@@ -238,22 +239,62 @@ def predictive_stage_objective(
             missing = required - batch.keys()
             if missing:
                 raise ValueError(f"RAVE MIDI swap batch is missing: {sorted(missing)}")
-            midi_swap_audio = model.decode_latents(
-                reconstruction.posterior.latent, batch["clap_a"], batch["note_b"],
-                batch["velocity_a"], batch.get("excitation_seed_a"))
-            changed = batch["note_a"].ne(batch["note_b"]).to(
-                batch["pitch_confidence_a"].dtype)[:, None]
-            components["midi_swap_pitch"] = swap_pitch(
-                midi_swap_audio, batch["note_b"],
-                batch["pitch_confidence_a"] * changed,
-                batch["pitch_valid_mask_a"])
+            use_mixed = (losses.rave_swap_source_rejection > 0.0
+                         or losses.clap_counterfactual > 0.0)
+            if use_mixed:
+                if "preset_id" not in batch:
+                    raise ValueError("counterfactual controls require preset_id")
+                midi_mask, timbre_mask, target_index = counterfactual_control_assignment(
+                    list(batch["preset_id"]), reconstruction.audio.device)
+                clap = batch["clap_a"].clone()
+                clap[timbre_mask] = batch["clap_a"].index_select(
+                    0, target_index[timbre_mask])
+                note = torch.where(midi_mask, batch["note_b"], batch["note_a"])
+                counterfactual_audio = model.decode_latents(
+                    reconstruction.posterior.latent, clap, note,
+                    batch["velocity_a"], batch.get("excitation_seed_a"))
+                changed = batch["note_a"].ne(batch["note_b"]) & midi_mask
+                weights = midi_swap_example_weights(
+                    batch["note_a"], batch["note_b"], changed)
+                components["midi_swap_pitch"] = swap_pitch(
+                    counterfactual_audio[midi_mask], batch["note_b"][midi_mask],
+                    batch["pitch_confidence_a"][midi_mask]
+                    * changed[midi_mask, None].to(batch["pitch_confidence_a"]),
+                    batch["pitch_valid_mask_a"][midi_mask])
+                components["midi_swap_source_rejection"] = swap_pitch.source_rejection(
+                    counterfactual_audio[midi_mask], batch["note_b"][midi_mask],
+                    batch["note_a"][midi_mask],
+                    batch["pitch_confidence_a"][midi_mask],
+                    batch["pitch_valid_mask_a"][midi_mask], weights[midi_mask])
+                counterfactual_diagnostics = {
+                    "counterfactual_audio": counterfactual_audio,
+                    "counterfactual_midi_mask": midi_mask,
+                    "counterfactual_timbre_mask": timbre_mask,
+                    "counterfactual_target_index": target_index,
+                    "counterfactual_target_clap": clap,
+                    "counterfactual_source_clap": batch["clap_a"],
+                }
+            else:
+                midi_swap_audio = model.decode_latents(
+                    reconstruction.posterior.latent, batch["clap_a"], batch["note_b"],
+                    batch["velocity_a"], batch.get("excitation_seed_a"))
+                changed = batch["note_a"].ne(batch["note_b"]).to(
+                    batch["pitch_confidence_a"].dtype)[:, None]
+                components["midi_swap_pitch"] = swap_pitch(
+                    midi_swap_audio, batch["note_b"],
+                    batch["pitch_confidence_a"] * changed,
+                    batch["pitch_valid_mask_a"])
+                components["midi_swap_source_rejection"] = waveform.new_zeros(())
         else:
             components["midi_swap_pitch"] = waveform.new_zeros(())
+            components["midi_swap_source_rejection"] = waveform.new_zeros(())
         total = (waveform + config.loss.self_stft * spectral
                  + schedule.rave_kl * components["rave_kl"]
                  + schedule.rave_pitch_adversary * pitch
                  + config.loss.cross_pitch * config.loss.analytic_pitch
-                 * components["midi_swap_pitch"])
+                 * components["midi_swap_pitch"]
+                 + losses.rave_swap_source_rejection
+                 * components["midi_swap_source_rejection"])
         return PredictiveStageObjective(
             total, components, reconstruction.audio, batch["audio_a"], {
                 "input_audio": batch["audio_a"],
@@ -267,6 +308,7 @@ def predictive_stage_objective(
                 "decoder_audio": reconstruction.audio,
                 **({"midi_swap_audio": midi_swap_audio}
                    if midi_swap_audio is not None else {}),
+                **counterfactual_diagnostics,
             })
     if statistics is None:
         raise ValueError(f"{stage.value} stage requires latent statistics")
@@ -982,6 +1024,31 @@ def _predictive_clap_auxiliary(
         auxiliary, reference_gradient, maximum_fraction)
 
 
+def _predictive_clap_auxiliaries(
+        total: Tensor, waveforms: tuple[Tensor, ...],
+        auxiliaries: tuple[Tensor, ...], maximum_fraction: float,
+        ) -> tuple[Tensor, ...]:
+    """Cap several CLAP injections against one shared base-gradient budget."""
+    if len(waveforms) != len(auxiliaries) or not waveforms:
+        raise ValueError("CLAP waveforms and auxiliaries must be equally non-empty")
+    references = torch.autograd.grad(
+        total, waveforms, retain_graph=True, allow_unused=True)
+    references = tuple(
+        torch.zeros_like(waveform) if reference is None else reference
+        for waveform, reference in zip(waveforms, references))
+    sizes = [value.numel() for value in auxiliaries]
+    combined_auxiliary = torch.cat([value.reshape(-1) for value in auxiliaries])
+    combined_reference = torch.cat([value.reshape(-1) for value in references])
+    combined_capped = cap_auxiliary_gradient(
+        combined_auxiliary, combined_reference, maximum_fraction)
+    values = []
+    offset = 0
+    for auxiliary, size in zip(auxiliaries, sizes):
+        values.append(combined_capped[offset:offset + size].reshape_as(auxiliary))
+        offset += size
+    return tuple(values)
+
+
 def _predictive_scaler_step(scaler: Any, optimizer: Any, *,
                             globally_finite: bool,
                             previous_scale: float) -> bool:
@@ -1375,7 +1442,9 @@ def train_predictive(
                   if stage is PredictiveStage.RAVE and config.loss.cross_pitch > 0
                   else None)
     clap_objective = None
-    if config.latent_loss.clap_control > 0 and config.data.clap_checkpoint:
+    if ((config.latent_loss.clap_control > 0
+         or config.latent_loss.clap_counterfactual > 0)
+            and config.data.clap_checkpoint):
         clap_objective = FrozenClapReconstructionObjective(
             config.data.clap_checkpoint, config.data.sample_rate, device,
             maximum_gradient_norm=0.0)
@@ -1450,14 +1519,61 @@ def train_predictive(
                         })
                         warning.update(pipeline_health)
                         print(json.dumps(warning, sort_keys=True), flush=True)
-                auxiliary = _predictive_clap_auxiliary(
-                    clap_result, total, generated,
-                    config.latent_loss.clap_control,
-                    config.predictive.clap_gradient_fraction_max)
-                surrogate = (generated.float() * auxiliary.float()).sum()
                 clap_loss = clap_result.losses.mean()
+                reconstruction_auxiliary = (
+                    torch.zeros_like(generated) if bool(clap_result.health.skipped.item())
+                    else (clap_result.gradients * config.latent_loss.clap_control
+                          / generated.shape[0]))
+                waveforms = [generated]
+                requested_auxiliaries = [reconstruction_auxiliary]
+                counterfactual_loss = total.new_zeros(())
+                diagnostics = objective.diagnostic_tensors or {}
+                if (config.latent_loss.clap_counterfactual > 0.0
+                        and "counterfactual_audio" in diagnostics):
+                    counterfactual = diagnostics["counterfactual_audio"]
+                    timbre_mask = diagnostics["counterfactual_timbre_mask"].bool()
+                    if bool(timbre_mask.any().item()):
+                        timbre_audio = counterfactual[timbre_mask]
+                        timbre_valid = torch.full(
+                            (timbre_audio.shape[0],), timbre_audio.shape[-1],
+                            device=device, dtype=torch.long)
+                        control_result = clap_objective.waveform_gradients_to_embeddings(
+                            timbre_audio,
+                            diagnostics["counterfactual_target_clap"][timbre_mask],
+                            diagnostics["counterfactual_source_clap"][timbre_mask],
+                            timbre_valid)
+                        global_control_health = _distributed_clap_health(
+                            control_result.health, device)
+                        clap_health_cumulative = _merge_clap_health(
+                            clap_health_cumulative, global_control_health)
+                        clap_health_interval = _merge_clap_health(
+                            clap_health_interval, global_control_health)
+                        counterfactual_loss = control_result.losses.mean()
+                        objective.components["clap_counterfactual"] = counterfactual_loss
+                        objective.components["clap_counterfactual_following"] = (
+                            control_result.following.float().mean())
+                        objective.components["clap_counterfactual_target_cosine"] = (
+                            control_result.target_cosine.mean())
+                        objective.components["clap_counterfactual_source_cosine"] = (
+                            control_result.source_cosine.mean())
+                        counterfactual_auxiliary = torch.zeros_like(counterfactual)
+                        if not bool(control_result.health.skipped.item()):
+                            counterfactual_auxiliary[timbre_mask] = (
+                                control_result.gradients
+                                * config.latent_loss.clap_counterfactual
+                                / timbre_audio.shape[0])
+                        waveforms.append(counterfactual)
+                        requested_auxiliaries.append(counterfactual_auxiliary)
+                capped = _predictive_clap_auxiliaries(
+                    total, tuple(waveforms), tuple(requested_auxiliaries),
+                    config.predictive.clap_gradient_fraction_max)
+                surrogate = sum(
+                    (waveform.float() * auxiliary.float()).sum()
+                    for waveform, auxiliary in zip(waveforms, capped))
                 total = (total + surrogate - surrogate.detach()
-                         + (config.latent_loss.clap_control * clap_loss).detach())
+                         + (config.latent_loss.clap_control * clap_loss).detach()
+                         + (config.latent_loss.clap_counterfactual
+                            * counterfactual_loss).detach())
 
             scaler.scale(total / config.train.grad_accum).backward()
             accumulated += 1

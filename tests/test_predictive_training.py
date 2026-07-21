@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,13 @@ class _RecordingSwapPitch(torch.nn.Module):
     def forward(self, audio, note, confidence, valid):
         self.notes = note.detach().clone()
         return audio.float().square().mean()
+
+    def source_rejection(self, audio, target_note, source_note,
+                         confidence, valid, weights, margin=0.5):
+        self.source_notes = source_note.detach().clone()
+        self.target_notes = target_note.detach().clone()
+        self.weights = weights.detach().clone()
+        return audio.float().abs().mean()
 
 
 def test_predictive_nonfinite_global_gradient_never_steps_optimizer():
@@ -201,6 +209,54 @@ def test_rave_objective_supervises_counterfactual_midi_note_swap():
     objective.total.backward()
     assert any(parameter.grad is not None for parameter in model.midi.parameters())
     assert any(parameter.grad is not None for parameter in model.decoder.parameters())
+
+
+def test_rave_objective_uses_one_mixed_counterfactual_decoder_forward():
+    config = _config()
+    assert config.latent_loss is not None
+    config = replace(config, latent_loss=replace(
+        config.latent_loss, rave_swap_source_rejection=0.5,
+        clap_counterfactual=1.0))
+    model = _model(config)
+    configure_predictive_stage(model, PredictiveStage.RAVE)
+    pitch = _RecordingSwapPitch()
+    calls = []
+    original_decode = model.decode_latents
+
+    def recording_decode(z_rave, clap, note, velocity, excitation_seed=None):
+        calls.append((clap.detach().clone(), note.detach().clone()))
+        return original_decode(z_rave, clap, note, velocity, excitation_seed)
+
+    model.decode_latents = recording_decode
+    frames = config.data.window_samples // config.data.pitch_hop_length
+    batch_size = 4
+    batch = {
+        "audio_a": torch.randn(batch_size, 1, config.data.window_samples),
+        "clap_a": torch.randn(batch_size, config.model.clap_dim),
+        "note_a": torch.tensor([48, 60, 52, 64]),
+        "note_b": torch.tensor([36, 67, 40, 71]),
+        "velocity_a": torch.tensor([80.0, 100.0, 90.0, 70.0]),
+        "pitch_confidence_a": torch.ones(batch_size, frames),
+        "pitch_valid_mask_a": torch.ones(batch_size, frames, dtype=torch.bool),
+        "valid_samples_a": torch.full((batch_size,), config.data.window_samples),
+        "excitation_seed_a": torch.arange(batch_size),
+        "preset_id": ["a", "a", "b", "b"],
+    }
+
+    objective = predictive_stage_objective(
+        model, batch, config, PredictiveStage.RAVE, 4, swap_pitch=pitch)
+
+    assert len(calls) == 1
+    counterfactual_clap, counterfactual_note = calls[0]
+    assert torch.equal(counterfactual_note[:2], batch["note_b"][:2])
+    assert torch.equal(counterfactual_note[2:], batch["note_a"][2:])
+    assert torch.equal(counterfactual_clap[:2], batch["clap_a"][:2])
+    assert not torch.equal(counterfactual_clap[2:], batch["clap_a"][2:])
+    assert objective.components["midi_swap_source_rejection"].item() > 0
+    diagnostics = objective.diagnostic_tensors
+    assert diagnostics is not None
+    assert diagnostics["counterfactual_timbre_mask"].sum().item() == 2
+    assert diagnostics["counterfactual_audio"].shape == batch["audio_a"].shape
 
 
 def test_format5_contract_rejects_stage_and_artifact_mismatch():
