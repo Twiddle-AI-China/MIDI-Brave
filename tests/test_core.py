@@ -22,7 +22,8 @@ from midibrave.losses import (BraveMultiScaleDiscriminator, DifferentiableCrepeO
                               MultiScaleEnvelopeLoss, ReconstructionLoss,
                               SpectralPitchObjective, discriminator_hinge,
                               feature_matching, generator_adversarial, latent_distribution_loss,
-                              rms_db, velocity_delta_matching_loss, velocity_ranking_loss)
+                              rms_db, _stable_clap_logmel_output,
+                              velocity_delta_matching_loss, velocity_ranking_loss)
 from midibrave.model import (ConditionalOutputGain, FiLM, FixedAntiAlias,
                              HarmonicExcitation, MidiBrave, PQMF, PairOutput)
 from midibrave.trainer import (_clap_health_metrics, _merge_clap_health,
@@ -52,6 +53,37 @@ class _FakeDifferentiableClap(nn.Module):
                 delta.abs().mean(), waveform.max(), waveform.min(),
             )))
         return self.projection(torch.stack(features))
+
+
+class _FakeLogmel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("melW", torch.eye(2))
+        self.amin = 1e-10
+        self.top_db = None
+        self.is_log = True
+
+    def forward(self, spectrogram):
+        mel = torch.matmul(spectrogram, self.melW)
+        return 10.0 * torch.log10(torch.clamp(mel, min=self.amin))
+
+
+def test_clap_logmel_stabilizer_preserves_forward_and_bounds_backward():
+    module = _FakeLogmel()
+    spectrogram = torch.tensor(
+        [[[[1e-12, 1e-8], [1e-5, 1.0]]]], requires_grad=True)
+    original = module(spectrogram)
+
+    stabilized = _stable_clap_logmel_output(
+        module, (spectrogram,), original)
+
+    assert torch.equal(stabilized, original)
+    upstream = torch.tensor([[[[float("nan"), float("inf")],
+                               [1e30, -1e30]]]])
+    gradient, = torch.autograd.grad(
+        stabilized, spectrogram, grad_outputs=upstream)
+    assert torch.isfinite(gradient).all()
+    assert gradient.abs().max().item() <= 5e8
 
 
 def _midi_sine(note: int, sample_rate: int, samples: int) -> torch.Tensor:

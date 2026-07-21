@@ -72,6 +72,42 @@ class ClapControlGradient(ClapWaveformGradient):
     following: Tensor
 
 
+def _bounded_clap_feature_gradient(gradient: Tensor) -> Tensor:
+    """Keep the frozen CLAP frontend backward finite without changing its forward."""
+    limit = 1e3
+    return torch.nan_to_num(
+        gradient, nan=0.0, posinf=limit, neginf=-limit).clamp(-limit, limit)
+
+
+def _stable_clap_logmel_output(module: nn.Module, inputs: tuple[Tensor, ...],
+                                output: Tensor) -> Tensor:
+    """Use an exact-forward, bounded-backward proxy for CLAP log-mel features.
+
+    torchlibrosa's 1e-10 power floor can amplify an otherwise finite semantic
+    gradient enough that the preceding mel matrix multiply produces NaNs.  The
+    proxy preserves the frozen encoder's output bit-for-bit while bounding only
+    the auxiliary derivative below -50 dB.
+    """
+    if (not isinstance(output, Tensor) or not output.requires_grad
+            or len(inputs) != 1 or not isinstance(inputs[0], Tensor)
+            or not bool(getattr(module, "is_log", False))
+            or getattr(module, "top_db", None) is not None):
+        return output
+    spectrogram = inputs[0]
+    mel_weights = getattr(module, "melW", None)
+    if not isinstance(mel_weights, Tensor):
+        return output
+    mel = torch.matmul(spectrogram, mel_weights)
+    amin = float(getattr(module, "amin", 1e-10))
+    backward_floor = max(amin, 1e-5)
+    active = mel.detach().gt(amin).to(dtype=mel.dtype)
+    scale = (10.0 / math.log(10.0)) * active / mel.detach().clamp_min(backward_floor)
+    proxy = mel * scale
+    stabilized = output.detach() + (proxy - proxy.detach())
+    stabilized.register_hook(_bounded_clap_feature_gradient)
+    return stabilized
+
+
 class FrozenClapReconstructionObjective(nn.Module):
     """Window-aligned differentiable CLAP reconstruction objective.
 
@@ -107,6 +143,13 @@ class FrozenClapReconstructionObjective(nn.Module):
         self.encoder = encoder.to(device)
         self.encoder.requires_grad_(False)
         self.encoder.eval()
+        self._clap_logmel_hook = None
+        model = getattr(self.encoder, "model", None)
+        audio_branch = getattr(model, "audio_branch", None)
+        logmel = getattr(audio_branch, "logmel_extractor", None)
+        if isinstance(logmel, nn.Module):
+            self._clap_logmel_hook = logmel.register_forward_hook(
+                _stable_clap_logmel_output)
         if sample_rate == self.CLAP_SAMPLE_RATE:
             self.resample: nn.Module = nn.Identity()
         else:
