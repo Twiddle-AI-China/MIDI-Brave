@@ -33,6 +33,7 @@ from .losses import (BraveMultiScaleDiscriminator, ClapHealth,
                      SpectralPitchObjective,
                      discriminator_hinge, feature_matching, generator_adversarial)
 from .model import ChannelRMSNorm, MidiBrave
+from .latent_predictor import rollout_blocks
 from .predictive_model import PredictiveMidiBrave
 from .predictive_losses import (LatentStatistics, overlap_loss,
                                 prediction_loss)
@@ -96,6 +97,58 @@ class PredictiveStageObjective:
     generated_audio: Tensor | None = None
     target_audio: Tensor | None = None
     diagnostic_tensors: dict[str, Tensor] | None = None
+
+
+@dataclass(frozen=True)
+class PredictorCounterfactualRollout:
+    audio: Tensor
+    rollout: Tensor
+    latent_sequence: Tensor
+    midi_mask: Tensor
+    timbre_mask: Tensor
+    target_index: Tensor
+    target_clap: Tensor
+    source_clap: Tensor
+    target_note: Tensor
+
+
+def predictor_counterfactual_rollout(
+    model: PredictiveMidiBrave, batch: dict[str, Any], config: Config,
+) -> PredictorCounterfactualRollout:
+    """Roll out one causal future under disjoint MIDI and timbre edits."""
+    if config.predictive is None:
+        raise ValueError("predictor counterfactual rollout requires a v3 config")
+    required = {"rave_a", "clap_a", "note_a", "note_b", "velocity_a", "preset_id"}
+    missing = required - batch.keys()
+    if missing:
+        raise ValueError(f"predictor counterfactual batch is missing: {sorted(missing)}")
+    predictive = config.predictive
+    source_latent = batch["rave_a"]
+    if (source_latent.ndim != 3
+            or source_latent.shape[1] != predictive.rave_latent_dim
+            or source_latent.shape[-1] < predictive.history_frames):
+        raise ValueError("rave_a does not contain a valid predictor history")
+    history = source_latent[..., :predictive.history_frames]
+    midi_mask, timbre_mask, target_index = counterfactual_control_assignment(
+        list(batch["preset_id"]), history.device)
+    target_clap = batch["clap_a"].clone()
+    target_clap[timbre_mask] = batch["clap_a"].index_select(
+        0, target_index[timbre_mask])
+    target_note = torch.where(midi_mask, batch["note_b"], batch["note_a"])
+    frames = predictive.predictor_control_rollout_frames
+    result = rollout_blocks(
+        model.predictor, history, model.project_clap(target_clap, frames),
+        model.midi_control(target_note, batch["velocity_a"], frames),
+        predictive.stride_frames)
+    sequence = torch.cat((history, result.latent), dim=-1)
+    audio = model.decode_latents(
+        sequence, target_clap, target_note, batch["velocity_a"],
+        batch.get("excitation_seed_a"))
+    return PredictorCounterfactualRollout(
+        audio=audio, rollout=result.latent, latent_sequence=sequence,
+        midi_mask=midi_mask, timbre_mask=timbre_mask, target_index=target_index,
+        target_clap=target_clap, source_clap=batch["clap_a"],
+        target_note=target_note)
 
 
 def _linear_warmup(update: int, updates: int) -> float:

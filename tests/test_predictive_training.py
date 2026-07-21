@@ -13,6 +13,7 @@ from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
                                counterfactual_control_assignment,
                                midi_swap_example_weights,
                                predictive_checkpoint_contract,
+                               predictor_counterfactual_rollout,
                                predictive_loss_schedule,
                                predictive_latent_objective,
                                predictive_stage_objective,
@@ -387,6 +388,54 @@ def test_predictor_objective_uses_same_recording_future_and_backpropagates():
     objective.total.backward()
     assert any(parameter.grad is not None for parameter in model.predictor.parameters())
     assert all(parameter.grad is None for parameter in model.encoder.parameters())
+
+
+def test_predictor_counterfactual_rollout_mixes_controls_without_cross_latent_target():
+    config = _config()
+    assert config.predictive is not None
+    model = _model(config)
+    configure_predictive_stage(model, PredictiveStage.PREDICTOR)
+    calls = []
+
+    def recording_decode(z_rave, clap, note, velocity, excitation_seed=None):
+        calls.append({
+            "z_rave": z_rave.detach().clone(),
+            "clap": clap.detach().clone(),
+            "note": note.detach().clone(),
+        })
+        return z_rave.mean(dim=1, keepdim=True).repeat_interleave(
+            config.predictive.samples_per_latent, dim=-1)
+
+    model.decode_latents = recording_decode
+    batch = {
+        "rave_a": torch.randn(4, 16, 24),
+        "rave_b": torch.full((4, 16, 24), float("nan")),
+        "clap_a": torch.randn(4, 512),
+        "note_a": torch.tensor([48, 60, 52, 64]),
+        "note_b": torch.tensor([36, 67, 40, 71]),
+        "velocity_a": torch.tensor([80.0, 100.0, 90.0, 70.0]),
+        "excitation_seed_a": torch.arange(4),
+        "preset_id": ["a", "a", "b", "b"],
+    }
+
+    result = predictor_counterfactual_rollout(model, batch, config)
+
+    assert len(calls) == 1
+    assert torch.equal(result.midi_mask, torch.tensor([True, True, False, False]))
+    assert torch.equal(result.timbre_mask, ~result.midi_mask)
+    assert torch.equal(result.target_note[:2], batch["note_b"][:2])
+    assert torch.equal(result.target_note[2:], batch["note_a"][2:])
+    assert torch.equal(result.target_clap[:2], batch["clap_a"][:2])
+    assert not torch.equal(result.target_clap[2:], batch["clap_a"][2:])
+    assert result.rollout.shape == (
+        4, config.predictive.rave_latent_dim,
+        config.predictive.predictor_control_rollout_frames)
+    assert result.latent_sequence.shape[-1] == (
+        config.predictive.history_frames
+        + config.predictive.predictor_control_rollout_frames)
+    assert torch.isfinite(result.rollout).all()
+    assert torch.equal(calls[0]["note"], result.target_note)
+    assert torch.equal(calls[0]["clap"], result.target_clap)
 
 
 def test_rollout_objective_decodes_predicted_future():
