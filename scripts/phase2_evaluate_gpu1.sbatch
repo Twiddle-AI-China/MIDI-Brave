@@ -25,5 +25,5 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores docker run --rm \
   -e PYTHONPATH=/workspace/MidiBrave/src \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
   -w /workspace/MidiBrave "$image" \
-  midibrave-evaluate --config "$config" --checkpoint "$CHECKPOINT" \
+  python -m midibrave.evaluate --config "$config" --checkpoint "$CHECKPOINT" \
   --output "$OUTPUT" --pairs "$pairs" --device cuda
