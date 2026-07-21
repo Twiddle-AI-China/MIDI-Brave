@@ -424,25 +424,51 @@ class SpectralPitchObjective(nn.Module):
         self.register_buffer("frequency_keep", (frequency >= 50.0) & (frequency <= 2000.0),
                              persistent=False)
 
+    def _mean_magnitude(self, audio: Tensor) -> Tensor:
+        x = audio.float().squeeze(1)
+        return torch.stft(
+            x, self.fft_size, self.fft_size // 4, self.fft_size,
+            self.window, return_complex=True, pad_mode="constant").abs().mean(-1)
+
+    def _harmonic_score(self, magnitude: Tensor, note: Tensor) -> Tensor:
+        fundamental = midi_to_hz(note.float()).to(magnitude)
+        harmonics = torch.arange(1, 9, device=magnitude.device, dtype=torch.float32)
+        frequencies = fundamental[..., None] * harmonics
+        bins = torch.round(frequencies / (self.sample_rate / self.fft_size)).long()
+        keep = frequencies.le(self.sample_rate / 2.0) & frequencies.ge(50.0)
+        bins = bins.clamp(0, magnitude.shape[-1] - 1)
+        expanded = magnitude
+        while expanded.ndim < bins.ndim:
+            expanded = expanded.unsqueeze(1)
+        expanded = expanded.expand(*bins.shape[:-1], magnitude.shape[-1])
+        gathered = expanded.gather(-1, bins)
+        harmonic_weight = (1.0 / harmonics) * keep
+        score = (gathered.clamp_min(1e-7).log() * harmonic_weight).sum(-1)
+        return score / harmonic_weight.sum(-1).clamp_min(1e-7)
+
+    def source_rejection(
+            self, audio: Tensor, target_note: Tensor, source_note: Tensor,
+            confidence: Tensor, valid: Tensor, weights: Tensor,
+            margin: float = 0.5) -> Tensor:
+        """Require the target-note harmonic score to beat the source note."""
+        with torch.autocast(device_type=audio.device.type, enabled=False):
+            magnitude = self._mean_magnitude(audio)
+            target = self._harmonic_score(magnitude, target_note)
+            source = self._harmonic_score(magnitude, source_note)
+            sample_weight = ((valid.float() * confidence.float()).mean(-1)
+                             * weights.float())
+            loss = F.softplus(4.0 * (source - target + margin))
+            return ((loss * sample_weight).sum()
+                    / sample_weight.sum().clamp_min(1e-7))
+
     def _statistics(self, audio: Tensor, note: Tensor, confidence: Tensor,
                     valid: Tensor) -> tuple[dict[str, Tensor], Tensor]:
         with torch.autocast(device_type=audio.device.type, enabled=False):
             x = audio.float().squeeze(1)
-            magnitude = torch.stft(x, self.fft_size, self.fft_size // 4, self.fft_size,
-                                   self.window, return_complex=True,
-                                   pad_mode="constant").abs().mean(-1)
+            magnitude = self._mean_magnitude(audio)
             offsets = x.new_tensor((0.0, -1.0, 1.0, -12.0, 12.0))
             candidate_note = note.float()[:, None] + offsets[None]
-            fundamental = midi_to_hz(candidate_note).to(x)
-            harmonics = torch.arange(1, 9, device=x.device, dtype=torch.float32)
-            frequencies = fundamental[..., None] * harmonics
-            bins = torch.round(frequencies / (self.sample_rate / self.fft_size)).long()
-            keep = frequencies.le(self.sample_rate / 2.0) & frequencies.ge(50.0)
-            bins = bins.clamp(0, magnitude.shape[-1] - 1)
-            gathered = magnitude[:, None, :].expand(-1, offsets.numel(), -1).gather(2, bins)
-            harmonic_weight = (1.0 / harmonics)[None, None] * keep
-            comb_score = (gathered.clamp_min(1e-7).log() * harmonic_weight).sum(-1)
-            comb_score = comb_score / harmonic_weight.sum(-1).clamp_min(1e-7)
+            comb_score = self._harmonic_score(magnitude, candidate_note)
             comb = F.cross_entropy(comb_score * 4.0,
                                    torch.zeros(x.shape[0], device=x.device, dtype=torch.long),
                                    reduction="none")

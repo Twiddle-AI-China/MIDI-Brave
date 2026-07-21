@@ -18,7 +18,8 @@ from midibrave.evaluate import (pitch_measurements, ripple_error, spectral_metri
                                 transient_metrics)
 from midibrave.losses import (BraveMultiScaleDiscriminator, DifferentiableCrepeObjective,
                               FrozenClapReconstructionObjective, MultiResolutionSTFTLoss,
-                              MultiScaleEnvelopeLoss, ReconstructionLoss, discriminator_hinge,
+                              MultiScaleEnvelopeLoss, ReconstructionLoss,
+                              SpectralPitchObjective, discriminator_hinge,
                               feature_matching, generator_adversarial, latent_distribution_loss,
                               rms_db, velocity_delta_matching_loss, velocity_ranking_loss)
 from midibrave.model import (ConditionalOutputGain, FiLM, FixedAntiAlias,
@@ -48,6 +49,28 @@ class _FakeDifferentiableClap(nn.Module):
                 delta.abs().mean(), waveform.max(), waveform.min(),
             )))
         return self.projection(torch.stack(features))
+
+
+def _midi_sine(note: int, sample_rate: int, samples: int) -> torch.Tensor:
+    frequency = 440.0 * 2.0 ** ((note - 69) / 12.0)
+    time = torch.arange(samples, dtype=torch.float32) / sample_rate
+    return torch.sin(2.0 * torch.pi * frequency * time).view(1, 1, -1)
+
+
+def test_source_rejection_prefers_target_tone_over_source_tone():
+    sample_rate = 24000
+    objective = SpectralPitchObjective(sample_rate, fft_size=2048)
+    target_audio = _midi_sine(48, sample_rate, 8192)
+    source_audio = _midi_sine(60, sample_rate, 8192)
+    arguments = (
+        torch.tensor([48]), torch.tensor([60]), torch.ones(1, 32),
+        torch.ones(1, 32, dtype=torch.bool), torch.ones(1))
+
+    target_loss = objective.source_rejection(target_audio, *arguments)
+    source_loss = objective.source_rejection(source_audio, *arguments)
+
+    assert target_loss < source_loss
+    assert torch.isfinite(target_loss)
 
 
 def test_frozen_clap_window_loss_is_aligned_and_differentiable():
