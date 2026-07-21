@@ -7,6 +7,7 @@ import torch
 from midibrave.predictive_losses import LatentStatistics
 
 from midibrave.config import Config
+from midibrave.losses import FrozenClapReconstructionObjective
 from midibrave.predictive_model import PredictiveMidiBrave
 from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
                                _predictive_scaler_step,
@@ -55,6 +56,25 @@ class _RecordingSwapPitch(torch.nn.Module):
         self.target_notes = target_note.detach().clone()
         self.weights = weights.detach().clone()
         return audio.float().abs().mean()
+
+
+class _TinyPredictorClap(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.projection = torch.nn.Linear(4, 512, bias=False)
+        torch.manual_seed(19)
+        torch.nn.init.normal_(self.projection.weight)
+
+    def get_audio_embedding_from_data(self, waveforms, use_tensor=True):
+        assert use_tensor
+        features = []
+        for waveform in waveforms:
+            delta = waveform[1:] - waveform[:-1]
+            features.append(torch.stack((
+                waveform.mean(), waveform.square().mean().sqrt(),
+                waveform.abs().mean(), delta.abs().mean(),
+            )))
+        return self.projection(torch.stack(features))
 
 
 def test_predictive_nonfinite_global_gradient_never_steps_optimizer():
@@ -497,6 +517,54 @@ def test_predictor_midi_control_is_sparse_and_updates_only_predictor():
     assert any(parameter.grad is not None for parameter in model.predictor.parameters())
     assert all(parameter.grad is None for parameter in model.encoder.parameters())
     assert all(parameter.grad is None for parameter in model.decoder.parameters())
+
+
+def test_predictor_clap_and_midi_controls_share_frozen_parameter_boundary():
+    config = _config()
+    assert config.predictive is not None and config.latent_loss is not None
+    config = replace(config, latent_loss=replace(
+        config.latent_loss, rave_swap_source_rejection=0.5,
+        clap_counterfactual=1.0))
+    model = _model(config)
+    configure_predictive_stage(model, PredictiveStage.PREDICTOR)
+
+    def differentiable_decode(z_rave, clap, note, velocity, excitation_seed=None):
+        return z_rave.mean(dim=1, keepdim=True).repeat_interleave(
+            config.predictive.samples_per_latent, dim=-1)
+
+    model.decode_latents = differentiable_decode
+    frames = config.data.window_samples // config.data.pitch_hop_length
+    batch = {
+        "rave_a": torch.randn(4, 16, 32),
+        "clap_a": torch.nn.functional.normalize(torch.randn(4, 512), dim=-1),
+        "note_a": torch.tensor([48, 60, 52, 64]),
+        "note_b": torch.tensor([36, 67, 40, 71]),
+        "velocity_a": torch.tensor([80.0, 100.0, 90.0, 70.0]),
+        "pitch_confidence_a": torch.ones(4, frames),
+        "pitch_valid_mask_a": torch.ones(4, frames, dtype=torch.bool),
+        "preset_id": ["a", "a", "b", "b"],
+    }
+    statistics = LatentStatistics(
+        torch.ones(16), torch.ones(16), torch.ones(16))
+    clap = FrozenClapReconstructionObjective(
+        None, config.data.sample_rate, torch.device("cpu"),
+        maximum_gradient_norm=0.0, encoder=_TinyPredictorClap())
+
+    objective = predictive_stage_objective(
+        model, batch, config, PredictiveStage.PREDICTOR, 0, statistics,
+        swap_pitch=_RecordingSwapPitch(), clap_objective=clap)
+
+    assert torch.isfinite(objective.components["predictor_clap_target_cosine"])
+    assert torch.isfinite(objective.components["predictor_clap_source_cosine"])
+    assert 0.0 <= objective.components["predictor_clap_following"].item() <= 1.0
+    assert objective.components["predictor_control_gradient_scale"].item() <= 1.0
+    diagnostics = objective.diagnostic_tensors
+    assert diagnostics is not None
+    assert diagnostics["predictor_control_clap_health"].shape == (9,)
+    objective.total.backward()
+    assert any(parameter.grad is not None for parameter in model.predictor.parameters())
+    for module in (model.encoder, model.decoder, model.clap_projection, model.midi):
+        assert all(parameter.grad is None for parameter in module.parameters())
 
 
 def test_rollout_objective_decodes_predicted_future():

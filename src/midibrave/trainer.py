@@ -269,6 +269,7 @@ def predictive_stage_objective(
     calibrated_weights: dict[str, float] | None = None,
     stft: MultiResolutionSTFTLoss | None = None,
     swap_pitch: nn.Module | None = None,
+    clap_objective: FrozenClapReconstructionObjective | None = None,
 ) -> PredictiveStageObjective:
     """Compute one generator objective for any pre-GAN predictive stage."""
     stage = PredictiveStage(stage)
@@ -384,6 +385,13 @@ def predictive_stage_objective(
             "predictor_midi_swap_pitch": zero,
             "predictor_midi_swap_source_rejection": zero,
             "predictor_midi_control_total": zero,
+            "predictor_clap_control_total": zero,
+            "predictor_clap_target_cosine": zero,
+            "predictor_clap_source_cosine": zero,
+            "predictor_clap_following": zero,
+            "predictor_control_total": zero,
+            "predictor_control_gradient_fraction_limit": zero,
+            "predictor_control_gradient_scale": zero,
         })
         if not _predictor_control_active(config, update):
             return PredictiveStageObjective(latent_objective.total, components)
@@ -410,10 +418,60 @@ def predictive_stage_objective(
         midi_control = (
             config.loss.cross_pitch * config.loss.analytic_pitch * pitch
             + losses.rave_swap_source_rejection * source_rejection)
+        clap_loss = zero
+        clap_surrogate = zero
+        clap_health = None
+        clap_target_cosine = zero
+        clap_source_cosine = zero
+        clap_following = zero
+        if losses.clap_counterfactual > 0.0:
+            if clap_objective is None:
+                raise ValueError("predictor CLAP control requires a frozen CLAP objective")
+            timbre_mask = counterfactual.timbre_mask
+            if bool(timbre_mask.any().item()):
+                timbre_audio = counterfactual.audio[timbre_mask]
+                valid = torch.full(
+                    (timbre_audio.shape[0],), timbre_audio.shape[-1],
+                    device=timbre_audio.device, dtype=torch.long)
+                clap_result = clap_objective.waveform_gradients_to_embeddings(
+                    timbre_audio, counterfactual.target_clap[timbre_mask],
+                    counterfactual.source_clap[timbre_mask], valid)
+                clap_loss = clap_result.losses.mean()
+                clap_target_cosine = clap_result.target_cosine.mean()
+                clap_source_cosine = clap_result.source_cosine.mean()
+                clap_following = clap_result.following.float().mean()
+                clap_health = _clap_health_vector(clap_result.health, timbre_audio.device)
+                if not bool(clap_result.health.skipped.item()):
+                    requested = (clap_result.gradients
+                                 * losses.clap_counterfactual
+                                 / timbre_audio.shape[0])
+                    clap_surrogate = (timbre_audio.float() * requested.float()).sum()
+        weighted_clap = losses.clap_counterfactual * clap_loss
+        control_auxiliary = midi_control + clap_surrogate - clap_surrogate.detach()
+        control_progress = _linear_warmup(
+            update - config.predictive.predictor_control_start_updates + 1,
+            config.predictive.predictor_control_warmup_updates)
+        gradient_fraction = (
+            config.predictive.predictor_control_gradient_fraction_max
+            * control_progress)
+        capped_control, control_scale = _cap_auxiliary_parameter_gradient(
+            control_auxiliary, latent_objective.total,
+            list(model.predictor.parameters()), gradient_fraction)
+        displayed_control = midi_control.detach() + weighted_clap.detach()
+        control_total = (
+            capped_control - capped_control.detach() + displayed_control)
         components.update({
             "predictor_midi_swap_pitch": pitch,
             "predictor_midi_swap_source_rejection": source_rejection,
             "predictor_midi_control_total": midi_control,
+            "predictor_clap_control_total": weighted_clap,
+            "predictor_clap_target_cosine": clap_target_cosine,
+            "predictor_clap_source_cosine": clap_source_cosine,
+            "predictor_clap_following": clap_following,
+            "predictor_control_total": displayed_control,
+            "predictor_control_gradient_fraction_limit": zero.new_tensor(
+                gradient_fraction),
+            "predictor_control_gradient_scale": control_scale,
         })
         diagnostics = {
             "counterfactual_audio": counterfactual.audio,
@@ -425,9 +483,11 @@ def predictive_stage_objective(
             "counterfactual_target_clap": counterfactual.target_clap,
             "counterfactual_source_clap": counterfactual.source_clap,
             "counterfactual_target_note": counterfactual.target_note,
+            **({"predictor_control_clap_health": clap_health}
+               if clap_health is not None else {}),
         }
         return PredictiveStageObjective(
-            latent_objective.total + midi_control, components,
+            latent_objective.total + control_total, components,
             diagnostic_tensors=diagnostics)
 
     p = config.predictive
@@ -1065,7 +1125,13 @@ def _clap_health_vector(health: ClapHealth, device: torch.device) -> Tensor:
 
 
 def _distributed_clap_health(health: ClapHealth, device: torch.device) -> Tensor:
-    vector = _clap_health_vector(health, device)
+    return _distributed_clap_health_vector(_clap_health_vector(health, device))
+
+
+def _distributed_clap_health_vector(vector: Tensor) -> Tensor:
+    if vector.shape != (9,):
+        raise ValueError("CLAP health vector must have shape [9]")
+    vector = vector.detach().clone()
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(vector[:7], op=dist.ReduceOp.SUM)
         dist.all_reduce(vector[7:], op=dist.ReduceOp.MAX)
@@ -1159,6 +1225,42 @@ def _predictive_clap_auxiliaries(
         values.append(combined_capped[offset:offset + size].reshape_as(auxiliary))
         offset += size
     return tuple(values)
+
+
+def _cap_auxiliary_parameter_gradient(
+        auxiliary: Tensor, reference: Tensor, parameters: list[Tensor],
+        maximum_fraction: float) -> tuple[Tensor, Tensor]:
+    """Cap one auxiliary objective against a reference parameter gradient."""
+    if not 0.0 <= maximum_fraction <= 1.0:
+        raise ValueError("maximum parameter gradient fraction must be between zero and one")
+    trainable = tuple(parameter for parameter in parameters if parameter.requires_grad)
+    if not trainable:
+        raise ValueError("parameter gradient cap requires trainable parameters")
+    reference_gradients = torch.autograd.grad(
+        reference, trainable, retain_graph=True, allow_unused=True)
+    auxiliary_gradients = torch.autograd.grad(
+        auxiliary, trainable, retain_graph=True, allow_unused=True)
+
+    def gradient_norm(values: tuple[Tensor | None, ...]) -> Tensor:
+        square = reference.new_zeros((), dtype=torch.float32)
+        for value in values:
+            if value is None:
+                continue
+            value = value.detach().float()
+            if not bool(torch.isfinite(value).all().item()):
+                raise ValueError("parameter gradient cap rejects non-finite values")
+            square = square + value.square().sum()
+        return square.sqrt()
+
+    reference_norm = gradient_norm(reference_gradients)
+    auxiliary_norm = gradient_norm(auxiliary_gradients)
+    limit = reference_norm * maximum_fraction
+    if bool(auxiliary_norm.le(limit).item()):
+        scale = auxiliary_norm.new_ones(())
+    else:
+        scale = limit / auxiliary_norm.clamp_min(1e-12)
+    scale = scale.detach().to(device=auxiliary.device, dtype=auxiliary.dtype)
+    return auxiliary * scale, scale
 
 
 def _predictive_scaler_step(scaler: Any, optimizer: Any, *,
@@ -1583,7 +1685,7 @@ def train_predictive(
             with torch.autocast("cuda", dtype=torch.float16):
                 objective = predictive_stage_objective(
                     unwrap(model), batch, config, stage, stage_update, stats,
-                    calibrated_weights, stft, swap_pitch)
+                    calibrated_weights, stft, swap_pitch, clap_objective)
                 total = objective.total
                 if discriminator is not None:
                     assert objective.generated_audio is not None
@@ -1599,6 +1701,31 @@ def train_predictive(
                     discriminator.requires_grad_(True)
                 else:
                     adversarial = matching = total.new_zeros(())
+
+            diagnostics = objective.diagnostic_tensors or {}
+            if "predictor_control_clap_health" in diagnostics:
+                global_control_health = _distributed_clap_health_vector(
+                    diagnostics["predictor_control_clap_health"])
+                clap_health_cumulative = _merge_clap_health(
+                    clap_health_cumulative, global_control_health)
+                clap_health_interval = _merge_clap_health(
+                    clap_health_interval, global_control_health)
+                if int(global_control_health[1].item()):
+                    clap_warning_events += 1
+                    pipeline_health = _tensor_health_metrics(
+                        diagnostics, distributed=True)
+                    if rank == 0 and (clap_warning_events <= 10
+                                      or clap_warning_events % 100 == 0):
+                        warning = _clap_health_metrics(
+                            global_control_health, "clap_nonfinite_call")
+                        warning.update({
+                            "event": "predictor_control_clap_nonfinite_skipped",
+                            "stage": stage.value,
+                            "stage_update": stage_update,
+                            "warning_event": clap_warning_events,
+                        })
+                        warning.update(pipeline_health)
+                        print(json.dumps(warning, sort_keys=True), flush=True)
 
             clap_loss = total.new_zeros(())
             if clap_objective is not None and objective.generated_audio is not None:

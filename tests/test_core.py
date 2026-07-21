@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import torch
+import pytest
 from torch import nn
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
@@ -25,6 +26,7 @@ from midibrave.losses import (BraveMultiScaleDiscriminator, DifferentiableCrepeO
 from midibrave.model import (ConditionalOutputGain, FiLM, FixedAntiAlias,
                              HarmonicExcitation, MidiBrave, PQMF, PairOutput)
 from midibrave.trainer import (_clap_health_metrics, _merge_clap_health,
+                               _cap_auxiliary_parameter_gradient,
                                _pitch_adversary_scale,
                                _predictive_clap_auxiliary,
                                _predictive_clap_auxiliaries,
@@ -282,6 +284,20 @@ def test_reconstruction_and_counterfactual_clap_share_one_gradient_cap():
     assert combined.norm() <= reference.norm() * 0.2 + 1e-6
     assert capped[0].shape == reconstruction.shape
     assert capped[1].shape == counterfactual.shape
+
+
+def test_predictor_parameter_gradient_cap_limits_combined_control_objective():
+    parameter = nn.Parameter(torch.tensor([1.0, -1.0]))
+    reference = parameter.sum()
+    auxiliary = 10.0 * parameter.sum()
+
+    capped, scale = _cap_auxiliary_parameter_gradient(
+        auxiliary, reference, [parameter], maximum_fraction=0.25)
+    gradient, = torch.autograd.grad(capped, parameter)
+    reference_gradient, = torch.autograd.grad(reference, parameter)
+
+    assert scale.item() == pytest.approx(0.025)
+    assert gradient.norm() <= reference_gradient.norm() * 0.25 + 1e-7
 
 
 def test_tensor_health_metrics_identifies_first_nonfinite_pipeline_value():
