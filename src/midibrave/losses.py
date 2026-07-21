@@ -114,9 +114,17 @@ class FrozenClapReconstructionObjective(nn.Module):
         if prediction.shape != target.shape:
             raise ValueError("CLAP prediction and target windows must have identical shapes")
         generated = prediction.detach().float().requires_grad_(True)
-        with torch.no_grad():
-            target_embedding = self._embedding(target.detach().float(), valid_samples)
-        generated_embedding = self._embedding(generated, valid_samples)
+        try:
+            with torch.no_grad():
+                target_embedding = self._embedding(target.detach().float(), valid_samples)
+            generated_embedding = self._embedding(generated, valid_samples)
+        except RuntimeError as error:
+            if str(error) != "frozen CLAP produced a non-finite embedding":
+                raise
+            losses = prediction.new_zeros(prediction.shape[0])
+            gradients = prediction.new_zeros(prediction.shape)
+            norms = prediction.new_zeros(prediction.shape[0])
+            return ClapWaveformGradient(losses, gradients, norms, norms.clone())
         losses = (1.0 - F.cosine_similarity(
             generated_embedding, target_embedding, dim=-1)).clamp_min(0.0)
         gradients, = torch.autograd.grad(losses.sum(), generated, allow_unused=False)

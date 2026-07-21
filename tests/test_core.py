@@ -91,6 +91,30 @@ def test_clap_waveform_gradient_injection_matches_direct_chain_rule():
     assert torch.allclose(decoder.weight.grad, direct_gradient, rtol=1e-4, atol=1e-6)
 
 
+class _NonFiniteClap(nn.Module):
+    def get_audio_embedding_from_data(self, waveforms, use_tensor=True):
+        assert use_tensor
+        base = torch.stack([waveform.mean() for waveform in waveforms])[:, None]
+        return base.expand(-1, 8) * float("nan")
+
+
+def test_clap_nonfinite_embedding_skips_auxiliary_gradient():
+    objective = FrozenClapReconstructionObjective(
+        None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
+        encoder=_NonFiniteClap(),
+    )
+    prediction = torch.randn(2, 1, 1024)
+    target = torch.randn(2, 1, 1024)
+    valid = torch.full((2,), 1024, dtype=torch.long)
+
+    result = objective.waveform_gradients(prediction, target, valid)
+
+    assert torch.equal(result.losses, torch.zeros(2))
+    assert torch.equal(result.gradients, torch.zeros_like(prediction))
+    assert torch.equal(result.gradient_norms, torch.zeros(2))
+    assert torch.equal(result.clipped_gradient_norms, torch.zeros(2))
+
+
 def test_fractional_autocorrelation_ranks_periodic_signal_over_noise():
     sample_rate = 16_000
     frequency = 440.0
