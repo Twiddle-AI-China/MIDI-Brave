@@ -68,6 +68,7 @@ class PredictiveStageObjective:
     generated_audio: Tensor | None = None
     target_audio: Tensor | None = None
     diagnostic_tensors: dict[str, Tensor] | None = None
+    numeric_audit: dict[str, Tensor] | None = None
 
 
 def _linear_warmup(update: int, updates: int) -> float:
@@ -215,7 +216,7 @@ def predictive_stage_objective(
                 "midi_control": reconstruction.midi,
                 "excitation": reconstruction.excitation,
                 "decoder_audio": reconstruction.audio,
-            })
+            }, dict(model.decoder.last_numeric_audit))
     if statistics is None:
         raise ValueError(f"{stage.value} stage requires latent statistics")
     latent_objective = predictive_latent_objective(
@@ -904,6 +905,17 @@ def _tensor_health_metrics(tensors: dict[str, Tensor],
     return metrics
 
 
+def _distributed_count_metrics(counts: dict[str, Tensor],
+                               prefix: str) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    for name in sorted(counts):
+        value = counts[name].detach().float().clone()
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(value, op=dist.ReduceOp.SUM)
+        metrics[f"{prefix}/{name}_nonfinite_count"] = float(value.item())
+    return metrics
+
+
 def _predictive_clap_auxiliary(
         result: ClapWaveformGradient, total: Tensor, generated: Tensor,
         weight: float, maximum_fraction: float) -> Tensor:
@@ -1306,6 +1318,8 @@ def train_predictive(
                 config.train.lr, config.train.min_lr)
             for group in optimizer.param_groups:
                 group["lr"] = lr
+            unwrap(model).decoder.numeric_audit_enabled = (
+                stage is PredictiveStage.RAVE and stage_update >= 14080)
             with torch.autocast("cuda", dtype=torch.float16):
                 objective = predictive_stage_objective(
                     unwrap(model), batch, config, stage, stage_update, stats,
@@ -1346,6 +1360,8 @@ def train_predictive(
                     pipeline_health = _tensor_health_metrics(
                         objective.diagnostic_tensors or {"decoder_audio": generated},
                         distributed=True)
+                    pipeline_health.update(_distributed_count_metrics(
+                        objective.numeric_audit or {}, "decoder_audit"))
                     if rank == 0 and (clap_warning_events <= 10
                                       or clap_warning_events % 100 == 0):
                         warning = _clap_health_metrics(
