@@ -9,7 +9,7 @@ import random
 import shutil
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -848,12 +848,15 @@ def save_predictive_checkpoint(
     stage_update: int, epoch: int, microbatch_offset: int,
     scheduler_state: dict[str, Any] | None = None,
     sampler_state: dict[str, Any] | None = None,
+    batch_per_gpu: int | None = None,
     discriminator: nn.Module | None = None,
     discriminator_optimizer: torch.optim.Optimizer | None = None,
 ) -> None:
     """Atomically save every state required for an exact v3 stage resume."""
     if stage_update < 0 or epoch < 0 or microbatch_offset < 0:
         raise ValueError("predictive checkpoint counters must be non-negative")
+    if batch_per_gpu is not None and batch_per_gpu <= 0:
+        raise ValueError("predictive checkpoint batch_per_gpu must be positive")
     local_rng = _rng_state()
     if dist.is_available() and dist.is_initialized():
         rng_states: list[Any] = [None for _ in range(dist.get_world_size())]
@@ -877,6 +880,8 @@ def save_predictive_checkpoint(
         "sampler_state": sampler_state or {},
         "rng_by_rank": rng_states,
     }
+    if batch_per_gpu is not None:
+        payload["batch_per_gpu"] = int(batch_per_gpu)
     if discriminator is not None:
         payload["discriminator"] = unwrap(discriminator).state_dict()
         payload["discriminator_arch"] = getattr(
@@ -895,6 +900,7 @@ def load_predictive_checkpoint(
     discriminator: nn.Module | None = None,
     discriminator_optimizer: torch.optim.Optimizer | None = None,
     allow_world_size_change: bool = False,
+    batch_size_changed: bool = False,
 ) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict):
@@ -920,7 +926,7 @@ def load_predictive_checkpoint(
         discriminator_optimizer.load_state_dict(payload["discriminator_optimizer"])
     rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
     rng_states = payload.get("rng_by_rank")
-    if world_size_changed:
+    if world_size_changed or batch_size_changed:
         epoch = int(payload["epoch"]) + 1
         microbatch_offset = 0
         rng = None
@@ -934,6 +940,7 @@ def load_predictive_checkpoint(
         "scheduler_state": payload["scheduler_state"],
         "sampler_state": payload["sampler_state"],
         "rng": rng, "world_size_changed": world_size_changed,
+        "batch_size_changed": bool(batch_size_changed),
         "checkpoint_world_size": checkpoint_world_size,
         "world_size": world_size,
     }
@@ -1804,9 +1811,30 @@ def train_predictive(
     warm_start: str | None = None, statistics_path: str | None = None,
     calibration_path: str | None = None, rollout_gate_passed: bool = False,
     allow_world_size_change: bool = False,
+    batch_per_gpu: int | None = None,
 ) -> None:
     """Four-stage CUDA trainer for encoder-free predictive deployment."""
     config = Config.load(config_path)
+    configured_batch_per_gpu = config.train.batch_per_gpu
+    requested_batch_per_gpu = (configured_batch_per_gpu if batch_per_gpu is None
+                               else int(batch_per_gpu))
+    if requested_batch_per_gpu <= 0:
+        raise ValueError("--batch-per-gpu must be positive")
+    resume_payload: dict[str, Any] | None = None
+    checkpoint_batch_per_gpu = configured_batch_per_gpu
+    if resume:
+        loaded = torch.load(resume, map_location="cpu", weights_only=False)
+        if not isinstance(loaded, dict):
+            raise ValueError("predictive checkpoint must be a mapping")
+        resume_payload = loaded
+        checkpoint_batch_per_gpu = int(
+            loaded.get("batch_per_gpu", configured_batch_per_gpu))
+    batch_size_changed = bool(
+        resume and requested_batch_per_gpu != checkpoint_batch_per_gpu)
+    if requested_batch_per_gpu != configured_batch_per_gpu:
+        config = replace(
+            config, train=replace(
+                config.train, batch_per_gpu=requested_batch_per_gpu))
     stage = PredictiveStage(stage)
     if config.predictive is None or config.latent_loss is None:
         raise ValueError("--stage requires a predictive v3 config")
@@ -1893,9 +1921,7 @@ def train_predictive(
     contract = predictive_checkpoint_contract(
         config, stage, statistics_hash, calibration_hash, rollout_gate_passed)
     if resume:
-        resume_payload = torch.load(resume, map_location="cpu", weights_only=False)
-        if not isinstance(resume_payload, dict):
-            raise ValueError("predictive checkpoint must be a mapping")
+        assert resume_payload is not None
         # Deliberately validate immutable contracts before optimizer creation.
         validate_predictive_resume(resume_payload, contract)
 
@@ -1927,18 +1953,23 @@ def train_predictive(
         restored = load_predictive_checkpoint(
             resume, model, optimizer, scaler, contract,
             discriminator, discriminator_optimizer,
-            allow_world_size_change=allow_world_size_change)
+            allow_world_size_change=allow_world_size_change,
+            batch_size_changed=batch_size_changed)
         stage_update = int(restored["stage_update"])
         epoch = int(restored["epoch"])
         microbatch_offset = int(restored["microbatch_offset"])
         dataset.load_sampler_state_dict(restored["sampler_state"])
         if restored["rng"] is not None:
             _restore_rng(restored["rng"])
-        if rank == 0 and restored["world_size_changed"]:
+        if rank == 0 and (restored["world_size_changed"]
+                          or restored["batch_size_changed"]):
             print(json.dumps({
                 "event": "predictive_elastic_resume",
                 "checkpoint_world_size": restored["checkpoint_world_size"],
                 "world_size": restored["world_size"],
+                "checkpoint_batch_per_gpu": checkpoint_batch_per_gpu,
+                "batch_per_gpu": config.train.batch_per_gpu,
+                "batch_size_changed": restored["batch_size_changed"],
                 "stage_update": stage_update,
                 "epoch": epoch,
                 "microbatch_offset": microbatch_offset,
@@ -2213,6 +2244,7 @@ def train_predictive(
                     microbatch_offset=microbatch_offset,
                     scheduler_state={"lr": lr, "stage_update": stage_update},
                     sampler_state=dataset.sampler_state_dict(),
+                    batch_per_gpu=config.train.batch_per_gpu,
                     discriminator=discriminator,
                     discriminator_optimizer=discriminator_optimizer)
             if stage_update >= target_updates:
@@ -2809,6 +2841,7 @@ def main() -> None:
     parser.add_argument("--calibration")
     parser.add_argument("--rollout-gate-passed", action="store_true")
     parser.add_argument("--allow-world-size-change", action="store_true")
+    parser.add_argument("--batch-per-gpu", type=int)
     args = parser.parse_args()
     if args.max_steps is not None and args.max_effective_updates is not None:
         parser.error("use only one of --max-steps and --max-effective-updates")
@@ -2818,10 +2851,12 @@ def main() -> None:
         train_predictive(
             args.config, args.stage, limit, args.resume, args.warm_start,
             args.latent_statistics, args.calibration,
-            args.rollout_gate_passed, args.allow_world_size_change)
+            args.rollout_gate_passed, args.allow_world_size_change,
+            args.batch_per_gpu)
     else:
         if (args.warm_start or args.latent_statistics or args.calibration
-                or args.rollout_gate_passed or args.allow_world_size_change):
+                or args.rollout_gate_passed or args.allow_world_size_change
+                or args.batch_per_gpu is not None):
             parser.error("predictive stage options cannot be used with --phase")
         assert args.phase is not None
         train(args.config, args.phase, limit, args.resume)

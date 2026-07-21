@@ -547,6 +547,38 @@ def test_predictive_elastic_resume_preserves_training_state_and_resets_rank_stat
     assert restored["world_size_changed"] is True
 
 
+def test_predictive_batch_resize_resume_preserves_state_and_resets_loader_cursor(
+        tmp_path: Path):
+    config = _config()
+    model = _model(config)
+    configure_predictive_stage(model, PredictiveStage.PREDICTOR)
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=1e-3)
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    contract = predictive_checkpoint_contract(
+        config, PredictiveStage.PREDICTOR, "stats", "calibration", False)
+    destination = tmp_path / "predictive.pt"
+    save_predictive_checkpoint(
+        destination, model, optimizer, scaler, contract,
+        stage_update=2_000, epoch=4, microbatch_offset=17,
+        scheduler_state={"stage_update": 2_000},
+        sampler_state={"training_update": 2_000}, batch_per_gpu=28)
+
+    payload = torch.load(destination, map_location="cpu", weights_only=False)
+    assert payload["batch_per_gpu"] == 28
+    restored = load_predictive_checkpoint(
+        destination, model, optimizer, scaler, contract,
+        batch_size_changed=True)
+
+    assert restored["stage_update"] == 2_000
+    assert restored["epoch"] == 5
+    assert restored["microbatch_offset"] == 0
+    assert restored["rng"] is None
+    assert restored["world_size_changed"] is False
+    assert restored["batch_size_changed"] is True
+
+
 def test_predictor_objective_uses_same_recording_future_and_backpropagates():
     config = _config()
     model = _model(config)

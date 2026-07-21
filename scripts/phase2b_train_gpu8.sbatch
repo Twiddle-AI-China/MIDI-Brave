@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=mb-p2b-4k
+#SBATCH --job-name=mb-p2b-fast
 #SBATCH --partition=gpu8
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -41,6 +41,6 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores docker run --rm \
   -e NCCL_DEBUG=WARN -e NCCL_IB_DISABLE=1 -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   -w /workspace/MidiBrave "$image" \
   torchrun --standalone --nproc_per_node=8 -m midibrave.trainer \
-  --config "$config" --stage predictor \
+  --config "$config" --stage predictor --max-steps 3000 --batch-per-gpu 64 \
   --latent-statistics "$statistics" --calibration "$calibration" \
   "${resume_args[@]}"
