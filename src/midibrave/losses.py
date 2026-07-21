@@ -28,6 +28,31 @@ class _LinearResample(nn.Module):
 
 
 @dataclass
+class ClapHealth:
+    """Numerical health summary for one frozen-CLAP evaluation."""
+
+    skipped: Tensor
+    target_failures: Tensor
+    generated_failures: Tensor
+    input_nonfinite_count: Tensor
+    raw_embedding_nonfinite_count: Tensor
+    normalized_embedding_nonfinite_count: Tensor
+    input_peak: Tensor
+    input_rms: Tensor
+
+    @classmethod
+    def zeros(cls, reference: Tensor) -> "ClapHealth":
+        zero = reference.new_zeros(())
+        return cls(*(zero.clone() for _ in range(8)))
+
+
+class _NonFiniteClapEmbedding(RuntimeError):
+    def __init__(self, health: ClapHealth):
+        super().__init__("frozen CLAP produced a non-finite embedding")
+        self.health = health
+
+
+@dataclass
 class ClapWaveformGradient:
     """Frozen-CLAP loss values and first-order gradients at the waveform."""
 
@@ -35,6 +60,7 @@ class ClapWaveformGradient:
     gradients: Tensor
     gradient_norms: Tensor
     clipped_gradient_norms: Tensor
+    health: ClapHealth
 
 
 class FrozenClapReconstructionObjective(nn.Module):
@@ -89,12 +115,19 @@ class FrozenClapReconstructionObjective(nn.Module):
         self.encoder.eval()
         return self
 
-    def _embedding(self, audio: Tensor, valid_samples: Tensor) -> Tensor:
+    def _embedding(self, audio: Tensor, valid_samples: Tensor,
+                   role: str = "generated") -> Tensor:
         if audio.ndim != 3 or audio.shape[1] != 1:
             raise ValueError("CLAP reconstruction audio must have shape [B,1,T]")
         if valid_samples.shape != (audio.shape[0],):
             raise ValueError("CLAP valid_samples must have shape [B]")
+        if role not in {"target", "generated"}:
+            raise ValueError("CLAP embedding role must be target or generated")
         waveforms = []
+        input_nonfinite_count = audio.new_zeros(())
+        finite_square_sum = audio.new_zeros(())
+        finite_value_count = audio.new_zeros(())
+        input_peak = audio.new_zeros(())
         with torch.autocast(device_type=audio.device.type, enabled=False):
             for index in range(audio.shape[0]):
                 length = int(valid_samples[index].item())
@@ -102,11 +135,35 @@ class FrozenClapReconstructionObjective(nn.Module):
                 waveform = audio[index, 0, :length].float().unsqueeze(0)
                 waveform = self.resample(waveform)[0]
                 waveforms.append(waveform)
-            embedding = self.encoder.get_audio_embedding_from_data(
+                diagnostic_waveform = waveform.detach()
+                finite = torch.isfinite(diagnostic_waveform)
+                input_nonfinite_count = input_nonfinite_count + (~finite).sum()
+                finite_values = torch.where(
+                    finite, diagnostic_waveform, torch.zeros_like(diagnostic_waveform))
+                finite_square_sum = finite_square_sum + finite_values.square().sum()
+                finite_value_count = finite_value_count + finite.sum()
+                input_peak = torch.maximum(input_peak, finite_values.abs().max())
+            raw_embedding = self.encoder.get_audio_embedding_from_data(
                 waveforms, use_tensor=True)
-            embedding = F.normalize(embedding.float(), dim=-1)
-        if not bool(torch.isfinite(embedding).all().item()):
-            raise RuntimeError("frozen CLAP produced a non-finite embedding")
+            raw_embedding = raw_embedding.float()
+            embedding = F.normalize(raw_embedding, dim=-1)
+        raw_nonfinite = (~torch.isfinite(raw_embedding)).sum()
+        normalized_nonfinite = (~torch.isfinite(embedding)).sum()
+        if bool(normalized_nonfinite.item()):
+            one = audio.new_ones(())
+            zero = audio.new_zeros(())
+            health = ClapHealth(
+                skipped=one,
+                target_failures=one.clone() if role == "target" else zero.clone(),
+                generated_failures=(one.clone() if role == "generated" else zero.clone()),
+                input_nonfinite_count=input_nonfinite_count.to(dtype=audio.dtype),
+                raw_embedding_nonfinite_count=raw_nonfinite.to(dtype=audio.dtype),
+                normalized_embedding_nonfinite_count=(
+                    normalized_nonfinite.to(dtype=audio.dtype)),
+                input_peak=input_peak,
+                input_rms=(finite_square_sum / finite_value_count.clamp_min(1)).sqrt(),
+            )
+            raise _NonFiniteClapEmbedding(health)
         return embedding
 
     def waveform_gradients(self, prediction: Tensor, target: Tensor,
@@ -116,15 +173,16 @@ class FrozenClapReconstructionObjective(nn.Module):
         generated = prediction.detach().float().requires_grad_(True)
         try:
             with torch.no_grad():
-                target_embedding = self._embedding(target.detach().float(), valid_samples)
-            generated_embedding = self._embedding(generated, valid_samples)
-        except RuntimeError as error:
-            if str(error) != "frozen CLAP produced a non-finite embedding":
-                raise
+                target_embedding = self._embedding(
+                    target.detach().float(), valid_samples, role="target")
+            generated_embedding = self._embedding(
+                generated, valid_samples, role="generated")
+        except _NonFiniteClapEmbedding as error:
             losses = prediction.new_zeros(prediction.shape[0])
             gradients = prediction.new_zeros(prediction.shape)
             norms = prediction.new_zeros(prediction.shape[0])
-            return ClapWaveformGradient(losses, gradients, norms, norms.clone())
+            return ClapWaveformGradient(
+                losses, gradients, norms, norms.clone(), error.health)
         losses = (1.0 - F.cosine_similarity(
             generated_embedding, target_embedding, dim=-1)).clamp_min(0.0)
         gradients, = torch.autograd.grad(losses.sum(), generated, allow_unused=False)
@@ -138,7 +196,8 @@ class FrozenClapReconstructionObjective(nn.Module):
             gradients = gradients * scale[:, None, None]
         clipped_norms = gradients.flatten(1).norm(dim=1)
         return ClapWaveformGradient(
-            losses.detach(), gradients.detach(), norms.detach(), clipped_norms.detach())
+            losses.detach(), gradients.detach(), norms.detach(), clipped_norms.detach(),
+            ClapHealth.zeros(prediction))
 
 
 class MultiResolutionSTFTLoss(nn.Module):

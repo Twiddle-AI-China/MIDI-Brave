@@ -23,7 +23,8 @@ from midibrave.losses import (BraveMultiScaleDiscriminator, DifferentiableCrepeO
                               rms_db, velocity_delta_matching_loss, velocity_ranking_loss)
 from midibrave.model import (ConditionalOutputGain, FiLM, FixedAntiAlias,
                              HarmonicExcitation, MidiBrave, PQMF, PairOutput)
-from midibrave.trainer import _pitch_adversary_scale, _self_branch_schedule
+from midibrave.trainer import (_clap_health_metrics, _merge_clap_health,
+                               _pitch_adversary_scale, _self_branch_schedule)
 
 
 class _FakeDifferentiableClap(nn.Module):
@@ -63,6 +64,9 @@ def test_frozen_clap_window_loss_is_aligned_and_differentiable():
     assert torch.isfinite(different.gradients).all()
     assert different.gradients.abs().sum().item() > 0
     assert all(not parameter.requires_grad for parameter in objective.encoder.parameters())
+    assert different.health.skipped.item() == 0
+    assert different.health.target_failures.item() == 0
+    assert different.health.generated_failures.item() == 0
 
 
 def test_clap_waveform_gradient_injection_matches_direct_chain_rule():
@@ -98,6 +102,22 @@ class _NonFiniteClap(nn.Module):
         return base.expand(-1, 8) * float("nan")
 
 
+class _FailOnClapCall(nn.Module):
+    def __init__(self, fail_on_call: int):
+        super().__init__()
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    def get_audio_embedding_from_data(self, waveforms, use_tensor=True):
+        assert use_tensor
+        self.calls += 1
+        base = torch.stack([waveform.mean() for waveform in waveforms])[:, None]
+        embedding = torch.cat([base + offset for offset in range(1, 9)], dim=1)
+        if self.calls == self.fail_on_call:
+            embedding = embedding * float("nan")
+        return embedding
+
+
 def test_clap_nonfinite_embedding_skips_auxiliary_gradient():
     objective = FrozenClapReconstructionObjective(
         None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
@@ -113,6 +133,67 @@ def test_clap_nonfinite_embedding_skips_auxiliary_gradient():
     assert torch.equal(result.gradients, torch.zeros_like(prediction))
     assert torch.equal(result.gradient_norms, torch.zeros(2))
     assert torch.equal(result.clipped_gradient_norms, torch.zeros(2))
+
+
+def test_clap_nonfinite_target_embedding_records_health():
+    objective = FrozenClapReconstructionObjective(
+        None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
+        encoder=_FailOnClapCall(fail_on_call=1),
+    )
+    prediction = torch.full((2, 1, 16), 0.25)
+    target = torch.full((2, 1, 16), -0.5)
+    target[0, 0, 0] = float("nan")
+    valid = torch.full((2,), 16, dtype=torch.long)
+
+    health = objective.waveform_gradients(prediction, target, valid).health
+
+    assert health.skipped.item() == 1
+    assert health.target_failures.item() == 1
+    assert health.generated_failures.item() == 0
+    assert health.input_nonfinite_count.item() == 1
+    assert health.raw_embedding_nonfinite_count.item() == 16
+    assert health.normalized_embedding_nonfinite_count.item() == 16
+    assert health.input_peak.item() == 0.5
+    assert health.input_rms.item() == 0.5
+
+
+def test_clap_nonfinite_generated_embedding_records_health():
+    objective = FrozenClapReconstructionObjective(
+        None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
+        encoder=_FailOnClapCall(fail_on_call=2),
+    )
+    prediction = torch.full((2, 1, 16), 0.25)
+    target = torch.full((2, 1, 16), -0.5)
+    valid = torch.full((2,), 16, dtype=torch.long)
+
+    health = objective.waveform_gradients(prediction, target, valid).health
+
+    assert health.skipped.item() == 1
+    assert health.target_failures.item() == 0
+    assert health.generated_failures.item() == 1
+    assert health.input_nonfinite_count.item() == 0
+    assert health.raw_embedding_nonfinite_count.item() == 16
+    assert health.normalized_embedding_nonfinite_count.item() == 16
+    assert health.input_peak.item() == 0.25
+    assert health.input_rms.item() == 0.25
+
+
+def test_clap_health_aggregation_sums_counts_and_keeps_maxima():
+    total = torch.tensor([4.0, 1.0, 1.0, 0.0, 3.0, 8.0, 8.0, 0.5, 0.2])
+    call = torch.tensor([4.0, 2.0, 0.0, 2.0, 5.0, 16.0, 16.0, 0.25, 0.4])
+
+    merged = _merge_clap_health(total, call)
+    metrics = _clap_health_metrics(merged, "health/clap")
+
+    assert torch.equal(
+        merged, torch.tensor([8.0, 3.0, 1.0, 2.0, 8.0, 24.0, 24.0, 0.5, 0.4]))
+    assert metrics["health/clap_evaluations"] == 8.0
+    assert metrics["health/clap_skips"] == 3.0
+    assert metrics["health/clap_skip_ratio"] == 0.375
+    assert metrics["health/clap_target_failures"] == 1.0
+    assert metrics["health/clap_generated_failures"] == 2.0
+    assert metrics["health/clap_failed_input_peak_max"] == 0.5
+    assert abs(metrics["health/clap_failed_input_rms_max"] - 0.4) < 1e-6
 
 
 def test_fractional_autocorrelation_ranks_periodic_signal_over_noise():

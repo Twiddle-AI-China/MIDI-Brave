@@ -26,7 +26,8 @@ from .config import Config
 from .calibration import (calibrate_loss_weights, cap_auxiliary_gradient,
                           loss_gradient_norm)
 from .data import PairDataset
-from .losses import (BraveMultiScaleDiscriminator, FrozenClapReconstructionObjective,
+from .losses import (BraveMultiScaleDiscriminator, ClapHealth,
+                     FrozenClapReconstructionObjective,
                      MultiResolutionSTFTLoss, ReconstructionLoss,
                      discriminator_hinge, feature_matching, generator_adversarial)
 from .model import ChannelRMSNorm, MidiBrave
@@ -817,6 +818,57 @@ def _clap_due(config: Config, generator_updates: int) -> bool:
     return (generator_updates + 1) % interval == 0
 
 
+def _clap_health_vector(health: ClapHealth, device: torch.device) -> Tensor:
+    """Pack one local CLAP evaluation into counts followed by maxima."""
+    return torch.stack((
+        torch.ones((), device=device),
+        health.skipped.to(device),
+        health.target_failures.to(device),
+        health.generated_failures.to(device),
+        health.input_nonfinite_count.to(device),
+        health.raw_embedding_nonfinite_count.to(device),
+        health.normalized_embedding_nonfinite_count.to(device),
+        health.input_peak.to(device),
+        health.input_rms.to(device),
+    )).float()
+
+
+def _distributed_clap_health(health: ClapHealth, device: torch.device) -> Tensor:
+    vector = _clap_health_vector(health, device)
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(vector[:7], op=dist.ReduceOp.SUM)
+        dist.all_reduce(vector[7:], op=dist.ReduceOp.MAX)
+    return vector
+
+
+def _merge_clap_health(total: Tensor, call: Tensor) -> Tensor:
+    if total.shape != (9,) or call.shape != (9,):
+        raise ValueError("CLAP health vectors must have shape [9]")
+    merged = total.clone()
+    merged[:7] += call[:7]
+    merged[7:] = torch.maximum(merged[7:], call[7:])
+    return merged
+
+
+def _clap_health_metrics(health: Tensor, prefix: str) -> dict[str, float]:
+    if health.shape != (9,):
+        raise ValueError("CLAP health vector must have shape [9]")
+    values = [float(value.item()) for value in health]
+    evaluations, skips = values[:2]
+    return {
+        f"{prefix}_evaluations": evaluations,
+        f"{prefix}_skips": skips,
+        f"{prefix}_skip_ratio": skips / max(1.0, evaluations),
+        f"{prefix}_target_failures": values[2],
+        f"{prefix}_generated_failures": values[3],
+        f"{prefix}_input_nonfinite_count": values[4],
+        f"{prefix}_raw_embedding_nonfinite_count": values[5],
+        f"{prefix}_normalized_embedding_nonfinite_count": values[6],
+        f"{prefix}_failed_input_peak_max": values[7],
+        f"{prefix}_failed_input_rms_max": values[8],
+    }
+
+
 @torch.no_grad()
 def _clap_prepass(model: nn.Module, batch: dict[str, Any], include_self: bool,
                   indices: Tensor) -> dict[str, Tensor]:
@@ -838,7 +890,8 @@ def _clap_prepass(model: nn.Module, batch: dict[str, Any], include_self: bool,
 def _prepare_clap_injections(
         model: nn.Module, objective: FrozenClapReconstructionObjective,
         batch: dict[str, Any], config: Config, include_self: bool, self_scale: float,
-        generator_updates: int, rank: int) -> dict[str, dict[str, Tensor | float]]:
+        generator_updates: int, rank: int,
+        ) -> tuple[dict[str, dict[str, Tensor | float]], ClapHealth]:
     batch_size = int(batch["audio_a"].shape[0])
     selected_count = min(config.loss.clap_batch_size, batch_size)
     event = (generator_updates + 1) // config.loss.clap_every_updates
@@ -855,7 +908,7 @@ def _prepare_clap_injections(
         names.append("self")
     names = [name for name in names if getattr(config.loss, f"{name}_clap") > 0.0]
     if not names:
-        return {}
+        raise RuntimeError("CLAP injection requested without an enabled branch")
     generated = torch.cat([predictions[name] for name in names], dim=0)
     targets = torch.cat([
         batch["audio_b" if name == "cross" else "audio_a"].index_select(0, indices)
@@ -896,7 +949,7 @@ def _prepare_clap_injections(
             "branch_scale": branch_scale,
         }
         offset = stop
-    return injections
+    return injections, result.health
 
 
 def _inject_clap_gradients(output: Any, injections: dict[str, dict[str, Tensor | float]],
@@ -1190,6 +1243,9 @@ def train_predictive(
 
     optimizer.zero_grad(set_to_none=True)
     accumulated = 0
+    clap_health_cumulative = torch.zeros(9, device=device)
+    clap_health_interval = torch.zeros(9, device=device)
+    clap_warning_events = 0
     while stage_update < target_updates:
         dataset.set_epoch(epoch)
         sampler.set_epoch(epoch)
@@ -1231,6 +1287,25 @@ def train_predictive(
                     (generated.shape[0],), generated.shape[-1], device=device,
                     dtype=torch.long)
                 clap_result = clap_objective.waveform_gradients(generated, target, valid)
+                global_clap_health = _distributed_clap_health(
+                    clap_result.health, device)
+                clap_health_cumulative = _merge_clap_health(
+                    clap_health_cumulative, global_clap_health)
+                clap_health_interval = _merge_clap_health(
+                    clap_health_interval, global_clap_health)
+                if int(global_clap_health[1].item()):
+                    clap_warning_events += 1
+                    if rank == 0 and (clap_warning_events <= 10
+                                      or clap_warning_events % 100 == 0):
+                        warning = _clap_health_metrics(
+                            global_clap_health, "clap_nonfinite_call")
+                        warning.update({
+                            "event": "clap_nonfinite_embedding_skipped",
+                            "stage": stage.value,
+                            "stage_update": stage_update,
+                            "warning_event": clap_warning_events,
+                        })
+                        print(json.dumps(warning, sort_keys=True), flush=True)
                 reference_gradient, = torch.autograd.grad(
                     total, generated, retain_graph=True)
                 auxiliary = (clap_result.gradients
@@ -1288,6 +1363,14 @@ def train_predictive(
                 writer.add_scalar("train/lr", lr, stage_update)
                 for name, value in objective.components.items():
                     writer.add_scalar(f"loss/{name}", float(value.detach()), stage_update)
+                for name, value in _clap_health_metrics(
+                        clap_health_cumulative, "health/clap").items():
+                    writer.add_scalar(name, value, stage_update)
+                for name, value in _clap_health_metrics(
+                        clap_health_interval, "health/clap_interval").items():
+                    writer.add_scalar(name, value, stage_update)
+            if stage_update % config.train.log_every == 0:
+                clap_health_interval.zero_()
             should_checkpoint = (
                 stage_update == target_updates
                 or (config.train.checkpoint_every > 0
@@ -1492,6 +1575,9 @@ def train(config_path: str, phase: int, max_steps: int | None = None,
         raise ValueError("MIDIBRAVE_MAX_CONSECUTIVE_NONFINITE must be positive")
     consecutive_nonfinite = 0
     anomaly_enabled = False
+    clap_health_cumulative = torch.zeros(9, device=device)
+    clap_health_interval = torch.zeros(9, device=device)
+    clap_warning_events = 0
     while generator_updates < total_updates:
         if loop_step >= maximum_loops:
             raise RuntimeError("too many skipped updates; refusing to count overflow loops as training")
@@ -1533,10 +1619,28 @@ def train(config_path: str, phase: int, max_steps: int | None = None,
             clap_injections = {}
             if (sync and clap_objective is not None
                     and _clap_due(config, generator_updates)):
-                clap_injections = _prepare_clap_injections(
+                clap_injections, local_clap_health = _prepare_clap_injections(
                     model, clap_objective, batch, config, include_self, self_scale,
                     generator_updates, rank,
                 )
+                global_clap_health = _distributed_clap_health(local_clap_health, device)
+                clap_health_cumulative = _merge_clap_health(
+                    clap_health_cumulative, global_clap_health)
+                clap_health_interval = _merge_clap_health(
+                    clap_health_interval, global_clap_health)
+                skipped_ranks = int(global_clap_health[1].item())
+                if skipped_ranks:
+                    clap_warning_events += 1
+                    if rank == 0 and (clap_warning_events <= 10
+                                      or clap_warning_events % 100 == 0):
+                        warning = _clap_health_metrics(
+                            global_clap_health, "clap_nonfinite_call")
+                        warning.update({
+                            "event": "clap_nonfinite_embedding_skipped",
+                            "generator_updates": generator_updates,
+                            "warning_event": clap_warning_events,
+                        })
+                        print(json.dumps(warning, sort_keys=True), flush=True)
 
             with sync_context:
                 with torch.autocast("cuda", dtype=torch.float16):
@@ -1795,6 +1899,10 @@ def train(config_path: str, phase: int, max_steps: int | None = None,
                 "discriminator_lr": (discriminator_optimizer.param_groups[0]["lr"]
                                      if discriminator_optimizer is not None else 0.0),
             })
+            values.update(_clap_health_metrics(
+                clap_health_cumulative, "health/clap"))
+            values.update(_clap_health_metrics(
+                clap_health_interval, "health/clap_interval"))
             if reported_activation is not None:
                 values["residual_activation_absmax"] = float(reported_activation.item())
             with metrics_path.open("a", encoding="utf-8") as handle:
@@ -1804,6 +1912,9 @@ def train(config_path: str, phase: int, max_steps: int | None = None,
                 if name not in {"loop_step", "generator_updates", "discriminator_updates", "seconds"}:
                     writer.add_scalar(name, value, generator_updates)
             print(json.dumps(values, sort_keys=True), flush=True)
+
+        if should_log:
+            clap_health_interval.zero_()
 
         if not step_applied and consecutive_nonfinite >= max_consecutive_nonfinite:
             raise RuntimeError(
