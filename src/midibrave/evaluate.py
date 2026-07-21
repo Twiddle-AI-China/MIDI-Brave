@@ -622,7 +622,7 @@ def evaluate_predictive_rave(
         metrics.add("swap_clap_cosine", F.cosine_similarity(
             swapped_embedding, reconstruction_embedding, dim=-1))
         metrics.add("rave_pitch_adversary_accuracy", model.rave_pitch_logits(
-            posterior.latent, reversal_scale=0.0).argmax(-1).eq(note).float())
+            posterior.latent.float(), reversal_scale=0.0).argmax(-1).eq(note).float())
 
         while saved < min(examples, evaluated + current):
             index = saved - evaluated
