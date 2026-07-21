@@ -24,7 +24,9 @@ from midibrave.losses import (BraveMultiScaleDiscriminator, DifferentiableCrepeO
 from midibrave.model import (ConditionalOutputGain, FiLM, FixedAntiAlias,
                              HarmonicExcitation, MidiBrave, PQMF, PairOutput)
 from midibrave.trainer import (_clap_health_metrics, _merge_clap_health,
-                               _pitch_adversary_scale, _self_branch_schedule)
+                               _pitch_adversary_scale,
+                               _predictive_clap_auxiliary,
+                               _self_branch_schedule, _tensor_health_metrics)
 
 
 class _FakeDifferentiableClap(nn.Module):
@@ -194,6 +196,40 @@ def test_clap_health_aggregation_sums_counts_and_keeps_maxima():
     assert metrics["health/clap_generated_failures"] == 2.0
     assert metrics["health/clap_failed_input_peak_max"] == 0.5
     assert abs(metrics["health/clap_failed_input_rms_max"] - 0.4) < 1e-6
+
+
+def test_skipped_clap_does_not_cap_against_nonfinite_reference_gradient():
+    objective = FrozenClapReconstructionObjective(
+        None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
+        encoder=_NonFiniteClap(),
+    )
+    generated = torch.randn(2, 1, 16, requires_grad=True)
+    target = torch.randn_like(generated)
+    valid = torch.full((2,), 16, dtype=torch.long)
+    result = objective.waveform_gradients(generated, target, valid)
+    nonfinite_total = (generated * float("nan")).sum()
+
+    auxiliary = _predictive_clap_auxiliary(
+        result, nonfinite_total, generated, weight=0.5,
+        maximum_fraction=0.25)
+
+    assert torch.equal(auxiliary, torch.zeros_like(generated))
+
+
+def test_tensor_health_metrics_identifies_first_nonfinite_pipeline_value():
+    values = {
+        "finite": torch.tensor([3.0, 4.0]),
+        "broken": torch.tensor([float("nan"), float("inf"), -2.0]),
+    }
+
+    metrics = _tensor_health_metrics(values)
+
+    assert metrics["pipeline/finite_nonfinite_count"] == 0.0
+    assert metrics["pipeline/finite_peak"] == 4.0
+    assert abs(metrics["pipeline/finite_rms"] - (12.5 ** 0.5)) < 1e-6
+    assert metrics["pipeline/broken_nonfinite_count"] == 2.0
+    assert metrics["pipeline/broken_peak"] == 2.0
+    assert metrics["pipeline/broken_rms"] == 2.0
 
 
 def test_fractional_autocorrelation_ranks_periodic_signal_over_noise():

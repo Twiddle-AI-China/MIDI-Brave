@@ -28,6 +28,7 @@ def test_predictive_model_concatenates_rave_clap_and_midi():
     assert result.posterior.latent.shape == (2, 16, 32)
     assert result.clap.shape == (2, 256, 32)
     assert result.midi.shape == (2, 32, 32)
+    assert result.excitation.shape[0] == 2
     assert result.audio.shape == (2, 1, 4096)
 
 

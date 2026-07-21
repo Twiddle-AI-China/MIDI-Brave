@@ -20,6 +20,7 @@ class PredictiveReconstruction:
     posterior: RavePosterior
     clap: Tensor
     midi: Tensor
+    excitation: Tensor
 
 
 class PredictiveMidiBrave(nn.Module):
@@ -124,4 +125,5 @@ class PredictiveMidiBrave(nn.Module):
         excitation = self._excitation_bands(note, audio.shape[-1], excitation_seed)
         generated = self.decoder(
             z_clap, z_midi, excitation, audio.shape[-1], z_rave=posterior.latent)
-        return PredictiveReconstruction(generated, posterior, z_clap, z_midi)
+        return PredictiveReconstruction(
+            generated, posterior, z_clap, z_midi, excitation)

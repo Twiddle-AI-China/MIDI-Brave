@@ -27,6 +27,7 @@ from .calibration import (calibrate_loss_weights, cap_auxiliary_gradient,
                           loss_gradient_norm)
 from .data import PairDataset
 from .losses import (BraveMultiScaleDiscriminator, ClapHealth,
+                     ClapWaveformGradient,
                      FrozenClapReconstructionObjective,
                      MultiResolutionSTFTLoss, ReconstructionLoss,
                      discriminator_hinge, feature_matching, generator_adversarial)
@@ -66,6 +67,7 @@ class PredictiveStageObjective:
     components: dict[str, Tensor]
     generated_audio: Tensor | None = None
     target_audio: Tensor | None = None
+    diagnostic_tensors: dict[str, Tensor] | None = None
 
 
 def _linear_warmup(update: int, updates: int) -> float:
@@ -203,7 +205,17 @@ def predictive_stage_objective(
                  + schedule.rave_kl * components["rave_kl"]
                  + schedule.rave_pitch_adversary * pitch)
         return PredictiveStageObjective(
-            total, components, reconstruction.audio, batch["audio_a"])
+            total, components, reconstruction.audio, batch["audio_a"], {
+                "input_audio": batch["audio_a"],
+                "input_clap": batch["clap_a"],
+                "rave_mean": reconstruction.posterior.mean,
+                "rave_logvar": reconstruction.posterior.logvar,
+                "rave_latent": reconstruction.posterior.latent,
+                "clap_control": reconstruction.clap,
+                "midi_control": reconstruction.midi,
+                "excitation": reconstruction.excitation,
+                "decoder_audio": reconstruction.audio,
+            })
     if statistics is None:
         raise ValueError(f"{stage.value} stage requires latent statistics")
     latent_objective = predictive_latent_objective(
@@ -869,6 +881,42 @@ def _clap_health_metrics(health: Tensor, prefix: str) -> dict[str, float]:
     }
 
 
+def _tensor_health_metrics(tensors: dict[str, Tensor],
+                           distributed: bool = False) -> dict[str, float]:
+    """Summarize existing pipeline tensors without retaining their graphs."""
+    metrics: dict[str, float] = {}
+    for name in sorted(tensors):
+        value = tensors[name].detach().float()
+        finite = torch.isfinite(value)
+        finite_values = torch.where(finite, value, torch.zeros_like(value))
+        finite_count = finite.sum()
+        vector = torch.stack((
+            (~finite).sum().float(),
+            finite_values.abs().max(),
+            (finite_values.square().sum() / finite_count.clamp_min(1)).sqrt(),
+        ))
+        if distributed and dist.is_available() and dist.is_initialized():
+            dist.all_reduce(vector[:1], op=dist.ReduceOp.SUM)
+            dist.all_reduce(vector[1:], op=dist.ReduceOp.MAX)
+        metrics[f"pipeline/{name}_nonfinite_count"] = float(vector[0].item())
+        metrics[f"pipeline/{name}_peak"] = float(vector[1].item())
+        metrics[f"pipeline/{name}_rms"] = float(vector[2].item())
+    return metrics
+
+
+def _predictive_clap_auxiliary(
+        result: ClapWaveformGradient, total: Tensor, generated: Tensor,
+        weight: float, maximum_fraction: float) -> Tensor:
+    """Return zero immediately when CLAP already rejected this local waveform."""
+    if bool(result.health.skipped.item()):
+        return torch.zeros_like(generated)
+    reference_gradient, = torch.autograd.grad(
+        total, generated, retain_graph=True)
+    auxiliary = result.gradients * weight / generated.shape[0]
+    return cap_auxiliary_gradient(
+        auxiliary, reference_gradient, maximum_fraction)
+
+
 @torch.no_grad()
 def _clap_prepass(model: nn.Module, batch: dict[str, Any], include_self: bool,
                   indices: Tensor) -> dict[str, Tensor]:
@@ -1295,6 +1343,9 @@ def train_predictive(
                     clap_health_interval, global_clap_health)
                 if int(global_clap_health[1].item()):
                     clap_warning_events += 1
+                    pipeline_health = _tensor_health_metrics(
+                        objective.diagnostic_tensors or {"decoder_audio": generated},
+                        distributed=True)
                     if rank == 0 and (clap_warning_events <= 10
                                       or clap_warning_events % 100 == 0):
                         warning = _clap_health_metrics(
@@ -1305,13 +1356,11 @@ def train_predictive(
                             "stage_update": stage_update,
                             "warning_event": clap_warning_events,
                         })
+                        warning.update(pipeline_health)
                         print(json.dumps(warning, sort_keys=True), flush=True)
-                reference_gradient, = torch.autograd.grad(
-                    total, generated, retain_graph=True)
-                auxiliary = (clap_result.gradients
-                             * config.latent_loss.clap_control / generated.shape[0])
-                auxiliary = cap_auxiliary_gradient(
-                    auxiliary, reference_gradient,
+                auxiliary = _predictive_clap_auxiliary(
+                    clap_result, total, generated,
+                    config.latent_loss.clap_control,
                     config.predictive.clap_gradient_fraction_max)
                 surrogate = (generated.float() * auxiliary.float()).sum()
                 clap_loss = clap_result.losses.mean()
