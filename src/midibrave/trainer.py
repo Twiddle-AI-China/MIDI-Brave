@@ -170,9 +170,14 @@ def _seed_washout_loss(
         second_value = second.float()
         latent_scale, _, _ = statistics.scales(
             first_value.shape[1], first_value.device, first_value.dtype)
+        normalized_difference = (first_value - second_value) / latent_scale
+        # vector_norm defines the zero-vector subgradient as zero. A direct
+        # sqrt(mean(square)) has an infinite derivative at exact seed
+        # agreement and produces 0 * inf = NaN through the washout hinge.
         distance = (
-            (first_value - second_value) / latent_scale
-        ).square().mean(dim=1).sqrt()
+            torch.linalg.vector_norm(normalized_difference, dim=1)
+            / math.sqrt(first_value.shape[1])
+        )
         early = distance[..., :window_frames].mean(dim=-1)
         late = distance[..., -window_frames:].mean(dim=-1)
         loss = F.relu(late - maximum_ratio * early).mean()

@@ -18,7 +18,7 @@ config=/workspace/MidiBrave/configs/v3/octopus_pad50_phase2b.yaml
 checkpoint=/data/midibrave-v3/runs/pad50_phase2_independent_controls_from_phase15_5k/predictor/update-00001000.pt
 statistics=/data/midibrave-v3/cache/pad50-phase15-5k/rave-statistics.npz
 calibration=/data/midibrave-v3/cache/pad50-phase15-5k/predictive-calibration-phase2b.json
-run_root=/data/midibrave-v3/runs/pad50_phase2b_stable_controls_from_p2_1k_v2/predictor
+run_root=/data/midibrave-v3/runs/pad50_phase2b_stable_controls_from_p2_1k_v3/predictor
 
 mkdir -p "$launch/logs" "$launch/monitor" "$run_root"
 nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu --format=csv,noheader,nounits -l 10 > "$launch/monitor/phase2b-train-${SLURM_JOB_ID}.csv" 2> "$launch/monitor/phase2b-train-${SLURM_JOB_ID}.err" &

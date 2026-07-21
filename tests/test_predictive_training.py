@@ -238,6 +238,22 @@ def test_seed_washout_penalizes_growth_but_not_contraction():
     assert shrinking_ratio.item() < 1.0
 
 
+def test_seed_washout_identical_rollouts_have_finite_zero_gradient():
+    statistics = LatentStatistics(
+        torch.ones(2), torch.ones(2), torch.ones(2))
+    first = torch.zeros(1, 2, 16, requires_grad=True)
+    second = torch.zeros_like(first)
+
+    loss, ratio = _seed_washout_loss(
+        first, second, statistics, window_frames=4)
+    loss.backward()
+
+    assert loss.item() == pytest.approx(0.0)
+    assert ratio.item() == pytest.approx(0.0)
+    assert torch.isfinite(first.grad).all()
+    assert first.grad.abs().max().item() == pytest.approx(0.0)
+
+
 def test_predictor_rollout_stability_uses_only_same_recording_future():
     config = _config()
     model = _model(config)

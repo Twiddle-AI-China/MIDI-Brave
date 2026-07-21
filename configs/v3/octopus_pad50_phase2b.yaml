@@ -144,5 +144,5 @@ train:
   checkpoint_every: 1000
   log_every: 20
   output_dir: /data/midibrave-v3/runs
-  run_name: pad50_phase2b_stable_controls_from_p2_1k_v2
+  run_name: pad50_phase2b_stable_controls_from_p2_1k_v3
   precision: amp_fp16
