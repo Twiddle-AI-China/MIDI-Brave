@@ -100,7 +100,7 @@ predictive:
   predictor_control_start_updates: 0
   predictor_control_every_updates: 1
   predictor_control_warmup_updates: 1
-  predictor_control_rollout_frames: 32
+  predictor_control_rollout_frames: 128
   predictor_control_gradient_fraction_max: 0.25
   predictor_timbre_interpolation_steps: 4
 latent_loss:
