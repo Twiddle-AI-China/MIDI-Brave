@@ -332,6 +332,24 @@ def test_predictor_parameter_gradient_cap_limits_combined_control_objective():
     assert gradient.norm() <= reference_gradient.norm() * 0.25 + 1e-7
 
 
+def test_predictor_parameter_gradient_cap_recovers_from_fp16_probe_overflow():
+    parameter = nn.Parameter(torch.tensor([1.0], dtype=torch.float16))
+    reference = parameter.float().sum()
+    auxiliary = 100_000.0 * parameter.float().sum()
+    raw_gradient, = torch.autograd.grad(
+        auxiliary, parameter, retain_graph=True)
+    assert not torch.isfinite(raw_gradient).all()
+
+    capped, scale = _cap_auxiliary_parameter_gradient(
+        auxiliary, reference, [parameter], maximum_fraction=0.25)
+    gradient, = torch.autograd.grad(capped, parameter)
+
+    assert torch.isfinite(scale)
+    assert scale.item() == pytest.approx(2.5e-6, rel=1e-3)
+    assert torch.isfinite(gradient).all()
+    assert gradient.float().norm().item() <= 0.25 + 1e-3
+
+
 def test_tensor_health_metrics_identifies_first_nonfinite_pipeline_value():
     values = {
         "finite": torch.tensor([3.0, 4.0]),

@@ -1494,22 +1494,36 @@ def _cap_auxiliary_parameter_gradient(
         raise ValueError("parameter gradient cap requires trainable parameters")
     reference_gradients = torch.autograd.grad(
         reference, trainable, retain_graph=True, allow_unused=True)
-    auxiliary_gradients = torch.autograd.grad(
-        auxiliary, trainable, retain_graph=True, allow_unused=True)
 
-    def gradient_norm(values: tuple[Tensor | None, ...]) -> Tensor:
+    def gradient_norm(values: tuple[Tensor | None, ...]) -> Tensor | None:
         square = reference.new_zeros((), dtype=torch.float32)
         for value in values:
             if value is None:
                 continue
             value = value.detach().float()
             if not bool(torch.isfinite(value).all().item()):
-                raise ValueError("parameter gradient cap rejects non-finite values")
+                return None
             square = square + value.square().sum()
         return square.sqrt()
 
     reference_norm = gradient_norm(reference_gradients)
-    auxiliary_norm = gradient_norm(auxiliary_gradients)
+    if reference_norm is None:
+        raise ValueError("parameter gradient cap rejects non-finite values")
+    # Measuring an uncapped control objective can itself overflow an fp16
+    # intermediate before we have computed the cap. Retry the norm probe with
+    # exact power-of-two loss scaling, then undo that scale in fp32. This does
+    # not change the eventual capped objective or its gradient direction.
+    auxiliary_norm = None
+    for probe_scale in (1.0, 2.0 ** -8, 2.0 ** -16, 2.0 ** -24):
+        auxiliary_gradients = torch.autograd.grad(
+            auxiliary * probe_scale, trainable, retain_graph=True,
+            allow_unused=True)
+        probed_norm = gradient_norm(auxiliary_gradients)
+        if probed_norm is not None:
+            auxiliary_norm = probed_norm / probe_scale
+            break
+    if auxiliary_norm is None or not bool(torch.isfinite(auxiliary_norm).item()):
+        raise ValueError("parameter gradient cap rejects non-finite values")
     limit = reference_norm * maximum_fraction
     if bool(auxiliary_norm.le(limit).item()):
         scale = auxiliary_norm.new_ones(())
