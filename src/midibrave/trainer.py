@@ -1575,6 +1575,10 @@ def train_predictive(
         raise ValueError(f"{stage.value} stage requires --warm-start or --resume")
     rank, _, world_size, device = distributed_setup()
     seed_everything(config.seed, rank)
+    torch.autograd.set_detect_anomaly(
+        os.environ.get("MIDIBRAVE_DETECT_ANOMALY", "0") == "1",
+        check_nan=True,
+    )
     torch.backends.cudnn.benchmark = True
 
     stats: LatentStatistics | None = None
