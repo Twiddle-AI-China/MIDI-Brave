@@ -53,6 +53,23 @@ def test_phase2c_enables_control_recovery_without_small_batches():
     assert config.train.checkpoint_every == 500
 
 
+def test_phase3_preserves_controls_and_has_a_dedicated_sweep_config():
+    formal = Config.load("configs/v3/octopus_pad50_phase3.yaml")
+    sweep = Config.load("configs/v3/octopus_pad50_phase3_sweep.yaml")
+
+    assert formal.predictive is not None
+    assert formal.latent_loss is not None
+    assert formal.train.run_name == "pad50_phase3_control_preserving_rollout"
+    assert formal.train.checkpoint_every == 500
+    assert formal.latent_loss.clap_counterfactual == 1.0
+    assert formal.latent_loss.predictor_midi_style == 1.0
+    assert formal.predictive.predictor_control_start_updates == 0
+    assert formal.predictive.predictor_control_every_updates == 4
+    assert sweep.train.run_name == "pad50_phase3_batch_sweep"
+    assert sweep.train.rollout_steps == 6
+    assert sweep.train.log_every == 1
+
+
 def test_v3_rejects_stride_beyond_horizon(tmp_path: Path):
     text = Path("configs/v3/smoke.yaml").read_text(encoding="utf-8")
     path = tmp_path / "bad.yaml"

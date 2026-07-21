@@ -11,6 +11,7 @@ from midibrave.losses import FrozenClapReconstructionObjective
 from midibrave.predictive_model import PredictiveMidiBrave
 from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
                                _predictive_scaler_step,
+                               _predictive_throughput,
                                _latent_style_interpolation_loss,
                                _latent_style_matching_loss,
                                _predictor_rollout_stability_objective,
@@ -33,6 +34,17 @@ from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_predictive_throughput_counts_global_samples():
+    updates_per_second, samples_per_second = _predictive_throughput(
+        applied_updates=5, elapsed_seconds=2.0, batch_per_gpu=16,
+        world_size=8)
+
+    assert updates_per_second == pytest.approx(2.5)
+    assert samples_per_second == pytest.approx(320.0)
+    with pytest.raises(ValueError, match="elapsed_seconds"):
+        _predictive_throughput(1, 0.0, 16, 8)
 
 
 def test_sparse_predictor_controls_log_only_on_active_updates():
@@ -820,6 +832,55 @@ def test_rollout_objective_decodes_predicted_future():
     assert objective.generated_audio.shape == (1, 1, 2048)
     assert torch.isfinite(objective.total)
     assert objective.components["rollout"].item() >= 0
+
+
+def test_rollout_stage_retains_counterfactual_control_supervision():
+    config = _config()
+    assert config.predictive is not None and config.latent_loss is not None
+    config = replace(config, latent_loss=replace(
+        config.latent_loss,
+        clap_counterfactual=1.0,
+        rave_swap_source_rejection=0.5,
+        predictor_midi_style=0.5,
+        predictor_timbre_style=0.5,
+        predictor_seed_washout=0.25,
+    ))
+    model = _model(config)
+    configure_predictive_stage(model, PredictiveStage.ROLLOUT)
+    frames = config.data.window_samples // config.data.pitch_hop_length
+    batch = {
+        "audio_a": torch.randn(4, 1, config.data.window_samples),
+        "rave_a": torch.randn(4, 16, 32),
+        "clap_a": torch.nn.functional.normalize(torch.randn(4, 512), dim=-1),
+        "note_a": torch.tensor([48, 60, 52, 64]),
+        "note_b": torch.tensor([36, 67, 40, 71]),
+        "velocity_a": torch.tensor([80.0, 100.0, 90.0, 70.0]),
+        "pitch_confidence_a": torch.ones(4, frames),
+        "pitch_valid_mask_a": torch.ones(4, frames, dtype=torch.bool),
+        "excitation_seed_a": torch.arange(4),
+        "preset_id": ["a", "a", "b", "b"],
+    }
+    statistics = LatentStatistics(
+        torch.ones(16), torch.ones(16), torch.ones(16))
+    clap = FrozenClapReconstructionObjective(
+        None, config.data.sample_rate, torch.device("cpu"),
+        maximum_gradient_norm=0.0, encoder=_TinyPredictorClap())
+
+    objective = predictive_stage_objective(
+        model, batch, config, PredictiveStage.ROLLOUT, 0, statistics,
+        swap_pitch=_RecordingSwapPitch(), clap_objective=clap)
+
+    assert objective.components["predictor_midi_swap_pitch"].item() > 0.0
+    assert objective.components["predictor_timbre_pitch_preservation"].item() > 0.0
+    assert objective.components["predictor_timbre_style_control"].item() > 0.0
+    assert objective.components["predictor_clap_control_total"].item() > 0.0
+    assert torch.isfinite(objective.components["predictor_clap_following"])
+    assert objective.diagnostic_tensors is not None
+    assert "counterfactual_audio" in objective.diagnostic_tensors
+    objective.total.backward()
+    for module in (model.predictor, model.decoder, model.clap_projection, model.midi):
+        assert any(parameter.grad is not None for parameter in module.parameters())
+    assert all(parameter.grad is None for parameter in model.encoder.parameters())
 
 
 def test_calibration_artifact_is_bound_to_statistics(tmp_path: Path):

@@ -223,6 +223,13 @@ class PredictiveStageObjective:
 
 
 @dataclass(frozen=True)
+class PredictiveControlObjective:
+    total: Tensor
+    components: dict[str, Tensor]
+    diagnostic_tensors: dict[str, Tensor]
+
+
+@dataclass(frozen=True)
 class PredictorCounterfactualRollout:
     audio: Tensor
     rollout: Tensor
@@ -334,6 +341,221 @@ def _predictor_control_active(config: Config, update: int) -> bool:
     return (update >= predictive.predictor_control_start_updates
             and (update - predictive.predictor_control_start_updates)
             % predictive.predictor_control_every_updates == 0)
+
+
+def _empty_predictive_control_components(zero: Tensor) -> dict[str, Tensor]:
+    return {
+        "predictor_midi_swap_pitch": zero,
+        "predictor_midi_swap_source_rejection": zero,
+        "predictor_midi_control_total": zero,
+        "predictor_timbre_pitch_preservation": zero,
+        "predictor_pitch_control_total": zero,
+        "predictor_midi_style_preservation": zero,
+        "predictor_timbre_style_control": zero,
+        "predictor_seed_washout": zero,
+        "predictor_seed_washout_ratio": zero,
+        "predictor_latent_style_control_total": zero,
+        "predictor_midi_clap_preservation_total": zero,
+        "predictor_midi_clap_preservation_cosine": zero,
+        "predictor_clap_control_total": zero,
+        "predictor_clap_target_cosine": zero,
+        "predictor_clap_source_cosine": zero,
+        "predictor_clap_following": zero,
+        "predictor_control_total": zero,
+        "predictor_control_gradient_fraction_limit": zero,
+        "predictor_control_gradient_scale": zero,
+    }
+
+
+def _predictive_control_objective(
+    model: PredictiveMidiBrave, batch: dict[str, Any], config: Config,
+    update: int, statistics: LatentStatistics, primary_total: Tensor,
+    gradient_parameters: list[Tensor], swap_pitch: nn.Module | None,
+    clap_objective: FrozenClapReconstructionObjective | None,
+) -> PredictiveControlObjective:
+    """Apply the same bounded MIDI/CLAP controls in predictor and rollout stages."""
+    if config.predictive is None or config.latent_loss is None:
+        raise ValueError("predictive controls require a v3 config")
+    if swap_pitch is None:
+        raise ValueError("predictive MIDI control requires a pitch objective")
+    required = {"note_b", "pitch_confidence_a", "pitch_valid_mask_a", "preset_id"}
+    missing = required - batch.keys()
+    if missing:
+        raise ValueError(f"predictive control batch is missing: {sorted(missing)}")
+    losses = config.latent_loss
+    zero = primary_total.new_zeros(())
+    counterfactual = predictor_counterfactual_rollout(model, batch, config)
+    midi_mask = counterfactual.midi_mask
+    changed = batch["note_a"].ne(batch["note_b"]) & midi_mask
+    weights = midi_swap_example_weights(
+        batch["note_a"], batch["note_b"], changed)
+    pitch = swap_pitch(
+        counterfactual.audio[midi_mask], batch["note_b"][midi_mask],
+        batch["pitch_confidence_a"][midi_mask]
+        * changed[midi_mask, None].to(batch["pitch_confidence_a"])
+        * weights[midi_mask, None].to(batch["pitch_confidence_a"]),
+        batch["pitch_valid_mask_a"][midi_mask])
+    source_rejection = swap_pitch.source_rejection(
+        counterfactual.audio[midi_mask], batch["note_b"][midi_mask],
+        batch["note_a"][midi_mask], batch["pitch_confidence_a"][midi_mask],
+        batch["pitch_valid_mask_a"][midi_mask], weights[midi_mask])
+    midi_control = (
+        config.loss.cross_pitch * config.loss.analytic_pitch * pitch
+        + losses.rave_swap_source_rejection * source_rejection)
+    timbre_mask = counterfactual.timbre_mask
+    timbre_pitch = zero
+    if bool(timbre_mask.any().item()):
+        timbre_pitch = swap_pitch(
+            counterfactual.audio[timbre_mask], batch["note_a"][timbre_mask],
+            batch["pitch_confidence_a"][timbre_mask],
+            batch["pitch_valid_mask_a"][timbre_mask])
+    pitch_control = (
+        midi_control + config.loss.cross_pitch
+        * config.loss.analytic_pitch * timbre_pitch)
+    midi_style = zero
+    if losses.predictor_midi_style > 0.0 and bool(midi_mask.any().item()):
+        source = batch["rave_a"][midi_mask]
+        midi_style = _latent_style_interpolation_loss(
+            counterfactual.rollout[midi_mask], source, source,
+            torch.zeros(source.shape[0], device=source.device, dtype=source.dtype),
+            statistics)
+    timbre_style = zero
+    seed_washout = zero
+    seed_washout_ratio = zero
+    if bool(timbre_mask.any().item()) and (
+            losses.predictor_timbre_style > 0.0
+            or losses.predictor_seed_washout > 0.0):
+        target_latent = batch["rave_a"].index_select(
+            0, counterfactual.target_index)[timbre_mask]
+        source_latent = batch["rave_a"][timbre_mask]
+        if losses.predictor_timbre_style > 0.0:
+            timbre_style = _latent_style_interpolation_loss(
+                counterfactual.rollout[timbre_mask], source_latent,
+                target_latent, counterfactual.timbre_alpha[timbre_mask],
+                statistics)
+        if losses.predictor_seed_washout > 0.0:
+            frames = config.predictive.predictor_control_rollout_frames
+            alternate = rollout_blocks(
+                model.predictor,
+                target_latent[..., :config.predictive.history_frames],
+                model.project_clap(
+                    counterfactual.target_clap[timbre_mask], frames),
+                model.midi_control(
+                    counterfactual.target_note[timbre_mask],
+                    batch["velocity_a"][timbre_mask], frames),
+                config.predictive.stride_frames).latent
+            seed_washout, seed_washout_ratio = _seed_washout_loss(
+                counterfactual.rollout[timbre_mask], alternate, statistics,
+                window_frames=min(
+                    config.predictive.history_frames, frames // 2))
+    latent_style_control = (
+        losses.predictor_midi_style * midi_style
+        + losses.predictor_timbre_style * timbre_style
+        + losses.predictor_seed_washout * seed_washout)
+    midi_clap_loss = zero
+    midi_clap_cosine = zero
+    timbre_clap_loss = zero
+    clap_surrogate = zero
+    clap_health = None
+    clap_target_cosine = zero
+    clap_source_cosine = zero
+    clap_following = zero
+    if losses.clap_control > 0.0 or losses.clap_counterfactual > 0.0:
+        if clap_objective is None:
+            raise ValueError("predictive CLAP control requires a frozen CLAP objective")
+        if losses.clap_control > 0.0 and bool(midi_mask.any().item()):
+            midi_audio = counterfactual.audio[midi_mask]
+            valid = torch.full(
+                (midi_audio.shape[0],), midi_audio.shape[-1],
+                device=midi_audio.device, dtype=torch.long)
+            preservation = clap_objective.waveform_gradients_to_embeddings(
+                midi_audio, counterfactual.source_clap[midi_mask],
+                counterfactual.source_clap[midi_mask], valid, margin=0.0)
+            midi_clap_loss = preservation.losses.mean()
+            midi_clap_cosine = preservation.target_cosine.mean()
+            health = _clap_health_vector(preservation.health, midi_audio.device)
+            clap_health = health if clap_health is None else _merge_clap_health(
+                clap_health, health)
+            if not bool(preservation.health.skipped.item()):
+                requested = (preservation.gradients * losses.clap_control
+                             / midi_audio.shape[0])
+                clap_surrogate = (
+                    clap_surrogate
+                    + (midi_audio.float() * requested.float()).sum())
+        if losses.clap_counterfactual > 0.0 and bool(timbre_mask.any().item()):
+            timbre_audio = counterfactual.audio[timbre_mask]
+            valid = torch.full(
+                (timbre_audio.shape[0],), timbre_audio.shape[-1],
+                device=timbre_audio.device, dtype=torch.long)
+            clap_result = clap_objective.waveform_gradients_to_embeddings(
+                timbre_audio, counterfactual.target_clap[timbre_mask],
+                counterfactual.source_clap[timbre_mask], valid)
+            timbre_clap_loss = clap_result.losses.mean()
+            clap_target_cosine = clap_result.target_cosine.mean()
+            clap_source_cosine = clap_result.source_cosine.mean()
+            clap_following = clap_result.following.float().mean()
+            health = _clap_health_vector(clap_result.health, timbre_audio.device)
+            clap_health = health if clap_health is None else _merge_clap_health(
+                clap_health, health)
+            if not bool(clap_result.health.skipped.item()):
+                requested = (clap_result.gradients * losses.clap_counterfactual
+                             / timbre_audio.shape[0])
+                clap_surrogate = (
+                    clap_surrogate
+                    + (timbre_audio.float() * requested.float()).sum())
+    weighted_midi_clap = losses.clap_control * midi_clap_loss
+    weighted_timbre_clap = losses.clap_counterfactual * timbre_clap_loss
+    weighted_clap = weighted_midi_clap + weighted_timbre_clap
+    control_auxiliary = (pitch_control + latent_style_control
+                         + clap_surrogate - clap_surrogate.detach())
+    control_progress = _linear_warmup(
+        update - config.predictive.predictor_control_start_updates + 1,
+        config.predictive.predictor_control_warmup_updates)
+    gradient_fraction = (
+        config.predictive.predictor_control_gradient_fraction_max
+        * control_progress)
+    capped_control, control_scale = _cap_auxiliary_parameter_gradient(
+        control_auxiliary, primary_total, gradient_parameters, gradient_fraction)
+    displayed_control = (pitch_control.detach() + latent_style_control.detach()
+                         + weighted_clap.detach())
+    control_total = capped_control - capped_control.detach() + displayed_control
+    components = {
+        "predictor_midi_swap_pitch": pitch,
+        "predictor_midi_swap_source_rejection": source_rejection,
+        "predictor_midi_control_total": midi_control,
+        "predictor_timbre_pitch_preservation": timbre_pitch,
+        "predictor_pitch_control_total": pitch_control,
+        "predictor_midi_style_preservation": midi_style,
+        "predictor_timbre_style_control": timbre_style,
+        "predictor_seed_washout": seed_washout,
+        "predictor_seed_washout_ratio": seed_washout_ratio,
+        "predictor_latent_style_control_total": latent_style_control,
+        "predictor_midi_clap_preservation_total": weighted_midi_clap,
+        "predictor_midi_clap_preservation_cosine": midi_clap_cosine,
+        "predictor_clap_control_total": weighted_clap,
+        "predictor_clap_target_cosine": clap_target_cosine,
+        "predictor_clap_source_cosine": clap_source_cosine,
+        "predictor_clap_following": clap_following,
+        "predictor_control_total": displayed_control,
+        "predictor_control_gradient_fraction_limit": zero.new_tensor(
+            gradient_fraction),
+        "predictor_control_gradient_scale": control_scale,
+    }
+    diagnostics = {
+        "counterfactual_audio": counterfactual.audio,
+        "counterfactual_latent_rollout": counterfactual.rollout,
+        "counterfactual_latent_sequence": counterfactual.latent_sequence,
+        "counterfactual_midi_mask": counterfactual.midi_mask,
+        "counterfactual_timbre_mask": counterfactual.timbre_mask,
+        "counterfactual_target_index": counterfactual.target_index,
+        "counterfactual_target_clap": counterfactual.target_clap,
+        "counterfactual_source_clap": counterfactual.source_clap,
+        "counterfactual_target_note": counterfactual.target_note,
+        "counterfactual_timbre_alpha": counterfactual.timbre_alpha,
+        **({"predictor_control_clap_health": clap_health}
+           if clap_health is not None else {}),
+    }
+    return PredictiveControlObjective(control_total, components, diagnostics)
 
 
 def _should_log_predictive_component(name: str, regular_interval: bool,
@@ -582,211 +804,17 @@ def predictive_stage_objective(
                 stability.acceleration if stability is not None else zero),
             "predictor_rollout_stability_style": (
                 stability.style if stability is not None else zero),
-            "predictor_midi_swap_pitch": zero,
-            "predictor_midi_swap_source_rejection": zero,
-            "predictor_midi_control_total": zero,
-            "predictor_timbre_pitch_preservation": zero,
-            "predictor_pitch_control_total": zero,
-            "predictor_midi_style_preservation": zero,
-            "predictor_timbre_style_control": zero,
-            "predictor_seed_washout": zero,
-            "predictor_seed_washout_ratio": zero,
-            "predictor_latent_style_control_total": zero,
-            "predictor_midi_clap_preservation_total": zero,
-            "predictor_midi_clap_preservation_cosine": zero,
-            "predictor_clap_control_total": zero,
-            "predictor_clap_target_cosine": zero,
-            "predictor_clap_source_cosine": zero,
-            "predictor_clap_following": zero,
-            "predictor_control_total": zero,
-            "predictor_control_gradient_fraction_limit": zero,
-            "predictor_control_gradient_scale": zero,
         })
+        components.update(_empty_predictive_control_components(zero))
         if not _predictor_control_active(config, update):
             return PredictiveStageObjective(primary_total, components)
-        if swap_pitch is None:
-            raise ValueError("predictor MIDI control requires a pitch objective")
-        required = {"note_b", "pitch_confidence_a", "pitch_valid_mask_a", "preset_id"}
-        missing = required - batch.keys()
-        if missing:
-            raise ValueError(f"predictor MIDI control batch is missing: {sorted(missing)}")
-        counterfactual = predictor_counterfactual_rollout(model, batch, config)
-        midi_mask = counterfactual.midi_mask
-        changed = batch["note_a"].ne(batch["note_b"]) & midi_mask
-        weights = midi_swap_example_weights(
-            batch["note_a"], batch["note_b"], changed)
-        pitch = swap_pitch(
-            counterfactual.audio[midi_mask], batch["note_b"][midi_mask],
-            batch["pitch_confidence_a"][midi_mask]
-            * changed[midi_mask, None].to(batch["pitch_confidence_a"])
-            * weights[midi_mask, None].to(batch["pitch_confidence_a"]),
-            batch["pitch_valid_mask_a"][midi_mask])
-        source_rejection = swap_pitch.source_rejection(
-            counterfactual.audio[midi_mask], batch["note_b"][midi_mask],
-            batch["note_a"][midi_mask], batch["pitch_confidence_a"][midi_mask],
-            batch["pitch_valid_mask_a"][midi_mask], weights[midi_mask])
-        midi_control = (
-            config.loss.cross_pitch * config.loss.analytic_pitch * pitch
-            + losses.rave_swap_source_rejection * source_rejection)
-        timbre_mask = counterfactual.timbre_mask
-        timbre_pitch = zero
-        if bool(timbre_mask.any().item()):
-            timbre_pitch = swap_pitch(
-                counterfactual.audio[timbre_mask], batch["note_a"][timbre_mask],
-                batch["pitch_confidence_a"][timbre_mask],
-                batch["pitch_valid_mask_a"][timbre_mask])
-        pitch_control = (
-            midi_control + config.loss.cross_pitch
-            * config.loss.analytic_pitch * timbre_pitch)
-        midi_style = zero
-        if losses.predictor_midi_style > 0.0 and bool(midi_mask.any().item()):
-            source = batch["rave_a"][midi_mask]
-            midi_style = _latent_style_interpolation_loss(
-                counterfactual.rollout[midi_mask], source, source,
-                torch.zeros(source.shape[0], device=source.device, dtype=source.dtype),
-                statistics)
-        timbre_style = zero
-        seed_washout = zero
-        seed_washout_ratio = zero
-        if bool(timbre_mask.any().item()) and (
-                losses.predictor_timbre_style > 0.0
-                or losses.predictor_seed_washout > 0.0):
-            target_latent = batch["rave_a"].index_select(
-                0, counterfactual.target_index)[timbre_mask]
-            source_latent = batch["rave_a"][timbre_mask]
-            if losses.predictor_timbre_style > 0.0:
-                timbre_style = _latent_style_interpolation_loss(
-                    counterfactual.rollout[timbre_mask], source_latent,
-                    target_latent, counterfactual.timbre_alpha[timbre_mask],
-                    statistics)
-            if losses.predictor_seed_washout > 0.0:
-                frames = config.predictive.predictor_control_rollout_frames
-                alternate = rollout_blocks(
-                    model.predictor,
-                    target_latent[..., :config.predictive.history_frames],
-                    model.project_clap(
-                        counterfactual.target_clap[timbre_mask], frames),
-                    model.midi_control(
-                        counterfactual.target_note[timbre_mask],
-                        batch["velocity_a"][timbre_mask], frames),
-                    config.predictive.stride_frames).latent
-                seed_washout, seed_washout_ratio = _seed_washout_loss(
-                    counterfactual.rollout[timbre_mask], alternate, statistics,
-                    window_frames=min(
-                        config.predictive.history_frames, frames // 2))
-        latent_style_control = (
-            losses.predictor_midi_style * midi_style
-            + losses.predictor_timbre_style * timbre_style
-            + losses.predictor_seed_washout * seed_washout)
-        midi_clap_loss = zero
-        midi_clap_cosine = zero
-        timbre_clap_loss = zero
-        clap_surrogate = zero
-        clap_health = None
-        clap_target_cosine = zero
-        clap_source_cosine = zero
-        clap_following = zero
-        if losses.clap_control > 0.0 or losses.clap_counterfactual > 0.0:
-            if clap_objective is None:
-                raise ValueError("predictor CLAP control requires a frozen CLAP objective")
-            if losses.clap_control > 0.0 and bool(midi_mask.any().item()):
-                midi_audio = counterfactual.audio[midi_mask]
-                valid = torch.full(
-                    (midi_audio.shape[0],), midi_audio.shape[-1],
-                    device=midi_audio.device, dtype=torch.long)
-                preservation = clap_objective.waveform_gradients_to_embeddings(
-                    midi_audio, counterfactual.source_clap[midi_mask],
-                    counterfactual.source_clap[midi_mask], valid, margin=0.0)
-                midi_clap_loss = preservation.losses.mean()
-                midi_clap_cosine = preservation.target_cosine.mean()
-                health = _clap_health_vector(preservation.health, midi_audio.device)
-                clap_health = health if clap_health is None else _merge_clap_health(
-                    clap_health, health)
-                if not bool(preservation.health.skipped.item()):
-                    requested = (preservation.gradients * losses.clap_control
-                                 / midi_audio.shape[0])
-                    clap_surrogate = (
-                        clap_surrogate
-                        + (midi_audio.float() * requested.float()).sum())
-            if losses.clap_counterfactual > 0.0 and bool(timbre_mask.any().item()):
-                timbre_audio = counterfactual.audio[timbre_mask]
-                valid = torch.full(
-                    (timbre_audio.shape[0],), timbre_audio.shape[-1],
-                    device=timbre_audio.device, dtype=torch.long)
-                clap_result = clap_objective.waveform_gradients_to_embeddings(
-                    timbre_audio, counterfactual.target_clap[timbre_mask],
-                    counterfactual.source_clap[timbre_mask], valid)
-                timbre_clap_loss = clap_result.losses.mean()
-                clap_target_cosine = clap_result.target_cosine.mean()
-                clap_source_cosine = clap_result.source_cosine.mean()
-                clap_following = clap_result.following.float().mean()
-                health = _clap_health_vector(clap_result.health, timbre_audio.device)
-                clap_health = health if clap_health is None else _merge_clap_health(
-                    clap_health, health)
-                if not bool(clap_result.health.skipped.item()):
-                    requested = (clap_result.gradients
-                                 * losses.clap_counterfactual
-                                 / timbre_audio.shape[0])
-                    clap_surrogate = (
-                        clap_surrogate
-                        + (timbre_audio.float() * requested.float()).sum())
-        weighted_midi_clap = losses.clap_control * midi_clap_loss
-        weighted_timbre_clap = losses.clap_counterfactual * timbre_clap_loss
-        weighted_clap = weighted_midi_clap + weighted_timbre_clap
-        control_auxiliary = (pitch_control + latent_style_control
-                             + clap_surrogate - clap_surrogate.detach())
-        control_progress = _linear_warmup(
-            update - config.predictive.predictor_control_start_updates + 1,
-            config.predictive.predictor_control_warmup_updates)
-        gradient_fraction = (
-            config.predictive.predictor_control_gradient_fraction_max
-            * control_progress)
-        capped_control, control_scale = _cap_auxiliary_parameter_gradient(
-            control_auxiliary, primary_total,
-            list(model.predictor.parameters()), gradient_fraction)
-        displayed_control = (pitch_control.detach() + latent_style_control.detach()
-                             + weighted_clap.detach())
-        control_total = (
-            capped_control - capped_control.detach() + displayed_control)
-        components.update({
-            "predictor_midi_swap_pitch": pitch,
-            "predictor_midi_swap_source_rejection": source_rejection,
-            "predictor_midi_control_total": midi_control,
-            "predictor_timbre_pitch_preservation": timbre_pitch,
-            "predictor_pitch_control_total": pitch_control,
-            "predictor_midi_style_preservation": midi_style,
-            "predictor_timbre_style_control": timbre_style,
-            "predictor_seed_washout": seed_washout,
-            "predictor_seed_washout_ratio": seed_washout_ratio,
-            "predictor_latent_style_control_total": latent_style_control,
-            "predictor_midi_clap_preservation_total": weighted_midi_clap,
-            "predictor_midi_clap_preservation_cosine": midi_clap_cosine,
-            "predictor_clap_control_total": weighted_clap,
-            "predictor_clap_target_cosine": clap_target_cosine,
-            "predictor_clap_source_cosine": clap_source_cosine,
-            "predictor_clap_following": clap_following,
-            "predictor_control_total": displayed_control,
-            "predictor_control_gradient_fraction_limit": zero.new_tensor(
-                gradient_fraction),
-            "predictor_control_gradient_scale": control_scale,
-        })
-        diagnostics = {
-            "counterfactual_audio": counterfactual.audio,
-            "counterfactual_latent_rollout": counterfactual.rollout,
-            "counterfactual_latent_sequence": counterfactual.latent_sequence,
-            "counterfactual_midi_mask": counterfactual.midi_mask,
-            "counterfactual_timbre_mask": counterfactual.timbre_mask,
-            "counterfactual_target_index": counterfactual.target_index,
-            "counterfactual_target_clap": counterfactual.target_clap,
-            "counterfactual_source_clap": counterfactual.source_clap,
-            "counterfactual_target_note": counterfactual.target_note,
-            "counterfactual_timbre_alpha": counterfactual.timbre_alpha,
-            **({"predictor_control_clap_health": clap_health}
-               if clap_health is not None else {}),
-        }
+        control = _predictive_control_objective(
+            model, batch, config, update, statistics, primary_total,
+            list(model.predictor.parameters()), swap_pitch, clap_objective)
+        components.update(control.components)
         return PredictiveStageObjective(
-            primary_total + control_total, components,
-            diagnostic_tensors=diagnostics)
+            primary_total + control.total, components,
+            diagnostic_tensors=control.diagnostic_tensors)
 
     p = config.predictive
     latent = batch["rave_a"]
@@ -839,9 +867,25 @@ def predictive_stage_objective(
     components = dict(latent_objective.components)
     components.update({"rollout": rollout_error, "predicted_audio": audio,
                        "predicted_spectral": spectral})
-    total = (latent_objective.total + schedule.rollout * rollout_error
-             + losses.predicted_audio * (audio + config.loss.self_stft * spectral))
-    return PredictiveStageObjective(total, components, generated_future, target_future)
+    primary_total = (
+        latent_objective.total + schedule.rollout * rollout_error
+        + losses.predicted_audio * (audio + config.loss.self_stft * spectral))
+    zero = primary_total.new_zeros(())
+    components.update(_empty_predictive_control_components(zero))
+    diagnostics = None
+    # Direct objective callers may omit the optional analytic-pitch helper.
+    # The production trainer always supplies it for rollout, which enables the
+    # inherited counterfactual controls while preserving the lightweight API.
+    if _predictor_control_active(config, update) and swap_pitch is not None:
+        control = _predictive_control_objective(
+            model, batch, config, update, statistics, primary_total,
+            [parameter for parameter in model.parameters()
+             if parameter.requires_grad], swap_pitch, clap_objective)
+        primary_total = primary_total + control.total
+        components.update(control.components)
+        diagnostics = control.diagnostic_tensors
+    return PredictiveStageObjective(
+        primary_total, components, generated_future, target_future, diagnostics)
 
 
 def predictive_checkpoint_contract(config: Config, stage: PredictiveStage | str,
@@ -1588,6 +1632,23 @@ def _cap_auxiliary_parameter_gradient(
     return auxiliary * scale, scale
 
 
+def _predictive_throughput(
+        applied_updates: int, elapsed_seconds: float, batch_per_gpu: int,
+        world_size: int) -> tuple[float, float]:
+    """Return applied updates/s and global training samples/s."""
+    if applied_updates < 0:
+        raise ValueError("applied_updates must be non-negative")
+    if elapsed_seconds <= 0.0:
+        raise ValueError("elapsed_seconds must be positive")
+    if batch_per_gpu <= 0:
+        raise ValueError("batch_per_gpu must be positive")
+    if world_size <= 0:
+        raise ValueError("world_size must be positive")
+    updates_per_second = applied_updates / elapsed_seconds
+    samples_per_second = updates_per_second * batch_per_gpu * world_size
+    return updates_per_second, samples_per_second
+
+
 def _predictive_scaler_step(scaler: Any, optimizer: Any, *,
                             globally_finite: bool,
                             previous_scale: float) -> bool:
@@ -2027,7 +2088,9 @@ def train_predictive(
         writer = None
     stft = MultiResolutionSTFTLoss((2048, 1024, 512, 256, 128)).to(device)
     swap_pitch = (SpectralPitchObjective(config.data.sample_rate).to(device)
-                  if stage in {PredictiveStage.RAVE, PredictiveStage.PREDICTOR}
+                  if stage in {
+                      PredictiveStage.RAVE, PredictiveStage.PREDICTOR,
+                      PredictiveStage.ROLLOUT}
                   and config.loss.cross_pitch > 0
                   else None)
     clap_objective = None
@@ -2038,6 +2101,8 @@ def train_predictive(
             config.data.clap_checkpoint, config.data.sample_rate, device,
             maximum_gradient_norm=0.0)
 
+    updates_at_start = stage_update
+    training_started = time.perf_counter()
     optimizer.zero_grad(set_to_none=True)
     accumulated = 0
     clap_health_cumulative = torch.zeros(11, device=device)
@@ -2143,6 +2208,7 @@ def train_predictive(
                 counterfactual_loss = total.new_zeros(())
                 diagnostics = objective.diagnostic_tensors or {}
                 if (config.latent_loss.clap_counterfactual > 0.0
+                        and "predictor_clap_control_total" not in objective.components
                         and "counterfactual_audio" in diagnostics):
                     counterfactual = diagnostics["counterfactual_audio"]
                     timbre_mask = diagnostics["counterfactual_timbre_mask"].bool()
@@ -2241,10 +2307,16 @@ def train_predictive(
             stage_update += 1
             dataset.set_training_update(stage_update)
             regular_log = stage_update % config.train.log_every == 0
-            control_log = (stage is PredictiveStage.PREDICTOR
+            control_log = (stage in {
+                               PredictiveStage.PREDICTOR, PredictiveStage.ROLLOUT}
                            and _predictor_control_active(config, stage_update - 1))
             if writer is not None and (regular_log or control_log):
                 if regular_log:
+                    updates_per_second, samples_per_second = _predictive_throughput(
+                        stage_update - updates_at_start,
+                        time.perf_counter() - training_started,
+                        config.train.batch_per_gpu * config.train.grad_accum,
+                        world_size)
                     writer.add_scalar("loss/total", float(total.detach()), stage_update)
                     writer.add_scalar("loss/clap_control", float(clap_loss), stage_update)
                     writer.add_scalar(
@@ -2254,6 +2326,12 @@ def train_predictive(
                     writer.add_scalar(
                         "loss/discriminator", float(discriminator_loss.detach()), stage_update)
                     writer.add_scalar("train/lr", lr, stage_update)
+                    writer.add_scalar(
+                        "train/updates_per_second", updates_per_second,
+                        stage_update)
+                    writer.add_scalar(
+                        "train/samples_per_second", samples_per_second,
+                        stage_update)
                     writer.add_scalar(
                         "train/amp_scale", float(scaler.get_scale()), stage_update)
                     writer.add_scalar(
