@@ -11,6 +11,7 @@ from midibrave.losses import FrozenClapReconstructionObjective
 from midibrave.predictive_model import PredictiveMidiBrave
 from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
                                _predictive_scaler_step,
+                               _should_log_predictive_component,
                                counterfactual_control_assignment,
                                midi_swap_example_weights,
                                predictive_checkpoint_contract,
@@ -27,6 +28,20 @@ from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_sparse_predictor_controls_log_only_on_active_updates():
+    assert _should_log_predictive_component(
+        "future", regular_interval=True, control_active=False)
+    assert _should_log_predictive_component(
+        "predictor_continuation_total", regular_interval=True,
+        control_active=False)
+    assert not _should_log_predictive_component(
+        "predictor_midi_swap_pitch", regular_interval=True,
+        control_active=False)
+    assert _should_log_predictive_component(
+        "predictor_midi_swap_pitch", regular_interval=False,
+        control_active=True)
 
 
 class _RecordingScaler:

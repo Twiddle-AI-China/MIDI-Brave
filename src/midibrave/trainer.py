@@ -179,6 +179,14 @@ def _predictor_control_active(config: Config, update: int) -> bool:
             % predictive.predictor_control_every_updates == 0)
 
 
+def _should_log_predictive_component(name: str, regular_interval: bool,
+                                     control_active: bool) -> bool:
+    """Keep sparse control metrics off inactive zero-valued updates."""
+    sparse_control = (name.startswith("predictor_")
+                      and name != "predictor_continuation_total")
+    return control_active if sparse_control else regular_interval
+
+
 def predictive_loss_schedule(config: Config, stage: PredictiveStage | str,
                              update: int) -> PredictiveLossSchedule:
     """Return stage-local loss weights; counters restart at each stage."""
@@ -1928,26 +1936,37 @@ def train_predictive(
 
             stage_update += 1
             dataset.set_training_update(stage_update)
-            if writer is not None and stage_update % config.train.log_every == 0:
-                writer.add_scalar("loss/total", float(total.detach()), stage_update)
-                writer.add_scalar("loss/clap_control", float(clap_loss), stage_update)
-                writer.add_scalar("loss/adversarial", float(adversarial.detach()), stage_update)
-                writer.add_scalar("loss/feature_matching", float(matching.detach()), stage_update)
-                writer.add_scalar("loss/discriminator", float(discriminator_loss.detach()), stage_update)
-                writer.add_scalar("train/lr", lr, stage_update)
-                writer.add_scalar(
-                    "train/amp_scale", float(scaler.get_scale()), stage_update)
-                writer.add_scalar(
-                    "health/nonfinite_updates", nonfinite_updates, stage_update)
+            regular_log = stage_update % config.train.log_every == 0
+            control_log = (stage is PredictiveStage.PREDICTOR
+                           and _predictor_control_active(config, stage_update - 1))
+            if writer is not None and (regular_log or control_log):
+                if regular_log:
+                    writer.add_scalar("loss/total", float(total.detach()), stage_update)
+                    writer.add_scalar("loss/clap_control", float(clap_loss), stage_update)
+                    writer.add_scalar(
+                        "loss/adversarial", float(adversarial.detach()), stage_update)
+                    writer.add_scalar(
+                        "loss/feature_matching", float(matching.detach()), stage_update)
+                    writer.add_scalar(
+                        "loss/discriminator", float(discriminator_loss.detach()), stage_update)
+                    writer.add_scalar("train/lr", lr, stage_update)
+                    writer.add_scalar(
+                        "train/amp_scale", float(scaler.get_scale()), stage_update)
+                    writer.add_scalar(
+                        "health/nonfinite_updates", nonfinite_updates, stage_update)
                 for name, value in objective.components.items():
-                    writer.add_scalar(f"loss/{name}", float(value.detach()), stage_update)
-                for name, value in _clap_health_metrics(
-                        clap_health_cumulative, "health/clap").items():
-                    writer.add_scalar(name, value, stage_update)
-                for name, value in _clap_health_metrics(
-                        clap_health_interval, "health/clap_interval").items():
-                    writer.add_scalar(name, value, stage_update)
-            if stage_update % config.train.log_every == 0:
+                    if _should_log_predictive_component(
+                            name, regular_log, control_log):
+                        writer.add_scalar(
+                            f"loss/{name}", float(value.detach()), stage_update)
+                if regular_log:
+                    for name, value in _clap_health_metrics(
+                            clap_health_cumulative, "health/clap").items():
+                        writer.add_scalar(name, value, stage_update)
+                    for name, value in _clap_health_metrics(
+                            clap_health_interval, "health/clap_interval").items():
+                        writer.add_scalar(name, value, stage_update)
+            if regular_log:
                 clap_health_interval.zero_()
             should_checkpoint = (
                 stage_update == target_updates
