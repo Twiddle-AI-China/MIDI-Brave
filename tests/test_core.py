@@ -202,6 +202,64 @@ class _FailOnClapCall(nn.Module):
         return embedding
 
 
+class _FiniteForwardNonFiniteBackward(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, value):
+        return value.clone()
+
+    @staticmethod
+    def backward(ctx, gradient):
+        return torch.full_like(gradient, float("nan"))
+
+
+class _NonFiniteBackwardClap(nn.Module):
+    def get_audio_embedding_from_data(self, waveforms, use_tensor=True):
+        assert use_tensor
+        base = torch.stack([waveform.mean() for waveform in waveforms])[:, None]
+        poisoned = _FiniteForwardNonFiniteBackward.apply(base)
+        return torch.cat([poisoned + offset for offset in range(1, 9)], dim=1)
+
+
+def test_clap_control_nonfinite_backward_skips_gradient_and_records_health():
+    objective = FrozenClapReconstructionObjective(
+        None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
+        encoder=_NonFiniteBackwardClap(),
+    )
+    prediction = torch.full((2, 1, 16), 0.25)
+    target = torch.nn.functional.normalize(torch.randn(2, 8), dim=-1)
+    source = torch.nn.functional.normalize(torch.randn(2, 8), dim=-1)
+    valid = torch.full((2,), 16, dtype=torch.long)
+
+    result = objective.waveform_gradients_to_embeddings(
+        prediction, target, source, valid)
+
+    assert torch.isfinite(result.losses).all()
+    assert torch.equal(result.gradients, torch.zeros_like(prediction))
+    assert result.health.skipped.item() == 1
+    assert result.health.generated_failures.item() == 1
+    assert result.health.raw_embedding_nonfinite_count.item() == 0
+    assert result.health.normalized_embedding_nonfinite_count.item() == 0
+    assert result.health.loss_nonfinite_count.item() == 0
+    assert result.health.waveform_gradient_nonfinite_count.item() == prediction.numel()
+
+
+def test_clap_reconstruction_nonfinite_backward_skips_gradient():
+    objective = FrozenClapReconstructionObjective(
+        None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
+        encoder=_NonFiniteBackwardClap(),
+    )
+    prediction = torch.full((2, 1, 16), 0.25)
+    target = torch.full((2, 1, 16), -0.5)
+    valid = torch.full((2,), 16, dtype=torch.long)
+
+    result = objective.waveform_gradients(prediction, target, valid)
+
+    assert torch.isfinite(result.losses).all()
+    assert torch.equal(result.gradients, torch.zeros_like(prediction))
+    assert result.health.skipped.item() == 1
+    assert result.health.waveform_gradient_nonfinite_count.item() == prediction.numel()
+
+
 def test_clap_nonfinite_embedding_skips_auxiliary_gradient():
     objective = FrozenClapReconstructionObjective(
         None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
@@ -263,19 +321,24 @@ def test_clap_nonfinite_generated_embedding_records_health():
 
 
 def test_clap_health_aggregation_sums_counts_and_keeps_maxima():
-    total = torch.tensor([4.0, 1.0, 1.0, 0.0, 3.0, 8.0, 8.0, 0.5, 0.2])
-    call = torch.tensor([4.0, 2.0, 0.0, 2.0, 5.0, 16.0, 16.0, 0.25, 0.4])
+    total = torch.tensor([
+        4.0, 1.0, 1.0, 0.0, 3.0, 8.0, 8.0, 0.0, 0.0, 0.5, 0.2])
+    call = torch.tensor([
+        4.0, 2.0, 0.0, 2.0, 5.0, 16.0, 16.0, 1.0, 32.0, 0.25, 0.4])
 
     merged = _merge_clap_health(total, call)
     metrics = _clap_health_metrics(merged, "health/clap")
 
     assert torch.equal(
-        merged, torch.tensor([8.0, 3.0, 1.0, 2.0, 8.0, 24.0, 24.0, 0.5, 0.4]))
+        merged, torch.tensor([
+            8.0, 3.0, 1.0, 2.0, 8.0, 24.0, 24.0, 1.0, 32.0, 0.5, 0.4]))
     assert metrics["health/clap_evaluations"] == 8.0
     assert metrics["health/clap_skips"] == 3.0
     assert metrics["health/clap_skip_ratio"] == 0.375
     assert metrics["health/clap_target_failures"] == 1.0
     assert metrics["health/clap_generated_failures"] == 2.0
+    assert metrics["health/clap_loss_nonfinite_count"] == 1.0
+    assert metrics["health/clap_waveform_gradient_nonfinite_count"] == 32.0
     assert metrics["health/clap_failed_input_peak_max"] == 0.5
     assert abs(metrics["health/clap_failed_input_rms_max"] - 0.4) < 1e-6
 

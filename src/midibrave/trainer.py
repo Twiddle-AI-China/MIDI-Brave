@@ -1380,6 +1380,8 @@ def _clap_health_vector(health: ClapHealth, device: torch.device) -> Tensor:
         health.input_nonfinite_count.to(device),
         health.raw_embedding_nonfinite_count.to(device),
         health.normalized_embedding_nonfinite_count.to(device),
+        health.loss_nonfinite_count.to(device),
+        health.waveform_gradient_nonfinite_count.to(device),
         health.input_peak.to(device),
         health.input_rms.to(device),
     )).float()
@@ -1390,27 +1392,27 @@ def _distributed_clap_health(health: ClapHealth, device: torch.device) -> Tensor
 
 
 def _distributed_clap_health_vector(vector: Tensor) -> Tensor:
-    if vector.shape != (9,):
-        raise ValueError("CLAP health vector must have shape [9]")
+    if vector.shape != (11,):
+        raise ValueError("CLAP health vector must have shape [11]")
     vector = vector.detach().clone()
     if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(vector[:7], op=dist.ReduceOp.SUM)
-        dist.all_reduce(vector[7:], op=dist.ReduceOp.MAX)
+        dist.all_reduce(vector[:9], op=dist.ReduceOp.SUM)
+        dist.all_reduce(vector[9:], op=dist.ReduceOp.MAX)
     return vector
 
 
 def _merge_clap_health(total: Tensor, call: Tensor) -> Tensor:
-    if total.shape != (9,) or call.shape != (9,):
-        raise ValueError("CLAP health vectors must have shape [9]")
+    if total.shape != (11,) or call.shape != (11,):
+        raise ValueError("CLAP health vectors must have shape [11]")
     merged = total.clone()
-    merged[:7] += call[:7]
-    merged[7:] = torch.maximum(merged[7:], call[7:])
+    merged[:9] += call[:9]
+    merged[9:] = torch.maximum(merged[9:], call[9:])
     return merged
 
 
 def _clap_health_metrics(health: Tensor, prefix: str) -> dict[str, float]:
-    if health.shape != (9,):
-        raise ValueError("CLAP health vector must have shape [9]")
+    if health.shape != (11,):
+        raise ValueError("CLAP health vector must have shape [11]")
     values = [float(value.item()) for value in health]
     evaluations, skips = values[:2]
     return {
@@ -1422,8 +1424,10 @@ def _clap_health_metrics(health: Tensor, prefix: str) -> dict[str, float]:
         f"{prefix}_input_nonfinite_count": values[4],
         f"{prefix}_raw_embedding_nonfinite_count": values[5],
         f"{prefix}_normalized_embedding_nonfinite_count": values[6],
-        f"{prefix}_failed_input_peak_max": values[7],
-        f"{prefix}_failed_input_rms_max": values[8],
+        f"{prefix}_loss_nonfinite_count": values[7],
+        f"{prefix}_waveform_gradient_nonfinite_count": values[8],
+        f"{prefix}_failed_input_peak_max": values[9],
+        f"{prefix}_failed_input_rms_max": values[10],
     }
 
 
@@ -1966,8 +1970,8 @@ def train_predictive(
 
     optimizer.zero_grad(set_to_none=True)
     accumulated = 0
-    clap_health_cumulative = torch.zeros(9, device=device)
-    clap_health_interval = torch.zeros(9, device=device)
+    clap_health_cumulative = torch.zeros(11, device=device)
+    clap_health_interval = torch.zeros(11, device=device)
     clap_warning_events = 0
     nonfinite_updates = 0
     while stage_update < target_updates:
@@ -2402,8 +2406,8 @@ def train(config_path: str, phase: int, max_steps: int | None = None,
         raise ValueError("MIDIBRAVE_MAX_CONSECUTIVE_NONFINITE must be positive")
     consecutive_nonfinite = 0
     anomaly_enabled = False
-    clap_health_cumulative = torch.zeros(9, device=device)
-    clap_health_interval = torch.zeros(9, device=device)
+    clap_health_cumulative = torch.zeros(11, device=device)
+    clap_health_interval = torch.zeros(11, device=device)
     clap_warning_events = 0
     while generator_updates < total_updates:
         if loop_step >= maximum_loops:

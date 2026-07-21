@@ -19,8 +19,9 @@ checkpoint=/data/midibrave-v3/runs/pad50_phase2_independent_controls_from_phase1
 statistics=/data/midibrave-v3/cache/pad50-phase15-5k/rave-statistics.npz
 calibration=/data/midibrave-v3/cache/pad50-phase15-5k/predictive-calibration-phase2b.json
 run_root=/data/midibrave-v3/runs/pad50_phase2b_stable_controls_from_p2_1k_v3/predictor
+clap_failure_root=/data/midibrave-v3/diagnostics/phase2b-clap-backward
 
-mkdir -p "$launch/logs" "$launch/monitor" "$run_root"
+mkdir -p "$launch/logs" "$launch/monitor" "$run_root" "$clap_failure_root"
 nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu --format=csv,noheader,nounits -l 10 > "$launch/monitor/phase2b-train-${SLURM_JOB_ID}.csv" 2> "$launch/monitor/phase2b-train-${SLURM_JOB_ID}.err" &
 monitor_pid=$!
 trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
@@ -34,6 +35,7 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores docker run --rm \
   --gpus "\"device=${CUDA_VISIBLE_DEVICES}\"" --shm-size=32g --ulimit memlock=-1 \
   -v "$repo":/workspace/MidiBrave:ro -v /data:/data \
   -e PYTHONPATH=/workspace/MidiBrave/src \
+  -e MIDIBRAVE_CLAP_FAILURE_DIR="$clap_failure_root" \
   -e OMP_NUM_THREADS=1 -e MKL_NUM_THREADS=1 \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
   -e NCCL_DEBUG=WARN -e NCCL_IB_DISABLE=1 -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \

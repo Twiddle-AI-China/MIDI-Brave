@@ -734,7 +734,7 @@ def test_predictor_clap_and_midi_controls_share_frozen_parameter_boundary():
     assert objective.components["predictor_control_gradient_scale"].item() <= 1.0
     diagnostics = objective.diagnostic_tensors
     assert diagnostics is not None
-    assert diagnostics["predictor_control_clap_health"].shape == (9,)
+    assert diagnostics["predictor_control_clap_health"].shape == (11,)
     objective.total.backward()
     assert any(parameter.grad is not None for parameter in model.predictor.parameters())
     for module in (model.encoder, model.decoder, model.clap_projection, model.midi):

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -37,13 +40,15 @@ class ClapHealth:
     input_nonfinite_count: Tensor
     raw_embedding_nonfinite_count: Tensor
     normalized_embedding_nonfinite_count: Tensor
+    loss_nonfinite_count: Tensor
+    waveform_gradient_nonfinite_count: Tensor
     input_peak: Tensor
     input_rms: Tensor
 
     @classmethod
     def zeros(cls, reference: Tensor) -> "ClapHealth":
         zero = reference.new_zeros(())
-        return cls(*(zero.clone() for _ in range(8)))
+        return cls(*(zero.clone() for _ in range(10)))
 
 
 class _NonFiniteClapEmbedding(RuntimeError):
@@ -212,11 +217,86 @@ class FrozenClapReconstructionObjective(nn.Module):
                 raw_embedding_nonfinite_count=raw_nonfinite.to(dtype=audio.dtype),
                 normalized_embedding_nonfinite_count=(
                     normalized_nonfinite.to(dtype=audio.dtype)),
+                loss_nonfinite_count=zero.clone(),
+                waveform_gradient_nonfinite_count=zero.clone(),
                 input_peak=input_peak,
                 input_rms=(finite_square_sum / finite_value_count.clamp_min(1)).sqrt(),
             )
             raise _NonFiniteClapEmbedding(health)
         return embedding
+
+    def _backward_failure_health(
+            self, audio: Tensor, valid_samples: Tensor, losses: Tensor,
+            gradients: Tensor) -> ClapHealth:
+        """Describe a finite-forward CLAP call whose auxiliary backward failed."""
+        input_nonfinite_count = audio.new_zeros(())
+        finite_square_sum = audio.new_zeros(())
+        finite_value_count = audio.new_zeros(())
+        input_peak = audio.new_zeros(())
+        with torch.no_grad(), torch.autocast(
+                device_type=audio.device.type, enabled=False):
+            for index in range(audio.shape[0]):
+                length = int(valid_samples[index].item())
+                length = max(1, min(length, audio.shape[-1]))
+                waveform = self.resample(
+                    audio[index, 0, :length].detach().float().unsqueeze(0))[0]
+                finite = torch.isfinite(waveform)
+                input_nonfinite_count = input_nonfinite_count + (~finite).sum()
+                finite_values = torch.where(
+                    finite, waveform, torch.zeros_like(waveform))
+                finite_square_sum = finite_square_sum + finite_values.square().sum()
+                finite_value_count = finite_value_count + finite.sum()
+                input_peak = torch.maximum(input_peak, finite_values.abs().max())
+        one = audio.new_ones(())
+        zero = audio.new_zeros(())
+        return ClapHealth(
+            skipped=one,
+            target_failures=zero.clone(),
+            generated_failures=one.clone(),
+            input_nonfinite_count=input_nonfinite_count.to(dtype=audio.dtype),
+            raw_embedding_nonfinite_count=zero.clone(),
+            normalized_embedding_nonfinite_count=zero.clone(),
+            loss_nonfinite_count=(~torch.isfinite(losses)).sum().to(dtype=audio.dtype),
+            waveform_gradient_nonfinite_count=(
+                (~torch.isfinite(gradients)).sum().to(dtype=audio.dtype)),
+            input_peak=input_peak,
+            input_rms=(finite_square_sum / finite_value_count.clamp_min(1)).sqrt(),
+        )
+
+    @staticmethod
+    def _capture_backward_failure(kind: str, prediction: Tensor,
+                                  valid_samples: Tensor, losses: Tensor,
+                                  **context: Tensor) -> None:
+        """Best-effort capture for exact offline replay of a rare CLAP failure."""
+        root = os.environ.get("MIDIBRAVE_CLAP_FAILURE_DIR")
+        if not root:
+            return
+        try:
+            directory = Path(root)
+            directory.mkdir(parents=True, exist_ok=True)
+            rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+            prefix = f"clap-{kind}-backward-rank-{rank}-"
+            if next(directory.glob(f"{prefix}*.pt"), None) is not None:
+                return
+            payload = {
+                "kind": kind,
+                "rank": rank,
+                "prediction": prediction.detach().float().cpu(),
+                "valid_samples": valid_samples.detach().cpu(),
+                "losses": losses.detach().float().cpu(),
+                "context": {
+                    name: value.detach().float().cpu()
+                    for name, value in context.items()
+                },
+            }
+            destination = directory / f"{prefix}{time.time_ns()}.pt"
+            temporary = destination.with_suffix(".tmp")
+            torch.save(payload, temporary)
+            temporary.replace(destination)
+        except (OSError, RuntimeError):
+            # Diagnostics must never turn a recoverable auxiliary failure into
+            # a failed distributed training job.
+            return
 
     def waveform_gradients(self, prediction: Tensor, target: Tensor,
                            valid_samples: Tensor) -> ClapWaveformGradient:
@@ -238,10 +318,19 @@ class FrozenClapReconstructionObjective(nn.Module):
         losses = (1.0 - F.cosine_similarity(
             generated_embedding, target_embedding, dim=-1)).clamp_min(0.0)
         gradients, = torch.autograd.grad(losses.sum(), generated, allow_unused=False)
-        if not bool(torch.isfinite(losses).all().item()):
-            raise RuntimeError("CLAP reconstruction loss is non-finite")
-        if not bool(torch.isfinite(gradients).all().item()):
-            raise RuntimeError("CLAP reconstruction waveform gradient is non-finite")
+        if not bool(torch.isfinite(losses).all().item()
+                    and torch.isfinite(gradients).all().item()):
+            self._capture_backward_failure(
+                "reconstruction", generated, valid_samples, losses,
+                target=target)
+            health = self._backward_failure_health(
+                generated, valid_samples, losses, gradients)
+            safe_losses = torch.nan_to_num(
+                losses.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+            gradients = prediction.new_zeros(prediction.shape)
+            norms = prediction.new_zeros(prediction.shape[0])
+            return ClapWaveformGradient(
+                safe_losses, gradients, norms, norms.clone(), health)
         norms = gradients.flatten(1).norm(dim=1)
         if self.maximum_gradient_norm > 0:
             scale = (self.maximum_gradient_norm / norms.clamp_min(1e-12)).clamp(max=1.0)
@@ -287,7 +376,24 @@ class FrozenClapReconstructionObjective(nn.Module):
         gradients, = torch.autograd.grad(losses.sum(), generated, allow_unused=False)
         if not bool(torch.isfinite(losses).all().item()
                     and torch.isfinite(gradients).all().item()):
-            raise RuntimeError("CLAP control loss or waveform gradient is non-finite")
+            self._capture_backward_failure(
+                "control", generated, valid_samples, losses,
+                target_embedding=target, source_embedding=source,
+                generated_embedding=generated_embedding,
+                target_cosine=target_cosine, source_cosine=source_cosine)
+            health = self._backward_failure_health(
+                generated, valid_samples, losses, gradients)
+            safe_losses = torch.nan_to_num(
+                losses.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+            safe_target = torch.nan_to_num(
+                target_cosine.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+            safe_source = torch.nan_to_num(
+                source_cosine.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+            gradients = prediction.new_zeros(prediction.shape)
+            norms = prediction.new_zeros(prediction.shape[0])
+            return ClapControlGradient(
+                safe_losses, gradients, norms, norms.clone(), health,
+                safe_target, safe_source, safe_target.gt(safe_source))
         norms = gradients.flatten(1).norm(dim=1)
         if self.maximum_gradient_norm > 0:
             scale = (self.maximum_gradient_norm / norms.clamp_min(1e-12)).clamp(max=1.0)
