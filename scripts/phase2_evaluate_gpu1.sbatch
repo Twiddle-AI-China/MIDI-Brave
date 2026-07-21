@@ -15,7 +15,7 @@ set -euo pipefail
 
 repo=/home/yfhuang/Latent-Cosmos-Synth-midiBrave/MidiBrave-v2
 image=midibrave:v0.10.0-clap-recon
-config=/workspace/MidiBrave/configs/v3/octopus_pad50_phase2.yaml
+config=${CONFIG:-/workspace/MidiBrave/configs/v3/octopus_pad50_phase2.yaml}
 pairs=${PAIRS:-128}
 
 mkdir -p "$OUTPUT"

@@ -91,6 +91,96 @@ class PredictiveLatentObjective:
 
 
 @dataclass(frozen=True)
+class PredictorRolloutStabilityObjective:
+    total: Tensor
+    future: Tensor
+    delta: Tensor
+    acceleration: Tensor
+    rollout: Tensor
+
+
+@dataclass(frozen=True)
+class _LatentStyleStatistics:
+    mean: Tensor
+    rms: Tensor
+    delta_rms: Tensor
+    covariance: Tensor
+
+
+def _latent_style_statistics(
+        latent: Tensor, statistics: LatentStatistics) -> _LatentStyleStatistics:
+    if latent.ndim != 3 or latent.shape[-1] < 2:
+        raise ValueError("latent style requires [batch, channels, frames>=2]")
+    # Moment and covariance reductions overflow easily in fp16 once a free
+    # rollout starts diverging. Preserve gradients while forcing the complete
+    # reduction path to fp32 even when the caller is inside autocast.
+    with torch.autocast(device_type=latent.device.type, enabled=False):
+        value = latent.float()
+        latent_scale, delta_scale, _ = statistics.scales(
+            value.shape[1], value.device, value.dtype)
+        normalized = value / latent_scale
+        mean = normalized.mean(dim=-1)
+        centered = normalized - mean[..., None]
+        rms = centered.square().mean(dim=-1).add(1e-8).sqrt()
+        delta = value.diff(dim=-1) / delta_scale
+        delta_rms = delta.square().mean(dim=-1).add(1e-8).sqrt()
+        covariance = (
+            torch.matmul(centered, centered.transpose(1, 2)) / value.shape[-1]
+        )
+    return _LatentStyleStatistics(mean, rms, delta_rms, covariance)
+
+
+def _latent_style_interpolation_loss(
+        generated: Tensor, source: Tensor, target: Tensor, alpha: Tensor,
+        statistics: LatentStatistics) -> Tensor:
+    """Match order-independent RAVE style moments along a timbre path."""
+    if generated.shape[0] != source.shape[0] or source.shape[0] != target.shape[0]:
+        raise ValueError("latent style batches must align")
+    if alpha.shape != (generated.shape[0],):
+        raise ValueError("latent style alpha must have shape [batch]")
+    generated_style = _latent_style_statistics(generated, statistics)
+    source_style = _latent_style_statistics(source, statistics)
+    target_style = _latent_style_statistics(target, statistics)
+    blend = alpha.to(dtype=generated_style.mean.dtype)
+
+    def distance(name: str) -> Tensor:
+        actual = getattr(generated_style, name)
+        start = getattr(source_style, name)
+        end = getattr(target_style, name)
+        shape = (blend.shape[0],) + (1,) * (actual.ndim - 1)
+        desired = torch.lerp(start, end, blend.view(shape))
+        return F.smooth_l1_loss(actual, desired)
+
+    return (distance("mean") + distance("rms")
+            + 0.25 * distance("delta_rms")
+            + 0.1 * distance("covariance"))
+
+
+def _seed_washout_loss(
+        first: Tensor, second: Tensor, statistics: LatentStatistics,
+        window_frames: int, maximum_ratio: float = 0.9) -> tuple[Tensor, Tensor]:
+    if first.shape != second.shape or first.ndim != 3:
+        raise ValueError("seed washout rollouts must share [batch, channels, frames]")
+    if not 0 < window_frames <= first.shape[-1] // 2:
+        raise ValueError("seed washout window must fit twice inside the rollout")
+    if not 0.0 < maximum_ratio <= 1.0:
+        raise ValueError("seed washout ratio must be in (0,1]")
+    with torch.autocast(device_type=first.device.type, enabled=False):
+        first_value = first.float()
+        second_value = second.float()
+        latent_scale, _, _ = statistics.scales(
+            first_value.shape[1], first_value.device, first_value.dtype)
+        distance = (
+            (first_value - second_value) / latent_scale
+        ).square().mean(dim=1).sqrt()
+        early = distance[..., :window_frames].mean(dim=-1)
+        late = distance[..., -window_frames:].mean(dim=-1)
+        loss = F.relu(late - maximum_ratio * early).mean()
+        ratio = (late / early.clamp_min(1e-8)).mean()
+    return loss, ratio
+
+
+@dataclass(frozen=True)
 class PredictiveStageObjective:
     total: Tensor
     components: dict[str, Tensor]
@@ -164,6 +254,36 @@ def predictor_counterfactual_rollout(
         target_note=target_note, timbre_alpha=timbre_alpha)
 
 
+def _predictor_rollout_stability_objective(
+        model: PredictiveMidiBrave, batch: dict[str, Tensor], config: Config,
+        statistics: LatentStatistics) -> PredictorRolloutStabilityObjective:
+    """Free-run against only the same recording's cached future."""
+    if config.predictive is None or config.latent_loss is None:
+        raise ValueError("predictor rollout stability requires a v3 config")
+    predictive = config.predictive
+    latent = batch["rave_a"]
+    history = latent[..., :predictive.history_frames]
+    available = latent.shape[-1] - predictive.history_frames
+    frames = min(predictive.predictor_control_rollout_frames, available)
+    frames = frames // predictive.stride_frames * predictive.stride_frames
+    if frames < predictive.stride_frames:
+        raise ValueError("cached RAVE window is too short for predictor stability")
+    result = rollout_blocks(
+        model.predictor, history, model.project_clap(batch["clap_a"], frames),
+        model.midi_control(batch["note_a"], batch["velocity_a"], frames),
+        predictive.stride_frames)
+    target = latent[..., predictive.history_frames:predictive.history_frames + frames]
+    with torch.autocast(device_type=latent.device.type, enabled=False):
+        losses = prediction_loss(
+            result.latent.float(), target.float(), history.float(), statistics,
+            discount=1.0)
+    weights = config.latent_loss
+    total = (weights.future * losses.future + weights.delta * losses.delta
+             + weights.acceleration * losses.acceleration)
+    return PredictorRolloutStabilityObjective(
+        total, losses.future, losses.delta, losses.acceleration, result.latent)
+
+
 def _linear_warmup(update: int, updates: int) -> float:
     if update < 0:
         raise ValueError("update must be non-negative")
@@ -182,8 +302,9 @@ def _predictor_control_active(config: Config, update: int) -> bool:
 def _should_log_predictive_component(name: str, regular_interval: bool,
                                      control_active: bool) -> bool:
     """Keep sparse control metrics off inactive zero-valued updates."""
-    sparse_control = (name.startswith("predictor_")
-                      and name != "predictor_continuation_total")
+    continuous = (name == "predictor_continuation_total"
+                  or name.startswith("predictor_rollout_stability_"))
+    sparse_control = name.startswith("predictor_") and not continuous
     return control_active if sparse_control else regular_interval
 
 
@@ -401,13 +522,33 @@ def predictive_stage_objective(
     if stage is PredictiveStage.PREDICTOR:
         components = dict(latent_objective.components)
         zero = latent_objective.total.new_zeros(())
+        stability = None
+        primary_total = latent_objective.total
+        if losses.predictor_rollout_stability > 0.0:
+            stability = _predictor_rollout_stability_objective(
+                model, batch, config, statistics)
+            primary_total = (primary_total
+                             + losses.predictor_rollout_stability * stability.total)
         components.update({
             "predictor_continuation_total": latent_objective.total,
+            "predictor_rollout_stability_total": (
+                stability.total if stability is not None else zero),
+            "predictor_rollout_stability_future": (
+                stability.future if stability is not None else zero),
+            "predictor_rollout_stability_delta": (
+                stability.delta if stability is not None else zero),
+            "predictor_rollout_stability_acceleration": (
+                stability.acceleration if stability is not None else zero),
             "predictor_midi_swap_pitch": zero,
             "predictor_midi_swap_source_rejection": zero,
             "predictor_midi_control_total": zero,
             "predictor_timbre_pitch_preservation": zero,
             "predictor_pitch_control_total": zero,
+            "predictor_midi_style_preservation": zero,
+            "predictor_timbre_style_control": zero,
+            "predictor_seed_washout": zero,
+            "predictor_seed_washout_ratio": zero,
+            "predictor_latent_style_control_total": zero,
             "predictor_midi_clap_preservation_total": zero,
             "predictor_midi_clap_preservation_cosine": zero,
             "predictor_clap_control_total": zero,
@@ -419,7 +560,7 @@ def predictive_stage_objective(
             "predictor_control_gradient_scale": zero,
         })
         if not _predictor_control_active(config, update):
-            return PredictiveStageObjective(latent_objective.total, components)
+            return PredictiveStageObjective(primary_total, components)
         if swap_pitch is None:
             raise ValueError("predictor MIDI control requires a pitch objective")
         required = {"note_b", "pitch_confidence_a", "pitch_valid_mask_a", "preset_id"}
@@ -453,6 +594,46 @@ def predictive_stage_objective(
         pitch_control = (
             midi_control + config.loss.cross_pitch
             * config.loss.analytic_pitch * timbre_pitch)
+        midi_style = zero
+        if losses.predictor_midi_style > 0.0 and bool(midi_mask.any().item()):
+            source = batch["rave_a"][midi_mask]
+            midi_style = _latent_style_interpolation_loss(
+                counterfactual.rollout[midi_mask], source, source,
+                torch.zeros(source.shape[0], device=source.device, dtype=source.dtype),
+                statistics)
+        timbre_style = zero
+        seed_washout = zero
+        seed_washout_ratio = zero
+        if bool(timbre_mask.any().item()) and (
+                losses.predictor_timbre_style > 0.0
+                or losses.predictor_seed_washout > 0.0):
+            target_latent = batch["rave_a"].index_select(
+                0, counterfactual.target_index)[timbre_mask]
+            source_latent = batch["rave_a"][timbre_mask]
+            if losses.predictor_timbre_style > 0.0:
+                timbre_style = _latent_style_interpolation_loss(
+                    counterfactual.rollout[timbre_mask], source_latent,
+                    target_latent, counterfactual.timbre_alpha[timbre_mask],
+                    statistics)
+            if losses.predictor_seed_washout > 0.0:
+                frames = config.predictive.predictor_control_rollout_frames
+                alternate = rollout_blocks(
+                    model.predictor,
+                    target_latent[..., :config.predictive.history_frames],
+                    model.project_clap(
+                        counterfactual.target_clap[timbre_mask], frames),
+                    model.midi_control(
+                        counterfactual.target_note[timbre_mask],
+                        batch["velocity_a"][timbre_mask], frames),
+                    config.predictive.stride_frames).latent
+                seed_washout, seed_washout_ratio = _seed_washout_loss(
+                    counterfactual.rollout[timbre_mask], alternate, statistics,
+                    window_frames=min(
+                        config.predictive.history_frames, frames // 2))
+        latent_style_control = (
+            losses.predictor_midi_style * midi_style
+            + losses.predictor_timbre_style * timbre_style
+            + losses.predictor_seed_washout * seed_washout)
         midi_clap_loss = zero
         midi_clap_cosine = zero
         timbre_clap_loss = zero
@@ -508,7 +689,8 @@ def predictive_stage_objective(
         weighted_midi_clap = losses.clap_control * midi_clap_loss
         weighted_timbre_clap = losses.clap_counterfactual * timbre_clap_loss
         weighted_clap = weighted_midi_clap + weighted_timbre_clap
-        control_auxiliary = pitch_control + clap_surrogate - clap_surrogate.detach()
+        control_auxiliary = (pitch_control + latent_style_control
+                             + clap_surrogate - clap_surrogate.detach())
         control_progress = _linear_warmup(
             update - config.predictive.predictor_control_start_updates + 1,
             config.predictive.predictor_control_warmup_updates)
@@ -516,9 +698,10 @@ def predictive_stage_objective(
             config.predictive.predictor_control_gradient_fraction_max
             * control_progress)
         capped_control, control_scale = _cap_auxiliary_parameter_gradient(
-            control_auxiliary, latent_objective.total,
+            control_auxiliary, primary_total,
             list(model.predictor.parameters()), gradient_fraction)
-        displayed_control = pitch_control.detach() + weighted_clap.detach()
+        displayed_control = (pitch_control.detach() + latent_style_control.detach()
+                             + weighted_clap.detach())
         control_total = (
             capped_control - capped_control.detach() + displayed_control)
         components.update({
@@ -527,6 +710,11 @@ def predictive_stage_objective(
             "predictor_midi_control_total": midi_control,
             "predictor_timbre_pitch_preservation": timbre_pitch,
             "predictor_pitch_control_total": pitch_control,
+            "predictor_midi_style_preservation": midi_style,
+            "predictor_timbre_style_control": timbre_style,
+            "predictor_seed_washout": seed_washout,
+            "predictor_seed_washout_ratio": seed_washout_ratio,
+            "predictor_latent_style_control_total": latent_style_control,
             "predictor_midi_clap_preservation_total": weighted_midi_clap,
             "predictor_midi_clap_preservation_cosine": midi_clap_cosine,
             "predictor_clap_control_total": weighted_clap,
@@ -553,7 +741,7 @@ def predictive_stage_objective(
                if clap_health is not None else {}),
         }
         return PredictiveStageObjective(
-            latent_objective.total + control_total, components,
+            primary_total + control_total, components,
             diagnostic_tensors=diagnostics)
 
     p = config.predictive
@@ -748,22 +936,24 @@ def load_predictive_checkpoint(
 
 def load_predictive_warm_start(path: str | Path, model: PredictiveMidiBrave,
                                config: Config, target_stage: PredictiveStage | str) -> None:
-    """Load model weights for a new stage or a fresh RAVE fine-tune."""
+    """Load model weights for a new stage or a fresh corrective fine-tune."""
     target_stage = PredictiveStage(target_stage)
-    expected_source = {
-        PredictiveStage.RAVE: PredictiveStage.RAVE,
-        PredictiveStage.PREDICTOR: PredictiveStage.RAVE,
-        PredictiveStage.ROLLOUT: PredictiveStage.PREDICTOR,
-        PredictiveStage.GAN: PredictiveStage.ROLLOUT,
-    }.get(target_stage)
-    assert expected_source is not None
+    expected_sources = {
+        PredictiveStage.RAVE: {PredictiveStage.RAVE},
+        PredictiveStage.PREDICTOR: {
+            PredictiveStage.RAVE, PredictiveStage.PREDICTOR},
+        PredictiveStage.ROLLOUT: {PredictiveStage.PREDICTOR},
+        PredictiveStage.GAN: {PredictiveStage.ROLLOUT},
+    }[target_stage]
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict) or int(payload.get("format", 0)) != 5:
         raise ValueError("predictive warm start requires checkpoint format 5")
     contract = payload.get("predictive_contract")
-    if not isinstance(contract, dict) or contract.get("stage") != expected_source.value:
+    source_stage = contract.get("stage") if isinstance(contract, dict) else None
+    if source_stage not in {stage.value for stage in expected_sources}:
+        expected = " or ".join(sorted(stage.value for stage in expected_sources))
         raise ValueError(
-            f"{target_stage.value} warm start requires a {expected_source.value} checkpoint")
+            f"{target_stage.value} warm start requires a {expected} checkpoint")
     expected = predictive_checkpoint_contract(config, target_stage, None, None, False)
     for key in ("architecture", "history_frames", "horizon_frames", "stride_frames"):
         if contract.get(key) != expected[key]:
@@ -1462,6 +1652,26 @@ def _artifact_sha256(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _validate_predictor_warm_start_cache(
+        path: str | Path, cache_checkpoint_hash: str,
+        statistics_hash: str) -> None:
+    """Bind RAVE starts by artifact and predictor restarts by latent statistics."""
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    contract = payload.get("predictive_contract") if isinstance(payload, dict) else None
+    source_stage = contract.get("stage") if isinstance(contract, dict) else None
+    if source_stage == PredictiveStage.RAVE.value:
+        if _artifact_sha256(path) != cache_checkpoint_hash:
+            raise ValueError(
+                "RAVE cache checkpoint hash does not match predictor warm start")
+        return
+    if source_stage == PredictiveStage.PREDICTOR.value:
+        if contract.get("latent_statistics_hash") != statistics_hash:
+            raise ValueError(
+                "predictor warm-start latent statistics do not match the cache")
+        return
+    raise ValueError("predictor warm start requires a RAVE or predictor checkpoint")
+
+
 def load_predictive_statistics(path: str | Path, config: Config,
                                ) -> tuple[LatentStatistics, str, str]:
     if config.predictive is None or config.latent_loss is None:
@@ -1600,9 +1810,10 @@ def train_predictive(
         stats = LatentStatistics(
             stats.latent_std.to(device), stats.delta_std.to(device),
             stats.acceleration_std.to(device), stats.floor)
-        if (stage is PredictiveStage.PREDICTOR and warm_start
-                and _artifact_sha256(warm_start) != cache_checkpoint_hash):
-            raise ValueError("RAVE cache checkpoint hash does not match predictor warm start")
+        if stage is PredictiveStage.PREDICTOR and warm_start:
+            assert statistics_hash is not None
+            _validate_predictor_warm_start_cache(
+                warm_start, cache_checkpoint_hash, statistics_hash)
 
     model = PredictiveMidiBrave(
         config.model, config.predictive, config.data.window_samples,

@@ -1,25 +1,23 @@
 seed: 20260720
 data:
-  manifest: /data/midibrave-v3/manifests/lead.jsonl
-  cache_root: /data/midibrave-v3/cache/lead
+  manifest: /data/midibrave-v3/manifests/pad50-strict.jsonl
+  cache_root: /data/midibrave-v3/cache/pad50-phase15-5k
   dataset_root: null
   dataset_roots:
     serum: /data/datasets/latent-cosmos-synth/serum-dataset
-    dexed: /data/datasets/latent-cosmos-synth/dexed-dataset-v2
-    sample: /data/datasets/latent-cosmos-synth/sample-dataset-v2
   preset_manifest: null
-  manifest_metadata: /data/midibrave-v3/manifests/lead.meta.json
+  manifest_metadata: /data/midibrave-v3/manifests/pad50-strict.meta.json
   split: train
-  class_name: lead
+  class_name: pad
   sample_rate: 44100
-  window_samples: 49152
+  window_samples: 16384
   minimum_valid_samples: 16384
   onset_crop_probability: 0.5
   active_threshold_db: -55.0
   note_min: 21
   note_max: 109
   velocities: []
-  repeats: 16
+  repeats: 1
   num_workers: 4
   prefetch_factor: 2
   clap_checkpoint: /data/model_weights/laion-clap/music_audioset_epoch_15_esc_90.14.pt
@@ -54,7 +52,7 @@ model:
   norm_reduction_dtype: fp32
   phase_accumulation_dtype: fp32
   pqmf_dtype: fp32
-  rms_norm_epsilon: 0.000001
+  rms_norm_epsilon: 1.0e-06
   film_scale_limit: 0.5
   film_shift_limit: 1.0
   stochastic_excitation: true
@@ -79,8 +77,8 @@ loss:
   feature_matching: 0.0
   self_clap: 0.5
   cross_clap: 0.5
-  clap_warmup_steps: 5000
-  clap_every_updates: 4
+  clap_warmup_steps: 1
+  clap_every_updates: 1
   clap_batch_size: 1
   clap_gradient_norm: 1.0
 predictive:
@@ -92,18 +90,18 @@ predictive:
   horizon_frames: 8
   stride_frames: 4
   predictor_hidden_dim: 128
-  require_rave_cache: false
-  kl_warmup_updates: 10000
-  pitch_adversary_warmup_updates: 5000
-  rollout_warmup_updates: 5000
+  require_rave_cache: true
+  kl_warmup_updates: 4
+  pitch_adversary_warmup_updates: 2
+  rollout_warmup_updates: 4
   teacher_forcing_floor: 0.25
-  calibration_batches: 128
+  calibration_batches: 2
   clap_gradient_fraction_max: 0.15
-  predictor_control_start_updates: 1000
-  predictor_control_every_updates: 4
-  predictor_control_warmup_updates: 1000
+  predictor_control_start_updates: 0
+  predictor_control_every_updates: 1
+  predictor_control_warmup_updates: 1
   predictor_control_rollout_frames: 128
-  predictor_control_gradient_fraction_max: 0.25
+  predictor_control_gradient_fraction_max: 0.10
   predictor_timbre_interpolation_steps: 4
 latent_loss:
   future: 1.0
@@ -112,13 +110,13 @@ latent_loss:
   rollout: 0.5
   overlap: 0.1
   predicted_audio: 0.25
-  clap_control: 0.5
-  clap_counterfactual: 0.0
-  rave_swap_source_rejection: 0.0
-  predictor_rollout_stability: 0.0
-  predictor_midi_style: 0.0
-  predictor_timbre_style: 0.0
-  predictor_seed_washout: 0.0
+  clap_control: 0.25
+  clap_counterfactual: 0.5
+  rave_swap_source_rejection: 0.1
+  predictor_rollout_stability: 1.0
+  predictor_midi_style: 0.5
+  predictor_timbre_style: 1.0
+  predictor_seed_washout: 0.5
   rave_kl: 0.0001
   rave_pitch_adversary: 0.02
   gan_adversarial: 0.05
@@ -126,25 +124,25 @@ latent_loss:
   horizon_discount: 0.95
   statistic_floor: 0.0001
 train:
-  rave_steps: 100000
-  predictor_steps: 100000
-  rollout_steps: 50000
-  gan_steps: 50000
-  phase1_steps: 20000
-  phase2_steps: 2000
-  batch_per_gpu: 10
-  grad_accum: 4
-  lr: 0.0001
-  min_lr: 0.00002
-  warmup_steps: 1000
-  phase2_generator_lr: 0.00001
-  phase2_condition_lr: 0.000001
-  discriminator_lr: 0.00005
-  pitch_adversary_start: 5000
-  pitch_adversary_ramp: 5000
+  rave_steps: 4
+  predictor_steps: 2
+  rollout_steps: 4
+  gan_steps: 3
+  phase1_steps: 4
+  phase2_steps: 3
+  batch_per_gpu: 28
+  grad_accum: 1
+  lr: 5.0e-05
+  min_lr: 1.0e-05
+  warmup_steps: 1
+  phase2_generator_lr: 1.0e-05
+  phase2_condition_lr: 1.0e-06
+  discriminator_lr: 5.0e-05
+  pitch_adversary_start: 2
+  pitch_adversary_ramp: 2
   grad_clip: 1.0
-  checkpoint_every: 1000
-  log_every: 20
+  checkpoint_every: 1
+  log_every: 1
   output_dir: /data/midibrave-v3/runs
-  run_name: lead_predictive_rave_v1
+  run_name: pad50_phase2b_stable_controls_smoke
   precision: amp_fp16

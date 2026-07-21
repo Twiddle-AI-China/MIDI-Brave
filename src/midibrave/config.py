@@ -217,6 +217,10 @@ class LatentLossConfig:
     clap_control: float = 0.5
     clap_counterfactual: float = 0.0
     rave_swap_source_rejection: float = 0.0
+    predictor_rollout_stability: float = 0.0
+    predictor_midi_style: float = 0.0
+    predictor_timbre_style: float = 0.0
+    predictor_seed_washout: float = 0.0
     rave_kl: float = 0.0001
     rave_pitch_adversary: float = 0.02
     gan_adversarial: float = 0.05
@@ -306,6 +310,12 @@ class Config:
             if (latent_loss.clap_counterfactual < 0.0
                     or latent_loss.rave_swap_source_rejection < 0.0):
                 raise ValueError("counterfactual loss weights must be non-negative")
+            if any(value < 0.0 for value in (
+                    latent_loss.predictor_rollout_stability,
+                    latent_loss.predictor_midi_style,
+                    latent_loss.predictor_timbre_style,
+                    latent_loss.predictor_seed_washout)):
+                raise ValueError("predictor stability loss weights must be non-negative")
         return cls(
             seed=int(raw["seed"]),
             data=data,

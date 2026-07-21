@@ -27,6 +27,31 @@ def module_digest(state: dict[str, torch.Tensor], root: str) -> str:
     return digest.hexdigest()
 
 
+def validate_statistics_binding(
+    source: dict, warm_start: Path, statistics: Path,
+) -> dict[str, str]:
+    """Accept a RAVE artifact binding or a predictor statistics binding."""
+    contract = source.get("predictive_contract", {})
+    source_stage = contract.get("stage")
+    statistics_hash = sha256(statistics)
+    with np.load(statistics, allow_pickle=False) as values:
+        cache_checkpoint_hash = str(values["checkpoint_hash"].item())
+    if source_stage == "rave":
+        if cache_checkpoint_hash != sha256(warm_start):
+            raise ValueError("RAVE cache is not bound to the RAVE warm start")
+    elif source_stage == "predictor":
+        if contract.get("latent_statistics_hash") != statistics_hash:
+            raise ValueError(
+                "predictor warm start is not bound to the latent statistics")
+    else:
+        raise ValueError("Phase 2 warm start must be a RAVE or predictor checkpoint")
+    return {
+        "source_stage": source_stage,
+        "statistics_sha256": statistics_hash,
+        "cache_checkpoint_sha256": cache_checkpoint_hash,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--warm-start", type=Path, required=True)
@@ -44,6 +69,9 @@ def main() -> None:
         raise ValueError("Phase 2 checkpoint contract is not predictor-only")
     if int(trained.get("stage_update", -1)) != args.expected_update:
         raise ValueError("Phase 2 checkpoint update does not match the smoke target")
+    binding = validate_statistics_binding(source, args.warm_start, args.statistics)
+    if contract.get("latent_statistics_hash") != binding["statistics_sha256"]:
+        raise ValueError("trained predictor is not bound to the latent statistics")
     source_state = source["model"]
     trained_state = trained["model"]
     if set(source_state) != set(trained_state):
@@ -70,17 +98,13 @@ def main() -> None:
     if not predictor_changed:
         raise ValueError("predictor did not change during Phase 2 smoke")
 
-    with np.load(args.statistics, allow_pickle=False) as statistics:
-        cache_checkpoint_hash = str(statistics["checkpoint_hash"].item())
-    if cache_checkpoint_hash != sha256(args.warm_start):
-        raise ValueError("RAVE cache is not bound to the Phase 1.5 warm start")
     print(json.dumps({
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_sha256": sha256(args.checkpoint),
         "frozen_module_sha256": frozen,
         "predictor_changed": predictor_changed,
         "stage_update": int(trained["stage_update"]),
-        "warm_start_sha256": cache_checkpoint_hash,
+        **binding,
     }, sort_keys=True))
 
 

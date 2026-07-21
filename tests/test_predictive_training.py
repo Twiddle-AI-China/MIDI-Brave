@@ -11,6 +11,10 @@ from midibrave.losses import FrozenClapReconstructionObjective
 from midibrave.predictive_model import PredictiveMidiBrave
 from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
                                _predictive_scaler_step,
+                               _latent_style_interpolation_loss,
+                               _predictor_rollout_stability_objective,
+                               _seed_washout_loss,
+                               _validate_predictor_warm_start_cache,
                                _should_log_predictive_component,
                                counterfactual_control_assignment,
                                midi_swap_example_weights,
@@ -35,6 +39,9 @@ def test_sparse_predictor_controls_log_only_on_active_updates():
         "future", regular_interval=True, control_active=False)
     assert _should_log_predictive_component(
         "predictor_continuation_total", regular_interval=True,
+        control_active=False)
+    assert _should_log_predictive_component(
+        "predictor_rollout_stability_total", regular_interval=True,
         control_active=False)
     assert not _should_log_predictive_component(
         "predictor_midi_swap_pitch", regular_interval=True,
@@ -166,6 +173,92 @@ def test_midi_swap_weights_keep_inactive_examples_zero():
 
     assert value[1].item() == 0.0
     assert value.sum().item() == pytest.approx(2.0)
+
+
+def test_latent_style_interpolation_has_exact_source_and_target_endpoints():
+    torch.manual_seed(21)
+    source = torch.randn(3, 16, 32)
+    target = torch.randn(3, 16, 32) * 1.7 + 0.4
+    statistics = LatentStatistics(
+        torch.ones(16), torch.ones(16), torch.ones(16))
+
+    source_loss = _latent_style_interpolation_loss(
+        source, source, target, torch.zeros(3), statistics)
+    target_loss = _latent_style_interpolation_loss(
+        target, source, target, torch.ones(3), statistics)
+    wrong_loss = _latent_style_interpolation_loss(
+        source, source, target, torch.ones(3), statistics)
+
+    assert source_loss.item() < 1e-7
+    assert target_loss.item() < 1e-7
+    assert wrong_loss.item() > 0.1
+
+
+def test_latent_style_and_seed_washout_stay_finite_for_large_amp_values():
+    torch.manual_seed(22)
+    statistics = LatentStatistics(
+        torch.ones(16), torch.ones(16), torch.ones(16))
+    generated = (
+        torch.randn(2, 16, 32, dtype=torch.float16) * 1.0e4
+    ).requires_grad_()
+    source = torch.randn(2, 16, 32, dtype=torch.float16) * 1.0e4
+    target = torch.randn(2, 16, 32, dtype=torch.float16) * 1.0e4
+
+    style_loss = _latent_style_interpolation_loss(
+        generated, source, target,
+        torch.tensor([0.25, 0.75], dtype=torch.float16), statistics)
+    washout_loss, washout_ratio = _seed_washout_loss(
+        generated, target, statistics, window_frames=8)
+
+    assert style_loss.dtype == torch.float32
+    assert washout_loss.dtype == torch.float32
+    assert washout_ratio.dtype == torch.float32
+    assert torch.isfinite(style_loss)
+    assert torch.isfinite(washout_loss)
+    assert torch.isfinite(washout_ratio)
+    (style_loss + washout_loss).backward()
+    assert torch.isfinite(generated.grad).all()
+
+
+def test_seed_washout_penalizes_growth_but_not_contraction():
+    statistics = LatentStatistics(
+        torch.ones(2), torch.ones(2), torch.ones(2))
+    source = torch.zeros(1, 2, 16)
+    growing = torch.linspace(0.1, 2.0, 16).view(1, 1, -1).expand(-1, 2, -1)
+    shrinking = growing.flip(-1)
+
+    growing_loss, growing_ratio = _seed_washout_loss(
+        source, growing, statistics, window_frames=4)
+    shrinking_loss, shrinking_ratio = _seed_washout_loss(
+        source, shrinking, statistics, window_frames=4)
+
+    assert growing_loss.item() > 0.0
+    assert growing_ratio.item() > 1.0
+    assert shrinking_loss.item() == pytest.approx(0.0)
+    assert shrinking_ratio.item() < 1.0
+
+
+def test_predictor_rollout_stability_uses_only_same_recording_future():
+    config = _config()
+    model = _model(config)
+    configure_predictive_stage(model, PredictiveStage.PREDICTOR)
+    batch = {
+        "rave_a": torch.randn(2, 16, 32),
+        "rave_b": torch.full((2, 16, 32), float("nan")),
+        "clap_a": torch.randn(2, 512),
+        "note_a": torch.tensor([48, 60]),
+        "velocity_a": torch.tensor([80.0, 100.0]),
+    }
+    statistics = LatentStatistics(
+        torch.ones(16), torch.ones(16), torch.ones(16))
+
+    objective = _predictor_rollout_stability_objective(
+        model, batch, config, statistics)
+
+    assert objective.rollout.shape == (2, 16, 16)
+    assert torch.isfinite(objective.total)
+    objective.total.backward()
+    assert any(parameter.grad is not None for parameter in model.predictor.parameters())
 
 
 @pytest.mark.parametrize(
@@ -343,6 +436,38 @@ def test_rave_checkpoint_can_warm_start_a_new_rave_finetune(tmp_path: Path):
         assert torch.equal(target.state_dict()[name], value)
 
 
+def test_predictor_checkpoint_can_restart_a_corrective_predictor_run(
+        tmp_path: Path):
+    config = _config()
+    source = _model(config)
+    configure_predictive_stage(source, PredictiveStage.PREDICTOR)
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in source.parameters() if parameter.requires_grad],
+        lr=1e-3)
+    scaler = torch.amp.GradScaler("cpu", enabled=False)
+    contract = predictive_checkpoint_contract(
+        config, PredictiveStage.PREDICTOR, "stats", "calibration", False)
+    checkpoint = tmp_path / "predictor.pt"
+    save_predictive_checkpoint(
+        checkpoint, source, optimizer, scaler, contract,
+        stage_update=1_000, epoch=4, microbatch_offset=3,
+        scheduler_state={"stage_update": 1_000}, sampler_state={"epoch": 4})
+
+    target = _model(config)
+    load_predictive_warm_start(
+        checkpoint, target, config, PredictiveStage.PREDICTOR)
+    _validate_predictor_warm_start_cache(
+        checkpoint, cache_checkpoint_hash="unused-for-predictor",
+        statistics_hash="stats")
+    with pytest.raises(ValueError, match="latent statistics"):
+        _validate_predictor_warm_start_cache(
+            checkpoint, cache_checkpoint_hash="unused-for-predictor",
+            statistics_hash="different")
+
+    for name, value in source.state_dict().items():
+        assert torch.equal(target.state_dict()[name], value)
+
+
 def test_format5_checkpoint_restores_exact_training_state(tmp_path: Path):
     config = _config()
     model = _model(config)
@@ -486,7 +611,9 @@ def test_predictor_midi_control_is_sparse_and_updates_only_predictor():
         predictive=replace(config.predictive, predictor_control_every_updates=2),
         latent_loss=replace(
             config.latent_loss, rave_swap_source_rejection=0.5,
-            clap_control=0.0),
+            clap_control=0.0, predictor_rollout_stability=1.0,
+            predictor_midi_style=0.5, predictor_timbre_style=0.5,
+            predictor_seed_washout=0.25),
     )
     model = _model(config)
     configure_predictive_stage(model, PredictiveStage.PREDICTOR)
@@ -519,6 +646,7 @@ def test_predictor_midi_control_is_sparse_and_updates_only_predictor():
     assert inactive.components["predictor_midi_control_total"].item() == 0.0
     assert inactive.components["predictor_midi_swap_pitch"].item() == 0.0
     assert inactive.components["predictor_midi_swap_source_rejection"].item() == 0.0
+    assert inactive.components["predictor_rollout_stability_total"].item() > 0.0
     assert inactive.diagnostic_tensors is None
     assert not decode_calls
 
@@ -533,6 +661,9 @@ def test_predictor_midi_control_is_sparse_and_updates_only_predictor():
     assert active.components["predictor_continuation_total"].item() > 0.0
     assert active.components["predictor_midi_control_total"].item() > 0.0
     assert active.components["predictor_timbre_pitch_preservation"].item() > 0.0
+    assert active.components["predictor_midi_style_preservation"].item() > 0.0
+    assert active.components["predictor_timbre_style_control"].item() > 0.0
+    assert active.components["predictor_seed_washout_ratio"].item() >= 0.0
     diagnostics = active.diagnostic_tensors
     assert diagnostics is not None
     assert diagnostics["counterfactual_midi_mask"].sum().item() == 2
