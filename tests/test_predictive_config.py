@@ -46,6 +46,17 @@ def test_v3_rejects_stride_beyond_horizon(tmp_path: Path):
         Config.load(path)
 
 
+def test_cached_rave_teacher_requires_fully_valid_audio_windows(tmp_path: Path):
+    text = Path("configs/v3/smoke.yaml").read_text(encoding="utf-8")
+    text = text.replace("minimum_valid_samples: 4096", "minimum_valid_samples: 2048")
+    text = text.replace("require_rave_cache: false", "require_rave_cache: true")
+    path = tmp_path / "partial-cached-window.yaml"
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="require_rave_cache.*fully valid"):
+        Config.load(path)
+
+
 @pytest.mark.parametrize("old,new,match", [
     ("predictor_control_every_updates: 1", "predictor_control_every_updates: 0",
      "predictor_control_every_updates"),

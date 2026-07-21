@@ -272,6 +272,10 @@ class Config:
                     f"samples_per_latent must equal decoder hop {decoder_hop}")
             if data.window_samples % predictive.samples_per_latent:
                 raise ValueError("window_samples must be divisible by samples_per_latent")
+            if (predictive.require_rave_cache
+                    and data.minimum_valid_samples != data.window_samples):
+                raise ValueError(
+                    "require_rave_cache requires fully valid audio windows")
             if predictive.clap_control_dim != model.timbre_dim:
                 raise ValueError("clap_control_dim must equal model.timbre_dim")
             if model.midi_dim != 32:

@@ -10,7 +10,7 @@ data:
   split: train
   class_name: pad
   sample_rate: 44100
-  window_samples: 49152
+  window_samples: 16384
   minimum_valid_samples: 16384
   onset_crop_probability: 0.5
   active_threshold_db: -55.0
