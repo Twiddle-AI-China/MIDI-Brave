@@ -438,6 +438,67 @@ def test_predictor_counterfactual_rollout_mixes_controls_without_cross_latent_ta
     assert torch.equal(calls[0]["clap"], result.target_clap)
 
 
+def test_predictor_midi_control_is_sparse_and_updates_only_predictor():
+    config = _config()
+    assert config.predictive is not None and config.latent_loss is not None
+    config = replace(
+        config,
+        predictive=replace(config.predictive, predictor_control_every_updates=2),
+        latent_loss=replace(config.latent_loss, rave_swap_source_rejection=0.5),
+    )
+    model = _model(config)
+    configure_predictive_stage(model, PredictiveStage.PREDICTOR)
+    decode_calls = []
+
+    def differentiable_decode(z_rave, clap, note, velocity, excitation_seed=None):
+        decode_calls.append(note.detach().clone())
+        return z_rave.mean(dim=1, keepdim=True).repeat_interleave(
+            config.predictive.samples_per_latent, dim=-1)
+
+    model.decode_latents = differentiable_decode
+    frames = config.data.window_samples // config.data.pitch_hop_length
+    batch = {
+        "rave_a": torch.randn(4, 16, 32),
+        "clap_a": torch.randn(4, 512),
+        "note_a": torch.tensor([48, 60, 52, 64]),
+        "note_b": torch.tensor([36, 67, 40, 71]),
+        "velocity_a": torch.tensor([80.0, 100.0, 90.0, 70.0]),
+        "pitch_confidence_a": torch.ones(4, frames),
+        "pitch_valid_mask_a": torch.ones(4, frames, dtype=torch.bool),
+        "preset_id": ["a", "a", "b", "b"],
+    }
+    statistics = LatentStatistics(
+        torch.ones(16), torch.ones(16), torch.ones(16))
+
+    inactive_pitch = _RecordingSwapPitch()
+    inactive = predictive_stage_objective(
+        model, batch, config, PredictiveStage.PREDICTOR, 1,
+        statistics, swap_pitch=inactive_pitch)
+    assert inactive.components["predictor_midi_control_total"].item() == 0.0
+    assert inactive.components["predictor_midi_swap_pitch"].item() == 0.0
+    assert inactive.components["predictor_midi_swap_source_rejection"].item() == 0.0
+    assert inactive.diagnostic_tensors is None
+    assert not decode_calls
+
+    pitch = _RecordingSwapPitch()
+    active = predictive_stage_objective(
+        model, batch, config, PredictiveStage.PREDICTOR, 2,
+        statistics, swap_pitch=pitch)
+    assert torch.equal(pitch.notes, batch["note_b"][:2])
+    assert torch.equal(pitch.source_notes, batch["note_a"][:2])
+    assert torch.equal(pitch.target_notes, batch["note_b"][:2])
+    assert active.components["predictor_continuation_total"].item() > 0.0
+    assert active.components["predictor_midi_control_total"].item() > 0.0
+    diagnostics = active.diagnostic_tensors
+    assert diagnostics is not None
+    assert diagnostics["counterfactual_midi_mask"].sum().item() == 2
+    assert diagnostics["counterfactual_timbre_mask"].sum().item() == 2
+    active.total.backward()
+    assert any(parameter.grad is not None for parameter in model.predictor.parameters())
+    assert all(parameter.grad is None for parameter in model.encoder.parameters())
+    assert all(parameter.grad is None for parameter in model.decoder.parameters())
+
+
 def test_rollout_objective_decodes_predicted_future():
     config = _config()
     model = _model(config)

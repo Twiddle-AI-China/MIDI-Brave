@@ -157,6 +157,15 @@ def _linear_warmup(update: int, updates: int) -> float:
     return min(1.0, update / max(1, updates))
 
 
+def _predictor_control_active(config: Config, update: int) -> bool:
+    if config.predictive is None:
+        return False
+    predictive = config.predictive
+    return (update >= predictive.predictor_control_start_updates
+            and (update - predictive.predictor_control_start_updates)
+            % predictive.predictor_control_every_updates == 0)
+
+
 def predictive_loss_schedule(config: Config, stage: PredictiveStage | str,
                              update: int) -> PredictiveLossSchedule:
     """Return stage-local loss weights; counters restart at each stage."""
@@ -368,8 +377,58 @@ def predictive_stage_objective(
     latent_objective = predictive_latent_objective(
         model, batch, config, statistics, calibrated_weights)
     if stage is PredictiveStage.PREDICTOR:
+        components = dict(latent_objective.components)
+        zero = latent_objective.total.new_zeros(())
+        components.update({
+            "predictor_continuation_total": latent_objective.total,
+            "predictor_midi_swap_pitch": zero,
+            "predictor_midi_swap_source_rejection": zero,
+            "predictor_midi_control_total": zero,
+        })
+        if not _predictor_control_active(config, update):
+            return PredictiveStageObjective(latent_objective.total, components)
+        if swap_pitch is None:
+            raise ValueError("predictor MIDI control requires a pitch objective")
+        required = {"note_b", "pitch_confidence_a", "pitch_valid_mask_a", "preset_id"}
+        missing = required - batch.keys()
+        if missing:
+            raise ValueError(f"predictor MIDI control batch is missing: {sorted(missing)}")
+        counterfactual = predictor_counterfactual_rollout(model, batch, config)
+        midi_mask = counterfactual.midi_mask
+        changed = batch["note_a"].ne(batch["note_b"]) & midi_mask
+        weights = midi_swap_example_weights(
+            batch["note_a"], batch["note_b"], changed)
+        pitch = swap_pitch(
+            counterfactual.audio[midi_mask], batch["note_b"][midi_mask],
+            batch["pitch_confidence_a"][midi_mask]
+            * changed[midi_mask, None].to(batch["pitch_confidence_a"]),
+            batch["pitch_valid_mask_a"][midi_mask])
+        source_rejection = swap_pitch.source_rejection(
+            counterfactual.audio[midi_mask], batch["note_b"][midi_mask],
+            batch["note_a"][midi_mask], batch["pitch_confidence_a"][midi_mask],
+            batch["pitch_valid_mask_a"][midi_mask], weights[midi_mask])
+        midi_control = (
+            config.loss.cross_pitch * config.loss.analytic_pitch * pitch
+            + losses.rave_swap_source_rejection * source_rejection)
+        components.update({
+            "predictor_midi_swap_pitch": pitch,
+            "predictor_midi_swap_source_rejection": source_rejection,
+            "predictor_midi_control_total": midi_control,
+        })
+        diagnostics = {
+            "counterfactual_audio": counterfactual.audio,
+            "counterfactual_latent_rollout": counterfactual.rollout,
+            "counterfactual_latent_sequence": counterfactual.latent_sequence,
+            "counterfactual_midi_mask": counterfactual.midi_mask,
+            "counterfactual_timbre_mask": counterfactual.timbre_mask,
+            "counterfactual_target_index": counterfactual.target_index,
+            "counterfactual_target_clap": counterfactual.target_clap,
+            "counterfactual_source_clap": counterfactual.source_clap,
+            "counterfactual_target_note": counterfactual.target_note,
+        }
         return PredictiveStageObjective(
-            latent_objective.total, latent_objective.components)
+            latent_objective.total + midi_control, components,
+            diagnostic_tensors=diagnostics)
 
     p = config.predictive
     latent = batch["rave_a"]
@@ -1492,7 +1551,8 @@ def train_predictive(
         writer = None
     stft = MultiResolutionSTFTLoss((2048, 1024, 512, 256, 128)).to(device)
     swap_pitch = (SpectralPitchObjective(config.data.sample_rate).to(device)
-                  if stage is PredictiveStage.RAVE and config.loss.cross_pitch > 0
+                  if stage in {PredictiveStage.RAVE, PredictiveStage.PREDICTOR}
+                  and config.loss.cross_pitch > 0
                   else None)
     clap_objective = None
     if ((config.latent_loss.clap_control > 0
