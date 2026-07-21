@@ -8,6 +8,7 @@ from midibrave.predictive_losses import LatentStatistics
 from midibrave.config import Config
 from midibrave.predictive_model import PredictiveMidiBrave
 from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
+                               _predictive_scaler_step,
                                predictive_checkpoint_contract,
                                predictive_loss_schedule,
                                predictive_latent_objective,
@@ -20,6 +21,40 @@ from midibrave.trainer import (PredictiveStage, configure_predictive_stage,
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _RecordingScaler:
+    def __init__(self):
+        self.step_calls = 0
+        self.updates = []
+
+    def step(self, optimizer):
+        self.step_calls += 1
+
+    def update(self, new_scale=None):
+        self.updates.append(new_scale)
+
+
+def test_predictive_nonfinite_global_gradient_never_steps_optimizer():
+    scaler = _RecordingScaler()
+
+    applied = _predictive_scaler_step(
+        scaler, object(), globally_finite=False, previous_scale=512.0)
+
+    assert not applied
+    assert scaler.step_calls == 0
+    assert scaler.updates == [256.0]
+
+
+def test_predictive_finite_global_gradient_steps_and_updates_scaler():
+    scaler = _RecordingScaler()
+
+    applied = _predictive_scaler_step(
+        scaler, object(), globally_finite=True, previous_scale=512.0)
+
+    assert applied
+    assert scaler.step_calls == 1
+    assert scaler.updates == [None]
 
 
 def _config() -> Config:

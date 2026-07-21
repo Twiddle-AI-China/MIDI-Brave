@@ -917,6 +917,18 @@ def _predictive_clap_auxiliary(
         auxiliary, reference_gradient, maximum_fraction)
 
 
+def _predictive_scaler_step(scaler: Any, optimizer: Any, *,
+                            globally_finite: bool,
+                            previous_scale: float) -> bool:
+    """Keep optimizer decisions identical across manually reduced DDP ranks."""
+    if globally_finite:
+        scaler.step(optimizer)
+        scaler.update()
+        return True
+    scaler.update(new_scale=max(1.0, previous_scale * 0.5))
+    return False
+
+
 @torch.no_grad()
 def _clap_prepass(model: nn.Module, batch: dict[str, Any], include_self: bool,
                   indices: Tensor) -> dict[str, Tensor]:
@@ -1294,6 +1306,7 @@ def train_predictive(
     clap_health_cumulative = torch.zeros(9, device=device)
     clap_health_interval = torch.zeros(9, device=device)
     clap_warning_events = 0
+    nonfinite_updates = 0
     while stage_update < target_updates:
         dataset.set_epoch(epoch)
         sampler.set_epoch(epoch)
@@ -1378,14 +1391,29 @@ def train_predictive(
                     if parameter.grad is not None:
                         dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)
                         parameter.grad.div_(world_size)
-            torch.nn.utils.clip_grad_norm_(trainable, config.train.grad_clip)
+            gradient_norm = torch.nn.utils.clip_grad_norm_(
+                trainable, config.train.grad_clip)
+            globally_finite = _global_all_true(
+                bool(torch.isfinite(gradient_norm).item()), device)
             previous_scale = scaler.get_scale()
-            scaler.step(optimizer)
-            scaler.update()
+            step_applied = _predictive_scaler_step(
+                scaler, optimizer, globally_finite=globally_finite,
+                previous_scale=previous_scale)
             optimizer.zero_grad(set_to_none=True)
             accumulated = 0
-            step_applied = scaler.get_scale() >= previous_scale
             if not step_applied:
+                nonfinite_updates += 1
+                if rank == 0 and (nonfinite_updates <= 10
+                                  or nonfinite_updates % 100 == 0):
+                    print(json.dumps({
+                        "event": "predictive_nonfinite_update_rejected",
+                        "stage": stage.value,
+                        "stage_update": stage_update,
+                        "rejected_updates": nonfinite_updates,
+                        "gradient_norm": float(gradient_norm.float().item()),
+                        "scale_before": float(previous_scale),
+                        "scale_after": float(scaler.get_scale()),
+                    }, sort_keys=True), flush=True)
                 continue
 
             if discriminator is not None and discriminator_optimizer is not None:
@@ -1410,6 +1438,10 @@ def train_predictive(
                 writer.add_scalar("loss/feature_matching", float(matching.detach()), stage_update)
                 writer.add_scalar("loss/discriminator", float(discriminator_loss.detach()), stage_update)
                 writer.add_scalar("train/lr", lr, stage_update)
+                writer.add_scalar(
+                    "train/amp_scale", float(scaler.get_scale()), stage_update)
+                writer.add_scalar(
+                    "health/nonfinite_updates", nonfinite_updates, stage_update)
                 for name, value in objective.components.items():
                     writer.add_scalar(f"loss/{name}", float(value.detach()), stage_update)
                 for name, value in _clap_health_metrics(
