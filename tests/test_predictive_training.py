@@ -45,9 +45,11 @@ class _RecordingSwapPitch(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.notes = None
+        self.note_calls = []
 
     def forward(self, audio, note, confidence, valid):
         self.notes = note.detach().clone()
+        self.note_calls.append(self.notes)
         return audio.float().square().mean()
 
     def source_rejection(self, audio, target_note, source_note,
@@ -447,6 +449,9 @@ def test_predictor_counterfactual_rollout_mixes_controls_without_cross_latent_ta
     assert torch.equal(result.target_note[2:], batch["note_a"][2:])
     assert torch.equal(result.target_clap[:2], batch["clap_a"][:2])
     assert not torch.equal(result.target_clap[2:], batch["clap_a"][2:])
+    assert torch.equal(result.timbre_alpha[:2], torch.zeros(2))
+    assert bool(result.timbre_alpha[2:].gt(0).all().item())
+    assert bool(result.timbre_alpha[2:].le(1).all().item())
     assert result.rollout.shape == (
         4, config.predictive.rave_latent_dim,
         config.predictive.predictor_control_rollout_frames)
@@ -464,7 +469,9 @@ def test_predictor_midi_control_is_sparse_and_updates_only_predictor():
     config = replace(
         config,
         predictive=replace(config.predictive, predictor_control_every_updates=2),
-        latent_loss=replace(config.latent_loss, rave_swap_source_rejection=0.5),
+        latent_loss=replace(
+            config.latent_loss, rave_swap_source_rejection=0.5,
+            clap_control=0.0),
     )
     model = _model(config)
     configure_predictive_stage(model, PredictiveStage.PREDICTOR)
@@ -504,11 +511,13 @@ def test_predictor_midi_control_is_sparse_and_updates_only_predictor():
     active = predictive_stage_objective(
         model, batch, config, PredictiveStage.PREDICTOR, 2,
         statistics, swap_pitch=pitch)
-    assert torch.equal(pitch.notes, batch["note_b"][:2])
+    assert torch.equal(pitch.note_calls[0], batch["note_b"][:2])
+    assert torch.equal(pitch.note_calls[1], batch["note_a"][2:])
     assert torch.equal(pitch.source_notes, batch["note_a"][:2])
     assert torch.equal(pitch.target_notes, batch["note_b"][:2])
     assert active.components["predictor_continuation_total"].item() > 0.0
     assert active.components["predictor_midi_control_total"].item() > 0.0
+    assert active.components["predictor_timbre_pitch_preservation"].item() > 0.0
     diagnostics = active.diagnostic_tensors
     assert diagnostics is not None
     assert diagnostics["counterfactual_midi_mask"].sum().item() == 2
@@ -557,6 +566,9 @@ def test_predictor_clap_and_midi_controls_share_frozen_parameter_boundary():
     assert torch.isfinite(objective.components["predictor_clap_target_cosine"])
     assert torch.isfinite(objective.components["predictor_clap_source_cosine"])
     assert 0.0 <= objective.components["predictor_clap_following"].item() <= 1.0
+    assert torch.isfinite(
+        objective.components["predictor_midi_clap_preservation_cosine"])
+    assert objective.components["predictor_timbre_pitch_preservation"].item() > 0.0
     assert objective.components["predictor_control_gradient_scale"].item() <= 1.0
     diagnostics = objective.diagnostic_tensors
     assert diagnostics is not None

@@ -203,6 +203,7 @@ class PredictiveConfig:
     predictor_control_warmup_updates: int = 1000
     predictor_control_rollout_frames: int = 128
     predictor_control_gradient_fraction_max: float = 0.25
+    predictor_timbre_interpolation_steps: int = 4
 
 
 @dataclass(frozen=True)
@@ -295,6 +296,8 @@ class Config:
             if not 0.0 <= predictive.predictor_control_gradient_fraction_max <= 1.0:
                 raise ValueError(
                     "predictor_control_gradient_fraction_max must be between zero and one")
+            if predictive.predictor_timbre_interpolation_steps <= 0:
+                raise ValueError("predictor_timbre_interpolation_steps must be positive")
             assert latent_loss is not None
             if (latent_loss.clap_counterfactual < 0.0
                     or latent_loss.rave_swap_source_rejection < 0.0):

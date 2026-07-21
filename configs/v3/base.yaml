@@ -104,6 +104,7 @@ predictive:
   predictor_control_warmup_updates: 1000
   predictor_control_rollout_frames: 128
   predictor_control_gradient_fraction_max: 0.25
+  predictor_timbre_interpolation_steps: 4
 latent_loss:
   future: 1.0
   delta: 0.5

@@ -22,6 +22,7 @@ from .data import (PairDataset, configured_roots, load_audio, load_manifest,
 from .losses import (FrozenClapReconstructionObjective,
                      MultiResolutionSTFTLoss, rms_db)
 from .model import MidiBrave
+from .latent_predictor import rollout_blocks
 from .predictive_losses import LatentStatistics
 from .predictive_model import PredictiveMidiBrave
 
@@ -70,6 +71,65 @@ def predictive_rave_quality_gate(
         failures.append("non_finite")
     return {"passed": not failures, "failures": sorted(failures),
             "thresholds": thresholds, "non_finite_count": int(nonfinite_count)}
+
+
+def predictive_control_quality_gate(
+        metrics: dict[str, dict[str, float | int]],
+        nonfinite_count: int) -> dict[str, Any]:
+    """Require independent MIDI/timbre control and a healthy causal rollout."""
+    thresholds = {
+        "swap_f0_p90_cents": 200.0,
+        "midi_swap_following": 0.90,
+        "midi_timbre_preservation_cosine": 0.80,
+        "clap_control_following": 0.90,
+        "timbre_f0_p90_cents": 200.0,
+        "timbre_path_monotonicity": 0.75,
+        "seed_washout_ratio_max": 0.90,
+        "rollout_variance_ratio_min": 0.25,
+        "rollout_variance_ratio_max": 4.0,
+    }
+    swapped = metrics.get("swap_f0_absolute_cents", {})
+    midi_following = metrics.get("midi_swap_following", {})
+    midi_timbre = metrics.get("midi_timbre_preservation_cosine", {})
+    clap_following = metrics.get("clap_control_following", {})
+    timbre_f0 = metrics.get("timbre_f0_absolute_cents", {})
+    timbre_path = metrics.get("timbre_path_monotonicity", {})
+    seed_washout = metrics.get("seed_washout_ratio", {})
+    variance = float(metrics.get("rollout_variance_ratio", {}).get(
+        "mean", math.nan))
+    failures = []
+    if float(swapped.get("p90", math.inf)) > thresholds["swap_f0_p90_cents"]:
+        failures.append("swap_f0_p90")
+    if float(midi_following.get("mean", -math.inf)) < thresholds[
+            "midi_swap_following"]:
+        failures.append("midi_swap_following")
+    if float(midi_timbre.get("median", -math.inf)) < thresholds[
+            "midi_timbre_preservation_cosine"]:
+        failures.append("midi_timbre_preservation_cosine")
+    if float(clap_following.get("mean", -math.inf)) < thresholds[
+            "clap_control_following"]:
+        failures.append("clap_control_following")
+    if float(timbre_f0.get("p90", math.inf)) > thresholds[
+            "timbre_f0_p90_cents"]:
+        failures.append("timbre_f0_p90")
+    if float(timbre_path.get("mean", -math.inf)) < thresholds[
+            "timbre_path_monotonicity"]:
+        failures.append("timbre_path_monotonicity")
+    if float(seed_washout.get("mean", math.inf)) > thresholds[
+            "seed_washout_ratio_max"]:
+        failures.append("seed_washout_ratio")
+    if (not math.isfinite(variance)
+            or variance < thresholds["rollout_variance_ratio_min"]
+            or variance > thresholds["rollout_variance_ratio_max"]):
+        failures.append("rollout_variance_ratio")
+    if nonfinite_count:
+        failures.append("non_finite")
+    return {
+        "passed": not failures,
+        "failures": sorted(failures),
+        "thresholds": thresholds,
+        "non_finite_count": int(nonfinite_count),
+    }
 
 
 def _finite_scalar(value: Tensor) -> float | None:
@@ -183,6 +243,42 @@ def predictive_rollout_report(
     }
 
 
+def _fixed_predictive_control_rollout(
+        model: PredictiveMidiBrave, history: Tensor, clap: Tensor,
+        note: Tensor, velocity: Tensor, frames: int, stride_frames: int,
+        excitation_seed: Tensor) -> tuple[Tensor, Tensor]:
+    """Generate a fixed future while accepting a directly manipulated CLAP state."""
+    result = rollout_blocks(
+        model.predictor, history, model.project_clap(clap, frames),
+        model.midi_control(note, velocity, frames), stride_frames)
+    sequence = torch.cat((history, result.latent), dim=-1)
+    decoded = model.decode_latents(
+        sequence, clap, note, velocity, excitation_seed)
+    future_start = history.shape[-1] * model.samples_per_latent
+    return result.latent, decoded[..., future_start:]
+
+
+def _predictive_control_partners(records: list[Any], source: Any) -> tuple[Any, Any] | None:
+    midi_candidates = [
+        record for record in records
+        if (record.preset_id == source.preset_id
+            and record.velocity == source.velocity
+            and record.midi_note != source.midi_note)
+    ]
+    timbre_candidates = [
+        record for record in records
+        if (record.preset_id != source.preset_id
+            and record.velocity == source.velocity
+            and record.midi_note == source.midi_note)
+    ]
+    if not midi_candidates or not timbre_candidates:
+        return None
+    midi = max(midi_candidates, key=lambda record: (
+        abs(record.midi_note - source.midi_note), record.sample_id))
+    timbre = min(timbre_candidates, key=lambda record: record.sample_id)
+    return midi, timbre
+
+
 @torch.no_grad()
 def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str,
                         sequences: int = 8, device_name: str = "cuda") -> dict[str, Any]:
@@ -199,8 +295,10 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
     if not isinstance(payload, dict) or int(payload.get("format", 0)) != 5:
         raise ValueError("predictive evaluation requires checkpoint format 5")
     contract = payload.get("predictive_contract")
-    if not isinstance(contract, dict) or contract.get("stage") not in {"rollout", "gan"}:
-        raise ValueError("predictive evaluation requires a rollout or GAN checkpoint")
+    if not isinstance(contract, dict) or contract.get("stage") not in {
+            "predictor", "rollout", "gan"}:
+        raise ValueError(
+            "predictive evaluation requires a predictor, rollout, or GAN checkpoint")
     statistics, rave_checkpoint_hash, statistics_hash = load_predictive_statistics(
         Path(config.data.cache_root) / "rave-statistics.npz", config)
     if contract.get("latent_statistics_hash") != statistics_hash:
@@ -218,6 +316,17 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
     p = config.predictive
     rollout_frames = max(PREDICTIVE_HORIZONS) * p.stride_frames
     total_frames = p.history_frames + rollout_frames
+    control_frames = p.predictor_control_rollout_frames
+    control_steps = control_frames // p.stride_frames
+    if str(control_steps) not in {str(value) for value in PREDICTIVE_HORIZONS}:
+        raise ValueError(
+            "predictor control rollout must match a reported evaluation horizon")
+    clap_evaluator = FrozenClapReconstructionObjective(
+        config.data.clap_checkpoint, config.data.sample_rate, device,
+        maximum_gradient_norm=0.0)
+    control_metrics = MetricStore()
+    control_rows = []
+    control_nonfinite_count = 0
     reports = []
     seed_rows = []
     for record in records:
@@ -267,8 +376,144 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
             predicted_latent, reference_latent, predicted_audio, reference_audio,
             statistics, p.stride_frames, p.samples_per_latent, elapsed,
             config.data.sample_rate)
+        partners = _predictive_control_partners(records, record)
+        if partners is None:
+            continue
+        midi_record, timbre_record = partners
+        timbre_cache_path = (
+            Path(config.data.cache_root) / "rave" / f"{timbre_record.cache_id}.npz")
+        timbre_clap_path = (
+            Path(config.data.cache_root) / "clap" / f"{timbre_record.cache_id}.npy")
+        if not timbre_cache_path.is_file() or not timbre_clap_path.is_file():
+            continue
+        with np.load(timbre_cache_path, allow_pickle=False) as cached:
+            timbre_latent = cached["latent"].astype(np.float32, copy=True)
+            if (str(cached["checkpoint_hash"].item()) != rave_checkpoint_hash
+                    or timbre_latent.shape[0] != p.rave_latent_dim
+                    or timbre_latent.shape[-1] < p.history_frames):
+                continue
+        target_clap = np.load(timbre_clap_path).astype(np.float32)
+        source_clap = F.normalize(clap_tensor.float(), dim=-1)
+        target_clap_tensor = F.normalize(
+            torch.from_numpy(target_clap).unsqueeze(0).to(device).float(), dim=-1)
+        interpolation_count = p.predictor_timbre_interpolation_steps + 1
+        alpha = torch.linspace(
+            0.0, 1.0, interpolation_count, device=device,
+            dtype=source_clap.dtype)
+        path_clap = F.normalize(torch.lerp(
+            source_clap.expand(interpolation_count, -1),
+            target_clap_tensor.expand(interpolation_count, -1),
+            alpha[:, None]), dim=-1)
+        path_history = history.expand(interpolation_count, -1, -1).contiguous()
+        path_note = note.expand(interpolation_count)
+        path_velocity = velocity.expand(interpolation_count)
+        seed_value = int.from_bytes(
+            hashlib.sha256(record.sample_id.encode()).digest()[:4], "little")
+        path_seed = torch.full(
+            (interpolation_count,), seed_value, device=device, dtype=torch.long)
+        path_latent, path_audio = _fixed_predictive_control_rollout(
+            model, path_history, path_clap, path_note, path_velocity,
+            control_frames, p.stride_frames, path_seed)
+        midi_note = torch.tensor([midi_record.midi_note], device=device)
+        midi_latent, midi_audio = _fixed_predictive_control_rollout(
+            model, history, source_clap, midi_note, velocity,
+            control_frames, p.stride_frames, path_seed[:1])
+        alternate_history = torch.from_numpy(
+            timbre_latent[:, :p.history_frames]).unsqueeze(0).to(device)
+        alternate_latent, _ = _fixed_predictive_control_rollout(
+            model, alternate_history, target_clap_tensor, note, velocity,
+            control_frames, p.stride_frames, path_seed[:1])
+
+        control_nonfinite_count += int((~torch.isfinite(path_latent)).sum().item())
+        control_nonfinite_count += int((~torch.isfinite(path_audio)).sum().item())
+        control_nonfinite_count += int((~torch.isfinite(midi_latent)).sum().item())
+        control_nonfinite_count += int((~torch.isfinite(midi_audio)).sum().item())
+        control_nonfinite_count += int((~torch.isfinite(alternate_latent)).sum().item())
+        path_latent = torch.nan_to_num(path_latent.float())
+        path_audio = torch.nan_to_num(path_audio.float())
+        midi_audio = torch.nan_to_num(midi_audio.float())
+        alternate_latent = torch.nan_to_num(alternate_latent.float())
+        washout_frames = min(p.history_frames, max(0, control_frames - 32))
+        washout_samples = washout_frames * p.samples_per_latent
+        path_eval_audio = path_audio[..., washout_samples:]
+        midi_eval_audio = midi_audio[..., washout_samples:]
+        valid_path = torch.full(
+            (interpolation_count,), path_eval_audio.shape[-1],
+            device=device, dtype=torch.long)
+        path_embedding = clap_evaluator._embedding(
+            path_eval_audio, valid_path, role="generated")
+        midi_embedding = clap_evaluator._embedding(
+            midi_eval_audio, valid_path[:1], role="generated")
+        midi_timbre_cosine = F.cosine_similarity(
+            midi_embedding, source_clap, dim=-1)
+        endpoint_target_cosine = F.cosine_similarity(
+            path_embedding[-1:], target_clap_tensor, dim=-1)
+        endpoint_source_cosine = F.cosine_similarity(
+            path_embedding[-1:], source_clap, dim=-1)
+        direction = target_clap_tensor - source_clap
+        progress = ((path_embedding - source_clap) * direction).sum(-1)
+        progress = progress / direction.square().sum(-1).clamp_min(1e-8)
+        monotonicity = progress.diff().gt(0.0).float().mean()
+        desired_path = path_clap
+        control_metrics.add("midi_timbre_preservation_cosine", midi_timbre_cosine)
+        control_metrics.add("clap_control_target_cosine", endpoint_target_cosine)
+        control_metrics.add("clap_control_source_cosine", endpoint_source_cosine)
+        control_metrics.add(
+            "clap_control_following",
+            endpoint_target_cosine.gt(endpoint_source_cosine).float())
+        control_metrics.add("timbre_path_monotonicity", monotonicity)
+        control_metrics.add("timbre_path_target_cosine", F.cosine_similarity(
+            path_embedding, desired_path, dim=-1))
+
+        midi_errors, midi_medians, midi_periodicity = pitch_measurements_by_sample(
+            midi_eval_audio, midi_note, config.data.sample_rate,
+            config.data.pitch_hop_length)
+        add_pitch_metrics(
+            control_metrics, "swap", midi_errors, midi_periodicity,
+            midi_note, velocity)
+        for median in midi_medians:
+            if median is None:
+                continue
+            source_offset = 100.0 * float(midi_record.midi_note - record.midi_note)
+            control_metrics.add(
+                "midi_swap_following",
+                float(abs(median) < abs(median + source_offset)))
+        timbre_notes = note.expand(interpolation_count - 1)
+        timbre_velocities = velocity.expand(interpolation_count - 1)
+        timbre_errors, _, timbre_periodicity = pitch_measurements_by_sample(
+            path_eval_audio[1:], timbre_notes, config.data.sample_rate,
+            config.data.pitch_hop_length)
+        add_pitch_metrics(
+            control_metrics, "timbre", timbre_errors, timbre_periodicity,
+            timbre_notes, timbre_velocities)
+
+        latent_scale, _, _ = statistics.scales(
+            p.rave_latent_dim, device, path_latent.dtype)
+        seed_distance = ((path_latent[-1:] - alternate_latent)
+                         / latent_scale).square().mean(dim=1).sqrt()
+        seed_window = min(p.history_frames, control_frames // 2)
+        early_seed_distance = seed_distance[..., :seed_window].mean()
+        late_seed_distance = seed_distance[..., -seed_window:].mean()
+        seed_washout_ratio = late_seed_distance / early_seed_distance.clamp_min(1e-8)
+        control_metrics.add("seed_washout_ratio", seed_washout_ratio)
+        variance_ratio = report["horizons"][str(control_steps)]["variance_ratio"]
+        if variance_ratio is not None:
+            control_metrics.add("rollout_variance_ratio", float(variance_ratio))
+        control_rows.append({
+            "sample_id": record.sample_id,
+            "midi_target_sample_id": midi_record.sample_id,
+            "timbre_target_sample_id": timbre_record.sample_id,
+            "source_note": int(record.midi_note),
+            "midi_target_note": int(midi_record.midi_note),
+            "path_alpha": [float(value) for value in alpha.cpu()],
+            "path_progress": [float(value) for value in progress.cpu()],
+            "seed_washout_ratio": float(seed_washout_ratio.cpu()),
+        })
         reports.append(report)
-        seed_rows.append({"sample_id": record.sample_id, "seed_distance": 0.0})
+        seed_rows.append({
+            "sample_id": record.sample_id,
+            "seed_washout_ratio": float(seed_washout_ratio.cpu()),
+        })
         if len(reports) >= sequences:
             break
     if not reports:
@@ -283,9 +528,14 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
                       if value is not None and math.isfinite(float(value))]
             aggregate[name] = (sum(finite) / len(finite) if finite else None)
         horizons[horizon] = aggregate
-    failures = sorted({failure for report in reports for failure in report["gate"]["failures"]})
+    control_summary = control_metrics.summary()
+    control_gate = predictive_control_quality_gate(
+        control_summary, control_nonfinite_count)
+    continuation_failures = {
+        failure for report in reports for failure in report["gate"]["failures"]}
+    failures = sorted(continuation_failures | set(control_gate["failures"]))
     output = {
-        "schema": 1, "config": str(Path(config_path).resolve()),
+        "schema": 2, "config": str(Path(config_path).resolve()),
         "checkpoint": str(Path(checkpoint_path).resolve()),
         "checkpoint_sha256": hashlib.sha256(Path(checkpoint_path).read_bytes()).hexdigest(),
         "latent_statistics_sha256": statistics_hash,
@@ -293,18 +543,34 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
         "evaluated_sequences": len(reports), "seeds": seed_rows,
         "control_stride_frames": p.stride_frames,
         "control_stride_samples": p.stride_frames * p.samples_per_latent,
+        "control_rollout_frames": control_frames,
+        "control_seed_washout_frames": min(
+            p.history_frames, max(0, control_frames - 32)),
         "horizons": horizons,
+        "control_metrics": control_summary,
+        "control_gate": control_gate,
         "gate": {"passed": not failures, "failures": failures,
-                 "variance_ratio_range": [0.25, 4.0]},
+                 "variance_ratio_range": [0.25, 4.0],
+                 "control_thresholds": control_gate["thresholds"]},
         "notes": {
-            "quality_thresholds": "reported only; establish thresholds from measured baselines",
-            "clap_cosine": "null unless a frozen evaluation CLAP encoder is supplied",
+            "pitch_independence": (
+                "MIDI changes target pitch while source CLAP remains fixed; timbre-path "
+                "changes keep the source MIDI note fixed"),
+            "timbre_navigation": (
+                "CLAP controls are directly interpolated at fixed MIDI and identical "
+                "source history; monotonic target-direction progress is gated"),
+            "seed_washout": (
+                "the same target controls roll from source and target-preset histories; "
+                "late/early normalized latent distance must decrease"),
         },
     }
     destination = Path(output_path)
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "predictive-metrics.json").write_text(
         json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (destination / "predictive-control-paths.jsonl").write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in control_rows),
+        encoding="utf-8")
     print(json.dumps(output, sort_keys=True))
     return output
 

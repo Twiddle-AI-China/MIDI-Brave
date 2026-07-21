@@ -31,6 +31,7 @@ def test_v3_predictive_contract_is_exact():
     assert config.predictive.predictor_control_warmup_updates == 1000
     assert config.predictive.predictor_control_rollout_frames == 128
     assert config.predictive.predictor_control_gradient_fraction_max == 0.25
+    assert config.predictive.predictor_timbre_interpolation_steps == 4
     assert config.latent_loss.future == 1.0
     assert config.latent_loss.delta == 0.5
     assert config.latent_loss.acceleration == 0.05
@@ -55,6 +56,9 @@ def test_v3_rejects_stride_beyond_horizon(tmp_path: Path):
     ("predictor_control_gradient_fraction_max: 0.25",
      "predictor_control_gradient_fraction_max: 1.1",
      "predictor_control_gradient_fraction_max"),
+    ("predictor_timbre_interpolation_steps: 4",
+     "predictor_timbre_interpolation_steps: 0",
+     "predictor_timbre_interpolation_steps"),
 ])
 def test_v3_rejects_invalid_predictor_control_schedule(
         tmp_path: Path, old: str, new: str, match: str):

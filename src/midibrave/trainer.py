@@ -110,6 +110,7 @@ class PredictorCounterfactualRollout:
     target_clap: Tensor
     source_clap: Tensor
     target_note: Tensor
+    timbre_alpha: Tensor
 
 
 def predictor_counterfactual_rollout(
@@ -132,8 +133,20 @@ def predictor_counterfactual_rollout(
     midi_mask, timbre_mask, target_index = counterfactual_control_assignment(
         list(batch["preset_id"]), history.device)
     target_clap = batch["clap_a"].clone()
-    target_clap[timbre_mask] = batch["clap_a"].index_select(
-        0, target_index[timbre_mask])
+    timbre_alpha = target_clap.new_zeros(target_clap.shape[0])
+    timbre_positions = timbre_mask.nonzero().flatten()
+    if timbre_positions.numel():
+        interpolation_steps = predictive.predictor_timbre_interpolation_steps
+        alpha = ((torch.arange(timbre_positions.numel(), device=history.device)
+                  % interpolation_steps) + 1).to(target_clap) / interpolation_steps
+        timbre_alpha[timbre_positions] = alpha
+        source = F.normalize(
+            batch["clap_a"].index_select(0, timbre_positions).float(), dim=-1)
+        target = F.normalize(batch["clap_a"].index_select(
+            0, target_index[timbre_positions]).float(), dim=-1)
+        interpolated = F.normalize(
+            torch.lerp(source, target, alpha[:, None].float()), dim=-1)
+        target_clap[timbre_positions] = interpolated.to(target_clap)
     target_note = torch.where(midi_mask, batch["note_b"], batch["note_a"])
     frames = predictive.predictor_control_rollout_frames
     result = rollout_blocks(
@@ -148,7 +161,7 @@ def predictor_counterfactual_rollout(
         audio=audio, rollout=result.latent, latent_sequence=sequence,
         midi_mask=midi_mask, timbre_mask=timbre_mask, target_index=target_index,
         target_clap=target_clap, source_clap=batch["clap_a"],
-        target_note=target_note)
+        target_note=target_note, timbre_alpha=timbre_alpha)
 
 
 def _linear_warmup(update: int, updates: int) -> float:
@@ -385,6 +398,10 @@ def predictive_stage_objective(
             "predictor_midi_swap_pitch": zero,
             "predictor_midi_swap_source_rejection": zero,
             "predictor_midi_control_total": zero,
+            "predictor_timbre_pitch_preservation": zero,
+            "predictor_pitch_control_total": zero,
+            "predictor_midi_clap_preservation_total": zero,
+            "predictor_midi_clap_preservation_cosine": zero,
             "predictor_clap_control_total": zero,
             "predictor_clap_target_cosine": zero,
             "predictor_clap_source_cosine": zero,
@@ -418,17 +435,47 @@ def predictive_stage_objective(
         midi_control = (
             config.loss.cross_pitch * config.loss.analytic_pitch * pitch
             + losses.rave_swap_source_rejection * source_rejection)
-        clap_loss = zero
+        timbre_mask = counterfactual.timbre_mask
+        timbre_pitch = zero
+        if bool(timbre_mask.any().item()):
+            timbre_pitch = swap_pitch(
+                counterfactual.audio[timbre_mask], batch["note_a"][timbre_mask],
+                batch["pitch_confidence_a"][timbre_mask],
+                batch["pitch_valid_mask_a"][timbre_mask])
+        pitch_control = (
+            midi_control + config.loss.cross_pitch
+            * config.loss.analytic_pitch * timbre_pitch)
+        midi_clap_loss = zero
+        midi_clap_cosine = zero
+        timbre_clap_loss = zero
         clap_surrogate = zero
         clap_health = None
         clap_target_cosine = zero
         clap_source_cosine = zero
         clap_following = zero
-        if losses.clap_counterfactual > 0.0:
+        if losses.clap_control > 0.0 or losses.clap_counterfactual > 0.0:
             if clap_objective is None:
                 raise ValueError("predictor CLAP control requires a frozen CLAP objective")
-            timbre_mask = counterfactual.timbre_mask
-            if bool(timbre_mask.any().item()):
+            if losses.clap_control > 0.0 and bool(midi_mask.any().item()):
+                midi_audio = counterfactual.audio[midi_mask]
+                valid = torch.full(
+                    (midi_audio.shape[0],), midi_audio.shape[-1],
+                    device=midi_audio.device, dtype=torch.long)
+                preservation = clap_objective.waveform_gradients_to_embeddings(
+                    midi_audio, counterfactual.source_clap[midi_mask],
+                    counterfactual.source_clap[midi_mask], valid, margin=0.0)
+                midi_clap_loss = preservation.losses.mean()
+                midi_clap_cosine = preservation.target_cosine.mean()
+                health = _clap_health_vector(preservation.health, midi_audio.device)
+                clap_health = health if clap_health is None else _merge_clap_health(
+                    clap_health, health)
+                if not bool(preservation.health.skipped.item()):
+                    requested = (preservation.gradients * losses.clap_control
+                                 / midi_audio.shape[0])
+                    clap_surrogate = (
+                        clap_surrogate
+                        + (midi_audio.float() * requested.float()).sum())
+            if losses.clap_counterfactual > 0.0 and bool(timbre_mask.any().item()):
                 timbre_audio = counterfactual.audio[timbre_mask]
                 valid = torch.full(
                     (timbre_audio.shape[0],), timbre_audio.shape[-1],
@@ -436,18 +483,24 @@ def predictive_stage_objective(
                 clap_result = clap_objective.waveform_gradients_to_embeddings(
                     timbre_audio, counterfactual.target_clap[timbre_mask],
                     counterfactual.source_clap[timbre_mask], valid)
-                clap_loss = clap_result.losses.mean()
+                timbre_clap_loss = clap_result.losses.mean()
                 clap_target_cosine = clap_result.target_cosine.mean()
                 clap_source_cosine = clap_result.source_cosine.mean()
                 clap_following = clap_result.following.float().mean()
-                clap_health = _clap_health_vector(clap_result.health, timbre_audio.device)
+                health = _clap_health_vector(clap_result.health, timbre_audio.device)
+                clap_health = health if clap_health is None else _merge_clap_health(
+                    clap_health, health)
                 if not bool(clap_result.health.skipped.item()):
                     requested = (clap_result.gradients
                                  * losses.clap_counterfactual
                                  / timbre_audio.shape[0])
-                    clap_surrogate = (timbre_audio.float() * requested.float()).sum()
-        weighted_clap = losses.clap_counterfactual * clap_loss
-        control_auxiliary = midi_control + clap_surrogate - clap_surrogate.detach()
+                    clap_surrogate = (
+                        clap_surrogate
+                        + (timbre_audio.float() * requested.float()).sum())
+        weighted_midi_clap = losses.clap_control * midi_clap_loss
+        weighted_timbre_clap = losses.clap_counterfactual * timbre_clap_loss
+        weighted_clap = weighted_midi_clap + weighted_timbre_clap
+        control_auxiliary = pitch_control + clap_surrogate - clap_surrogate.detach()
         control_progress = _linear_warmup(
             update - config.predictive.predictor_control_start_updates + 1,
             config.predictive.predictor_control_warmup_updates)
@@ -457,13 +510,17 @@ def predictive_stage_objective(
         capped_control, control_scale = _cap_auxiliary_parameter_gradient(
             control_auxiliary, latent_objective.total,
             list(model.predictor.parameters()), gradient_fraction)
-        displayed_control = midi_control.detach() + weighted_clap.detach()
+        displayed_control = pitch_control.detach() + weighted_clap.detach()
         control_total = (
             capped_control - capped_control.detach() + displayed_control)
         components.update({
             "predictor_midi_swap_pitch": pitch,
             "predictor_midi_swap_source_rejection": source_rejection,
             "predictor_midi_control_total": midi_control,
+            "predictor_timbre_pitch_preservation": timbre_pitch,
+            "predictor_pitch_control_total": pitch_control,
+            "predictor_midi_clap_preservation_total": weighted_midi_clap,
+            "predictor_midi_clap_preservation_cosine": midi_clap_cosine,
             "predictor_clap_control_total": weighted_clap,
             "predictor_clap_target_cosine": clap_target_cosine,
             "predictor_clap_source_cosine": clap_source_cosine,
@@ -483,6 +540,7 @@ def predictive_stage_objective(
             "counterfactual_target_clap": counterfactual.target_clap,
             "counterfactual_source_clap": counterfactual.source_clap,
             "counterfactual_target_note": counterfactual.target_note,
+            "counterfactual_timbre_alpha": counterfactual.timbre_alpha,
             **({"predictor_control_clap_health": clap_health}
                if clap_health is not None else {}),
         }
