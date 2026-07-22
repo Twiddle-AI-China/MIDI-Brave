@@ -17,6 +17,7 @@ from .realtime_plane import TimbrePlane
 EXPECTED_RUNTIME_SHA256 = (
     "c9b93dcec1a471ccbf97fab9074717f8cec1f2598dfa5d86e808d05a153f78ec"
 )
+STARTUP_WARMUP_BLOCKS = 16
 
 
 @dataclass(frozen=True)
@@ -212,7 +213,8 @@ class RealtimeEngine:
         engine = cls(runtime, TimbrePlane.fit(seed_clap), target, contract)
         warmup = engine.new_session()
         warmup.start(x=0.0, y=0.0, note=60, velocity=0.8, seed=0)
-        warmup.render_block()
+        for _ in range(STARTUP_WARMUP_BLOCKS):
+            warmup.render_block()
         return engine
 
     def new_session(self) -> RuntimeSession:
