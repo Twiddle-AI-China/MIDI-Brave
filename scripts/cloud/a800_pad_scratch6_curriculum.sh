@@ -38,7 +38,7 @@ fi
 [[ -x "$PYTHON" ]] || { echo "missing Python environment: $PYTHON" >&2; exit 1; }
 [[ -d "$REPO/src/midibrave" ]] || { echo "missing MidiBrave package: $REPO" >&2; exit 1; }
 
-mkdir -p "$RUN_ROOT" "$CACHE" "$CONFIG_ROOT" \
+mkdir -p "$RUN_ROOT" "$CACHE" "$CACHE/rave" "$CONFIG_ROOT" \
   "$LOG_ROOT" "$RUN_ROOT/monitor"
 export PYTHONPATH=$REPO/src
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
