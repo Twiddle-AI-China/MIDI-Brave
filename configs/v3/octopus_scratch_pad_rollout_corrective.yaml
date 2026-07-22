@@ -127,7 +127,7 @@ latent_loss:
 train:
   rave_steps: 7500
   predictor_steps: 2500
-  rollout_steps: 3000
+  rollout_steps: 100000
   gan_steps: 1
   phase1_steps: 1
   phase2_steps: 1
@@ -142,7 +142,7 @@ train:
   pitch_adversary_start: 5000
   pitch_adversary_ramp: 5000
   grad_clip: 1.0
-  checkpoint_every: 500
+  checkpoint_every: 2000
   log_every: 20
   output_dir: /data/midibrave-v3/runs
   run_name: pad50_scratch_rollout_corrective_v100_8gpu

@@ -32,8 +32,8 @@ for batch in "${candidates[@]}"; do
   run_dir="/data/midibrave-v3/runs/${run_name}/rollout"
   sed \
     -e "s/run_name: pad50_scratch_rollout_corrective_v100_8gpu/run_name: ${run_name}/" \
-    -e 's/rollout_steps: 3000/rollout_steps: 2/' \
-    -e 's/checkpoint_every: 500/checkpoint_every: 2/' \
+    -e 's/rollout_steps: 100000/rollout_steps: 2/' \
+    -e 's/checkpoint_every: 2000/checkpoint_every: 2/' \
     -e 's/log_every: 20/log_every: 1/' \
     "$template" > "$config"
 

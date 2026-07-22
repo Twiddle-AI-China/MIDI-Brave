@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=96
 #SBATCH --gres=gpu:8
 #SBATCH --mem=120G
-#SBATCH --time=2-00:00:00
+#SBATCH --time=0
 #SBATCH --requeue
 #SBATCH --output=/data/midibrave-v3/launches/scratch-pad-corrective-20260722/logs/train-%j.out
 
@@ -22,7 +22,7 @@ calibration=/data/midibrave-v3/cache/scratch-pad-20260722/predictive-calibration
 run_root=/data/midibrave-v3/runs/pad50_scratch_rollout_corrective_v100_8gpu/rollout
 clap_failure_root=/data/midibrave-v3/diagnostics/scratch-pad-corrective-clap
 batch_per_gpu=${BATCH_PER_GPU:-40}
-max_steps=${MAX_STEPS:-3000}
+max_steps=${MAX_STEPS:-100000}
 
 mkdir -p "$launch/logs" "$launch/monitor" "$run_root" "$clap_failure_root"
 nvidia-smi \
