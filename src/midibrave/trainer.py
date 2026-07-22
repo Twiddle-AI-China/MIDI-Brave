@@ -340,6 +340,69 @@ def _predictor_control_active(config: Config, update: int) -> bool:
             % predictive.predictor_control_every_updates == 0)
 
 
+def _predictive_clap_interval(config: Config) -> int:
+    interval = config.loss.clap_every_updates
+    if interval <= 0:
+        raise ValueError("loss.clap_every_updates must be positive")
+    if config.loss.clap_batch_size <= 0:
+        raise ValueError("loss.clap_batch_size must be positive")
+    return interval
+
+
+def _predictive_clap_due(config: Config, update: int) -> bool:
+    """Return whether a stage-local CLAP event is due on this update."""
+    if update < 0:
+        raise ValueError("update must be non-negative")
+    return (update + 1) % _predictive_clap_interval(config) == 0
+
+
+def _predictive_control_clap_due(config: Config, update: int) -> bool:
+    """Count CLAP cadence over sparse predictor-control events, not raw steps."""
+    if config.predictive is None or not _predictor_control_active(config, update):
+        return False
+    every = config.predictive.predictor_control_every_updates
+    if every <= 0:
+        raise ValueError("predictor_control_every_updates must be positive")
+    event = ((update - config.predictive.predictor_control_start_updates)
+             // every)
+    return (event + 1) % _predictive_clap_interval(config) == 0
+
+
+def _predictive_clap_indices(mask: Tensor, limit: int, event: int,
+                             rank: int) -> Tensor:
+    """Select a bounded, deterministic rotating subset of one local mask."""
+    if mask.ndim != 1:
+        raise ValueError("predictive CLAP mask must be one-dimensional")
+    if limit <= 0:
+        raise ValueError("predictive CLAP sample limit must be positive")
+    if event < 0 or rank < 0:
+        raise ValueError("predictive CLAP event and rank must be non-negative")
+    available = mask.bool().nonzero(as_tuple=False).flatten()
+    if available.numel() == 0:
+        return torch.empty(0, device=mask.device, dtype=torch.long)
+    selected_count = min(limit, int(available.numel()))
+    start = (event * selected_count + rank * selected_count) % int(available.numel())
+    offsets = torch.arange(selected_count, device=mask.device)
+    return available.index_select(0, (start + offsets) % available.numel())
+
+
+def _sampled_predictive_clap_auxiliary(
+        waveform: Tensor, indices: Tensor, selected_gradients: Tensor,
+        objective_weight: float, expectation_scale: float) -> Tensor:
+    """Scatter a sampled CLAP batch mean back into its full waveform graph."""
+    if indices.ndim != 1 or indices.dtype != torch.long:
+        raise ValueError("predictive CLAP indices must be a one-dimensional long tensor")
+    expected = (int(indices.numel()), *waveform.shape[1:])
+    if tuple(selected_gradients.shape) != expected:
+        raise ValueError("predictive CLAP gradients must match selected waveforms")
+    auxiliary = torch.zeros_like(waveform)
+    if indices.numel() == 0:
+        return auxiliary
+    scale = objective_weight * expectation_scale / int(indices.numel())
+    return auxiliary.index_copy(
+        0, indices, selected_gradients.to(auxiliary) * scale)
+
+
 def _empty_predictive_control_components(zero: Tensor) -> dict[str, Tensor]:
     return {
         "predictor_midi_swap_pitch": zero,
@@ -369,6 +432,7 @@ def _predictive_control_objective(
     update: int, statistics: LatentStatistics, primary_total: Tensor,
     gradient_parameters: list[Tensor], swap_pitch: nn.Module | None,
     clap_objective: FrozenClapReconstructionObjective | None,
+    clap_due: bool = True, clap_rank: int = 0,
 ) -> PredictiveControlObjective:
     """Apply the same bounded MIDI/CLAP controls in predictor and rollout stages."""
     if config.predictive is None or config.latent_loss is None:
@@ -457,49 +521,63 @@ def _predictive_control_objective(
     clap_target_cosine = zero
     clap_source_cosine = zero
     clap_following = zero
-    if losses.clap_control > 0.0 or losses.clap_counterfactual > 0.0:
+    if clap_due and (losses.clap_control > 0.0
+                     or losses.clap_counterfactual > 0.0):
         if clap_objective is None:
             raise ValueError("predictive CLAP control requires a frozen CLAP objective")
+        interval = _predictive_clap_interval(config)
+        control_event = (
+            (update - config.predictive.predictor_control_start_updates)
+            // config.predictive.predictor_control_every_updates)
+        clap_event = (control_event + 1) // interval - 1
+        expectation_scale = config.train.grad_accum * interval
+        clap_health = torch.zeros(11, device=counterfactual.audio.device)
         if losses.clap_control > 0.0 and bool(midi_mask.any().item()):
-            midi_audio = counterfactual.audio[midi_mask]
+            midi_indices = _predictive_clap_indices(
+                midi_mask, config.loss.clap_batch_size, clap_event, clap_rank)
+            midi_audio = counterfactual.audio.index_select(0, midi_indices)
             valid = torch.full(
                 (midi_audio.shape[0],), midi_audio.shape[-1],
                 device=midi_audio.device, dtype=torch.long)
             preservation = clap_objective.waveform_gradients_to_embeddings(
-                midi_audio, counterfactual.source_clap[midi_mask],
-                counterfactual.source_clap[midi_mask], valid, margin=0.0)
+                midi_audio, counterfactual.source_clap.index_select(0, midi_indices),
+                counterfactual.source_clap.index_select(0, midi_indices),
+                valid, margin=0.0)
             midi_clap_loss = preservation.losses.mean()
             midi_clap_cosine = preservation.target_cosine.mean()
             health = _clap_health_vector(preservation.health, midi_audio.device)
-            clap_health = health if clap_health is None else _merge_clap_health(
-                clap_health, health)
+            clap_health = _merge_clap_health(clap_health, health)
             if not bool(preservation.health.skipped.item()):
-                requested = (preservation.gradients * losses.clap_control
-                             / midi_audio.shape[0])
+                requested = _sampled_predictive_clap_auxiliary(
+                    counterfactual.audio, midi_indices, preservation.gradients,
+                    losses.clap_control, expectation_scale)
                 clap_surrogate = (
                     clap_surrogate
-                    + (midi_audio.float() * requested.float()).sum())
+                    + (counterfactual.audio.float() * requested.float()).sum())
         if losses.clap_counterfactual > 0.0 and bool(timbre_mask.any().item()):
-            timbre_audio = counterfactual.audio[timbre_mask]
+            timbre_indices = _predictive_clap_indices(
+                timbre_mask, config.loss.clap_batch_size, clap_event, clap_rank)
+            timbre_audio = counterfactual.audio.index_select(0, timbre_indices)
             valid = torch.full(
                 (timbre_audio.shape[0],), timbre_audio.shape[-1],
                 device=timbre_audio.device, dtype=torch.long)
             clap_result = clap_objective.waveform_gradients_to_embeddings(
-                timbre_audio, counterfactual.target_clap[timbre_mask],
-                counterfactual.source_clap[timbre_mask], valid)
+                timbre_audio, counterfactual.target_clap.index_select(
+                    0, timbre_indices), counterfactual.source_clap.index_select(
+                    0, timbre_indices), valid)
             timbre_clap_loss = clap_result.losses.mean()
             clap_target_cosine = clap_result.target_cosine.mean()
             clap_source_cosine = clap_result.source_cosine.mean()
             clap_following = clap_result.following.float().mean()
             health = _clap_health_vector(clap_result.health, timbre_audio.device)
-            clap_health = health if clap_health is None else _merge_clap_health(
-                clap_health, health)
+            clap_health = _merge_clap_health(clap_health, health)
             if not bool(clap_result.health.skipped.item()):
-                requested = (clap_result.gradients * losses.clap_counterfactual
-                             / timbre_audio.shape[0])
+                requested = _sampled_predictive_clap_auxiliary(
+                    counterfactual.audio, timbre_indices, clap_result.gradients,
+                    losses.clap_counterfactual, expectation_scale)
                 clap_surrogate = (
                     clap_surrogate
-                    + (timbre_audio.float() * requested.float()).sum())
+                    + (counterfactual.audio.float() * requested.float()).sum())
     weighted_midi_clap = losses.clap_control * midi_clap_loss
     weighted_timbre_clap = losses.clap_counterfactual * timbre_clap_loss
     weighted_clap = weighted_midi_clap + weighted_timbre_clap
@@ -668,6 +746,7 @@ def predictive_stage_objective(
     stft: MultiResolutionSTFTLoss | None = None,
     swap_pitch: nn.Module | None = None,
     clap_objective: FrozenClapReconstructionObjective | None = None,
+    clap_evaluate: bool = True, clap_rank: int = 0,
 ) -> PredictiveStageObjective:
     """Compute one generator objective for any pre-GAN predictive stage."""
     stage = PredictiveStage(stage)
@@ -807,7 +886,10 @@ def predictive_stage_objective(
             return PredictiveStageObjective(primary_total, components)
         control = _predictive_control_objective(
             model, batch, config, update, statistics, primary_total,
-            list(model.predictor.parameters()), swap_pitch, clap_objective)
+            list(model.predictor.parameters()), swap_pitch, clap_objective,
+            clap_due=(clap_evaluate
+                      and _predictive_control_clap_due(config, update)),
+            clap_rank=clap_rank)
         components.update(control.components)
         return PredictiveStageObjective(
             primary_total + control.total, components,
@@ -877,7 +959,10 @@ def predictive_stage_objective(
         control = _predictive_control_objective(
             model, batch, config, update, statistics, primary_total,
             [parameter for parameter in model.parameters()
-             if parameter.requires_grad], swap_pitch, clap_objective)
+             if parameter.requires_grad], swap_pitch, clap_objective,
+            clap_due=(clap_evaluate
+                      and _predictive_control_clap_due(config, update)),
+            clap_rank=clap_rank)
         primary_total = primary_total + control.total
         components.update(control.components)
         diagnostics = control.diagnostic_tensors
@@ -2118,10 +2203,12 @@ def train_predictive(
                 config.train.lr, config.train.min_lr)
             for group in optimizer.param_groups:
                 group["lr"] = lr
+            clap_microbatch = accumulated == config.train.grad_accum - 1
             with torch.autocast("cuda", dtype=torch.float16):
                 objective = predictive_stage_objective(
                     unwrap(model), batch, config, stage, stage_update, stats,
-                    calibrated_weights, stft, swap_pitch, clap_objective)
+                    calibrated_weights, stft, swap_pitch, clap_objective,
+                    clap_evaluate=clap_microbatch, clap_rank=rank)
                 total = objective.total
                 if discriminator is not None:
                     assert objective.generated_audio is not None
@@ -2164,43 +2251,34 @@ def train_predictive(
                         print(json.dumps(warning, sort_keys=True), flush=True)
 
             clap_loss = total.new_zeros(())
-            if clap_objective is not None and objective.generated_audio is not None:
+            if (clap_microbatch and clap_objective is not None
+                    and objective.generated_audio is not None
+                    and _predictive_clap_due(config, stage_update)):
                 generated = objective.generated_audio
                 target = objective.target_audio
                 assert target is not None
+                clap_event = ((stage_update + 1)
+                              // _predictive_clap_interval(config) - 1)
+                reconstruction_indices = _predictive_clap_indices(
+                    torch.ones(generated.shape[0], device=device, dtype=torch.bool),
+                    config.loss.clap_batch_size, clap_event, rank)
+                full_generated = generated
+                generated = generated.index_select(0, reconstruction_indices)
+                target = target.index_select(0, reconstruction_indices)
                 valid = torch.full(
                     (generated.shape[0],), generated.shape[-1], device=device,
                     dtype=torch.long)
                 clap_result = clap_objective.waveform_gradients(generated, target, valid)
-                global_clap_health = _distributed_clap_health(
-                    clap_result.health, device)
-                clap_health_cumulative = _merge_clap_health(
-                    clap_health_cumulative, global_clap_health)
-                clap_health_interval = _merge_clap_health(
-                    clap_health_interval, global_clap_health)
-                if int(global_clap_health[1].item()):
-                    clap_warning_events += 1
-                    pipeline_health = _tensor_health_metrics(
-                        objective.diagnostic_tensors or {"decoder_audio": generated},
-                        distributed=True)
-                    if rank == 0 and (clap_warning_events <= 10
-                                      or clap_warning_events % 100 == 0):
-                        warning = _clap_health_metrics(
-                            global_clap_health, "clap_nonfinite_call")
-                        warning.update({
-                            "event": "clap_nonfinite_embedding_skipped",
-                            "stage": stage.value,
-                            "stage_update": stage_update,
-                            "warning_event": clap_warning_events,
-                        })
-                        warning.update(pipeline_health)
-                        print(json.dumps(warning, sort_keys=True), flush=True)
+                local_clap_health = _clap_health_vector(clap_result.health, device)
                 clap_loss = clap_result.losses.mean()
                 reconstruction_auxiliary = (
-                    torch.zeros_like(generated) if bool(clap_result.health.skipped.item())
-                    else (clap_result.gradients * config.latent_loss.clap_control
-                          / generated.shape[0]))
-                waveforms = [generated]
+                    torch.zeros_like(full_generated)
+                    if bool(clap_result.health.skipped.item()) else
+                    _sampled_predictive_clap_auxiliary(
+                        full_generated, reconstruction_indices,
+                        clap_result.gradients, config.latent_loss.clap_control,
+                        config.train.grad_accum * config.loss.clap_every_updates))
+                waveforms = [full_generated]
                 requested_auxiliaries = [reconstruction_auxiliary]
                 counterfactual_loss = total.new_zeros(())
                 diagnostics = objective.diagnostic_tensors or {}
@@ -2209,22 +2287,24 @@ def train_predictive(
                         and "counterfactual_audio" in diagnostics):
                     counterfactual = diagnostics["counterfactual_audio"]
                     timbre_mask = diagnostics["counterfactual_timbre_mask"].bool()
-                    if bool(timbre_mask.any().item()):
-                        timbre_audio = counterfactual[timbre_mask]
+                    timbre_indices = _predictive_clap_indices(
+                        timbre_mask, config.loss.clap_batch_size,
+                        clap_event, rank)
+                    if timbre_indices.numel():
+                        timbre_audio = counterfactual.index_select(0, timbre_indices)
                         timbre_valid = torch.full(
                             (timbre_audio.shape[0],), timbre_audio.shape[-1],
                             device=device, dtype=torch.long)
                         control_result = clap_objective.waveform_gradients_to_embeddings(
                             timbre_audio,
-                            diagnostics["counterfactual_target_clap"][timbre_mask],
-                            diagnostics["counterfactual_source_clap"][timbre_mask],
+                            diagnostics["counterfactual_target_clap"].index_select(
+                                0, timbre_indices),
+                            diagnostics["counterfactual_source_clap"].index_select(
+                                0, timbre_indices),
                             timbre_valid)
-                        global_control_health = _distributed_clap_health(
-                            control_result.health, device)
-                        clap_health_cumulative = _merge_clap_health(
-                            clap_health_cumulative, global_control_health)
-                        clap_health_interval = _merge_clap_health(
-                            clap_health_interval, global_control_health)
+                        local_clap_health = _merge_clap_health(
+                            local_clap_health,
+                            _clap_health_vector(control_result.health, device))
                         counterfactual_loss = control_result.losses.mean()
                         objective.components["clap_counterfactual"] = counterfactual_loss
                         objective.components["clap_counterfactual_following"] = (
@@ -2235,12 +2315,21 @@ def train_predictive(
                             control_result.source_cosine.mean())
                         counterfactual_auxiliary = torch.zeros_like(counterfactual)
                         if not bool(control_result.health.skipped.item()):
-                            counterfactual_auxiliary[timbre_mask] = (
-                                control_result.gradients
-                                * config.latent_loss.clap_counterfactual
-                                / timbre_audio.shape[0])
+                            counterfactual_auxiliary = (
+                                _sampled_predictive_clap_auxiliary(
+                                    counterfactual, timbre_indices,
+                                    control_result.gradients,
+                                    config.latent_loss.clap_counterfactual,
+                                    config.train.grad_accum
+                                    * config.loss.clap_every_updates))
                         waveforms.append(counterfactual)
                         requested_auxiliaries.append(counterfactual_auxiliary)
+                global_clap_health = _distributed_clap_health_vector(
+                    local_clap_health)
+                clap_health_cumulative = _merge_clap_health(
+                    clap_health_cumulative, global_clap_health)
+                clap_health_interval = _merge_clap_health(
+                    clap_health_interval, global_clap_health)
                 capped = _predictive_clap_auxiliaries(
                     total, tuple(waveforms), tuple(requested_auxiliaries),
                     config.predictive.clap_gradient_fraction_max)
