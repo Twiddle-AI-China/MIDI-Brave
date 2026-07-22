@@ -142,7 +142,7 @@ train:
   pitch_adversary_start: 5000
   pitch_adversary_ramp: 5000
   grad_clip: 1.0
-  checkpoint_every: 2000
+  checkpoint_every: 5000
   log_every: 20
   output_dir: /data/midibrave-v3/runs
   run_name: pad50_scratch_rollout_corrective_v100_8gpu
