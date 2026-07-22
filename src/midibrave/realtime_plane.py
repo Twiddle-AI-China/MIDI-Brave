@@ -16,8 +16,8 @@ class TimbrePlane:
     @classmethod
     def fit(cls, seed_clap: np.ndarray) -> "TimbrePlane":
         values = np.asarray(seed_clap, dtype=np.float64)
-        if values.ndim != 2 or values.shape[0] < 3 or values.shape[1] < 2:
-            raise ValueError("seed_clap must have at least three rows and two dimensions")
+        if values.ndim != 2 or values.shape[0] < 3 or values.shape[1] != 512:
+            raise ValueError("seed_clap must have at least three rows and 512 dimensions")
         if not np.isfinite(values).all():
             raise ValueError("seed_clap must be finite")
         norms = np.linalg.norm(values, axis=1, keepdims=True)

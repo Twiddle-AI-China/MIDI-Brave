@@ -13,10 +13,20 @@ def bank() -> np.ndarray:
 
 
 def test_pca_plane_is_deterministic_normalized_and_bounded():
-    first = TimbrePlane.fit(bank())
+    seed = bank()
+    first = TimbrePlane.fit(seed)
     second = TimbrePlane.fit(bank())
     np.testing.assert_allclose(first.components, second.components)
     np.testing.assert_allclose(first.points, second.points)
+    for component in first.components:
+        pivot = int(np.argmax(np.abs(component)))
+        assert component[pivot] > 0.0
+    normalized = seed.astype(np.float64)
+    normalized /= np.linalg.norm(normalized, axis=1, keepdims=True)
+    np.testing.assert_allclose(first.mean, normalized.mean(axis=0))
+    coordinates = (normalized - first.mean) @ first.components.T
+    np.testing.assert_allclose(first.low, np.quantile(coordinates, 0.02, axis=0))
+    np.testing.assert_allclose(first.high, np.quantile(coordinates, 0.98, axis=0))
     for x, y in [(-1, -1), (0, 0), (1, 1), (-0.4, 0.7)]:
         mapped = first.map_xy(x, y)
         assert mapped.shape == (512,)
@@ -29,6 +39,8 @@ def test_pca_plane_is_deterministic_normalized_and_bounded():
 def test_pca_plane_rejects_invalid_seed_banks():
     with pytest.raises(ValueError, match="seed_clap"):
         TimbrePlane.fit(np.zeros((2, 512), dtype=np.float32))
+    with pytest.raises(ValueError, match="seed_clap"):
+        TimbrePlane.fit(bank()[:, :511])
     broken = bank()
     broken[0, 0] = np.nan
     with pytest.raises(ValueError, match="finite"):
