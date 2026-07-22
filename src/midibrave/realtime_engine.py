@@ -70,6 +70,7 @@ class RuntimeSession:
         self.device = device
         self.contract = contract
         self.lock = threading.Lock()
+        self.operation_lock = threading.Lock()
         self.runtime_lock = (
             runtime_lock if runtime_lock is not None else threading.Lock()
         )
@@ -97,18 +98,19 @@ class RuntimeSession:
 
     def start(self, *, x: float, y: float, note: int,
               velocity: float, seed: int) -> None:
-        control = self._control(0, x, y, note, velocity)
-        with self.lock:
-            self.control = control
-        anchor = self._anchor()
-        with self.runtime_lock:
-            history = self.runtime.initial_state(
-                anchor.unsqueeze(0), int(seed), 8)
-        if not bool(torch.isfinite(history).all()):
-            raise RuntimeError("runtime initial history is non-finite")
-        with self.lock:
-            self.current_clap = anchor
-            self.history = history
+        with self.operation_lock:
+            control = self._control(0, x, y, note, velocity)
+            with self.lock:
+                self.control = control
+            anchor = self._anchor()
+            with self.runtime_lock:
+                history = self.runtime.initial_state(
+                    anchor.unsqueeze(0), int(seed), 8)
+            if not bool(torch.isfinite(history).all()):
+                raise RuntimeError("runtime initial history is non-finite")
+            with self.lock:
+                self.current_clap = anchor
+                self.history = history
 
     def update(self, *, seq: int, x: float, y: float, note: int,
                velocity: float) -> bool:
@@ -120,67 +122,73 @@ class RuntimeSession:
             return True
 
     def reseed(self, seed: int) -> None:
-        anchor = self._anchor()
-        with self.runtime_lock:
-            history = self.runtime.initial_state(
-                anchor.unsqueeze(0), int(seed), 8)
-        if not bool(torch.isfinite(history).all()):
-            raise RuntimeError("runtime initial history is non-finite")
-        with self.lock:
-            self.current_clap = anchor
-            self.history = history
+        with self.operation_lock:
+            anchor = self._anchor()
+            with self.runtime_lock:
+                history = self.runtime.initial_state(
+                    anchor.unsqueeze(0), int(seed), 8)
+            if not bool(torch.isfinite(history).all()):
+                raise RuntimeError("runtime initial history is non-finite")
+            with self.lock:
+                self.current_clap = anchor
+                self.history = history
 
     def snapshot(self) -> Control:
         with self.lock:
             return self.control
 
     def render_block(self) -> tuple[np.ndarray, float]:
-        with self.lock:
-            control = self.control
-            history = self.history
-            current = self.current_clap
-        if history is None or current is None:
-            raise RuntimeError("runtime session has not started")
-        target = torch.from_numpy(self.plane.map_xy(control.x, control.y)).to(
-            self.device)
-        horizon = int(self.contract["horizon_frames"])
-        stride = int(self.contract["stride_frames"])
-        alpha = torch.linspace(
-            1.0 / horizon,
-            1.0,
-            horizon,
-            device=self.device,
-        )
-        trajectory = current[:, None] * (1.0 - alpha) + target[:, None] * alpha
-        trajectory = F.normalize(trajectory, dim=0).unsqueeze(0)
-        note = torch.tensor([control.note], device=self.device, dtype=torch.long)
-        velocity = torch.tensor(
-            [control.velocity],
-            device=self.device,
-            dtype=torch.float32,
-        )
-        started = time.perf_counter()
-        with torch.inference_mode():
-            with self.runtime_lock:
-                audio, new_history = self.runtime.step(
-                    history,
-                    trajectory,
-                    note,
-                    velocity,
-                )
-            mono = audio.float().cpu().numpy()
-        render_ms = (time.perf_counter() - started) * 1000.0
-        expected = (1, 1, int(self.contract["block_samples"]))
-        if tuple(mono.shape) != expected:
-            raise RuntimeError(f"runtime emitted {mono.shape}, expected {expected}")
-        if not np.isfinite(mono).all() or not bool(
-                torch.isfinite(new_history).all()):
-            raise RuntimeError("runtime emitted non-finite audio or history")
-        with self.lock:
-            self.history = new_history
-            self.current_clap = trajectory[0, :, stride - 1]
-        stereo = np.repeat(mono[0, 0, :, None], 2, axis=1)
-        return stereo.astype("<f4", copy=False), render_ms
+        with self.operation_lock:
+            with self.lock:
+                control = self.control
+                history = self.history
+                current = self.current_clap
+            if history is None or current is None:
+                raise RuntimeError("runtime session has not started")
+            target = torch.from_numpy(self.plane.map_xy(control.x, control.y)).to(
+                self.device)
+            horizon = int(self.contract["horizon_frames"])
+            stride = int(self.contract["stride_frames"])
+            alpha = torch.linspace(
+                1.0 / horizon,
+                1.0,
+                horizon,
+                device=self.device,
+            )
+            trajectory = (
+                current[:, None] * (1.0 - alpha) + target[:, None] * alpha
+            )
+            trajectory = F.normalize(trajectory, dim=0).unsqueeze(0)
+            note = torch.tensor(
+                [control.note], device=self.device, dtype=torch.long)
+            velocity = torch.tensor(
+                [control.velocity],
+                device=self.device,
+                dtype=torch.float32,
+            )
+            started = time.perf_counter()
+            with torch.inference_mode():
+                with self.runtime_lock:
+                    audio, new_history = self.runtime.step(
+                        history,
+                        trajectory,
+                        note,
+                        velocity,
+                    )
+                mono = audio.float().cpu().numpy()
+            render_ms = (time.perf_counter() - started) * 1000.0
+            expected = (1, 1, int(self.contract["block_samples"]))
+            if tuple(mono.shape) != expected:
+                raise RuntimeError(
+                    f"runtime emitted {mono.shape}, expected {expected}")
+            if not np.isfinite(mono).all() or not bool(
+                    torch.isfinite(new_history).all()):
+                raise RuntimeError("runtime emitted non-finite audio or history")
+            with self.lock:
+                self.history = new_history
+                self.current_clap = trajectory[0, :, stride - 1]
+            stereo = np.repeat(mono[0, 0, :, None], 2, axis=1)
+            return stereo.astype("<f4", copy=False), render_ms
 
 
 class RealtimeEngine:

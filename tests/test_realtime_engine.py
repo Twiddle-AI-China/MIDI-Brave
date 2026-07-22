@@ -119,6 +119,60 @@ class NonFiniteRuntime(FakeRuntime):
         return audio, new_history
 
 
+class DeferredAudio:
+    def __init__(self, value, entered, release):
+        self.value = value
+        self.entered = entered
+        self.release = release
+
+    def float(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        self.entered.set()
+        if not self.release.wait(timeout=5.0):
+            raise RuntimeError("timed out waiting to convert audio")
+        return self.value.numpy()
+
+
+class TransactionalFakeRuntime(FakeRuntime):
+    def __init__(self):
+        super().__init__()
+        self.first_step_entered = threading.Event()
+        self.first_step_release = threading.Event()
+        self.audio_conversion_entered = threading.Event()
+        self.audio_conversion_release = threading.Event()
+        self.second_step_entered = threading.Event()
+        self.reseed_initial_entered = threading.Event()
+
+    def initial_state(self, clap, random_seed, top_k=8):
+        self.initial_calls += 1
+        if self.initial_calls > 1:
+            self.reseed_initial_entered.set()
+        return torch.zeros(1, 16, 16, device=clap.device)
+
+    def step(self, history, clap, note, velocity):
+        self.step_calls += 1
+        self.histories.append(history.detach().clone())
+        audio = torch.full((1, 1, 512), 0.05, device=history.device)
+        new_history = history + 1
+        if self.step_calls == 1:
+            self.first_step_entered.set()
+            if not self.first_step_release.wait(timeout=5.0):
+                raise RuntimeError("timed out waiting to release first step")
+            audio = DeferredAudio(
+                audio,
+                self.audio_conversion_entered,
+                self.audio_conversion_release,
+            )
+        else:
+            self.second_step_entered.set()
+        return audio, new_history
+
+
 class MinimalScriptRuntime(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -415,3 +469,57 @@ def test_reseed_preserves_latest_control_and_sequence():
     assert not session.update(seq=8, x=0.0, y=0.0, note=60, velocity=0.8)
     assert session.update(seq=9, x=0.1, y=0.2, note=75, velocity=0.4)
     assert session.snapshot().seq == 9
+
+
+def test_same_session_render_blocks_commit_history_transactionally():
+    runtime = TransactionalFakeRuntime()
+    session = RuntimeSession(runtime, plane(), torch.device("cpu"), contract())
+    session.start(x=0.0, y=0.0, note=60, velocity=0.8, seed=3)
+    second_started = threading.Event()
+
+    def second_render():
+        second_started.set()
+        return session.render_block()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(session.render_block)
+        assert runtime.first_step_entered.wait(timeout=2.0)
+        second = executor.submit(second_render)
+        assert second_started.wait(timeout=2.0)
+        try:
+            runtime.first_step_release.set()
+            assert runtime.audio_conversion_entered.wait(timeout=2.0)
+            runtime.second_step_entered.wait(timeout=0.25)
+        finally:
+            runtime.first_step_release.set()
+            runtime.audio_conversion_release.set()
+        first.result(timeout=2.0)
+        second.result(timeout=2.0)
+
+    torch.testing.assert_close(runtime.histories[0], torch.zeros(1, 16, 16))
+    torch.testing.assert_close(runtime.histories[1], torch.ones(1, 16, 16))
+    torch.testing.assert_close(session.history, torch.full((1, 16, 16), 2.0))
+
+
+def test_render_then_reseed_commits_reseed_history_last():
+    runtime = TransactionalFakeRuntime()
+    session = RuntimeSession(runtime, plane(), torch.device("cpu"), contract())
+    session.start(x=0.0, y=0.0, note=60, velocity=0.8, seed=3)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        render = executor.submit(session.render_block)
+        assert runtime.first_step_entered.wait(timeout=2.0)
+        reseed = executor.submit(session.reseed, 9)
+        try:
+            runtime.first_step_release.set()
+            assert runtime.audio_conversion_entered.wait(timeout=2.0)
+            reseed_entered_early = runtime.reseed_initial_entered.wait(timeout=0.25)
+            if reseed_entered_early:
+                reseed.result(timeout=2.0)
+        finally:
+            runtime.first_step_release.set()
+            runtime.audio_conversion_release.set()
+        render.result(timeout=2.0)
+        reseed.result(timeout=2.0)
+
+    torch.testing.assert_close(session.history, torch.zeros(1, 16, 16))
