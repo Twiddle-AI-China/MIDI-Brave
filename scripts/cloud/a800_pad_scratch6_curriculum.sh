@@ -70,18 +70,13 @@ cleanup() {
 trap cleanup EXIT
 
 find_clap_checkpoint() {
-  local requested=${MIDIBRAVE_CLAP_CHECKPOINT:-$ROOT/models/music_audioset_epoch_15_esc_90.14.pt}
+  local requested=${MIDIBRAVE_CLAP_CHECKPOINT:-$ROOT/model_weights/laion-clap/music_audioset_epoch_15_esc_90.14.pt}
   if [[ -f "$requested" ]]; then
     printf '%s\n' "$requested"
     return
   fi
-  local found
-  found=$(find "$ROOT" -type f -name 'music_audioset_epoch_15_esc_90.14.pt' -print -quit 2>/dev/null || true)
-  [[ -n "$found" ]] || {
-    echo "CLAP checkpoint not found; set MIDIBRAVE_CLAP_CHECKPOINT" >&2
-    return 1
-  }
-  printf '%s\n' "$found"
+  echo "CLAP checkpoint not found: $requested; set MIDIBRAVE_CLAP_CHECKPOINT" >&2
+  return 1
 }
 CLAP_CHECKPOINT=$(find_clap_checkpoint)
 
@@ -101,25 +96,18 @@ with manifest.open(encoding="utf-8") as handle:
 def preset(row):
     return row.get("preset_id") or row.get("timbre_id") or row.get("instrument_id")
 
-presets = {preset(row) for row in rows if preset(row)}
-if len(presets) != 50:
-    raise SystemExit(f"fixed Pad manifest has {len(presets)} presets, expected 50")
-missing = []
-notes = {value: set() for value in presets}
+presets = {}
 for row in rows:
     current_preset = preset(row)
-    relative = Path(str(row["audio_path"]))
-    path = relative if relative.is_absolute() else audio_root / relative
-    if not path.is_file():
-        missing.append(str(path))
-    notes[current_preset].add(int(row["midi_note"]))
-if missing:
-    raise SystemExit(f"manifest audio is missing ({len(missing)} files), first={missing[0]}")
-bad_notes = {key: len(value) for key, value in notes.items() if len(value) < 4}
-if bad_notes:
-    raise SystemExit(f"Pad presets need at least four MIDI notes: {bad_notes}")
-print(json.dumps({"manifest": str(manifest), "records": len(rows), "presets": 50},
-                 sort_keys=True))
+    presets.setdefault(current_preset, []).append(row)
+if len(rows) != 3600 or len(presets) != 50:
+    raise SystemExit(
+        f"fixed Pad manifest is {len(rows)} records/{len(presets)} presets, expected 3600/50")
+bad = {key: len(value) for key, value in presets.items() if len(value) != 72}
+if bad:
+    raise SystemExit(f"Pad manifest must contain 72 MIDI configurations per preset: {bad}")
+print(json.dumps({"manifest": str(manifest), "records": 3600,
+                  "presets": 50, "records_per_preset": 72}, sort_keys=True))
 PY
 
 # Runtime copies keep the checked-in templates immutable while allowing the
@@ -166,23 +154,34 @@ for stage in audio clap pitch; do
     exit 1
   fi
 done
-"$PYTHON" - "$MANIFEST" "$CACHE" <<'PY'
+"$PYTHON" - "$DATA_ROOT" "$MANIFEST" "$CACHE" <<'PY'
 import sys
 from pathlib import Path
 from midibrave.data import load_manifest
 
-manifest, cache = Path(sys.argv[1]), Path(sys.argv[2])
-missing = []
+audio_root, manifest, cache = map(Path, sys.argv[1:])
+by_preset = {}
 for record in load_manifest(manifest):
-    for stage, suffix in (("audio", ".npz"), ("clap", ".npy"), ("pitch", ".npz")):
-        path = cache / stage / f"{record.cache_id}{suffix}"
-        if not path.is_file():
-            missing.append(str(path))
+    by_preset.setdefault(record.preset_id, []).append(record)
+missing = []
+checked = 0
+for records in by_preset.values():
+    records.sort(key=lambda record: record.sample_id)
+    for record in (records[0], records[-1]):
+        raw = Path(record.audio_path)
+        raw = raw if raw.is_absolute() else audio_root / raw
+        paths = [raw]
+        paths.extend(
+            cache / stage / f"{record.cache_id}{suffix}"
+            for stage, suffix in (("audio", ".npz"), ("clap", ".npy"),
+                                  ("pitch", ".npz")))
+        missing.extend(str(path) for path in paths if not path.is_file())
+        checked += 1
 if missing:
-    raise SystemExit(f"shared feature cache misses {len(missing)} Pad artifacts; first={missing[0]}")
-print(f"shared feature cache verified for {sum(1 for _ in load_manifest(manifest))} records")
+    raise SystemExit(
+        f"sampled Pad audio/cache validation misses {len(missing)} artifacts; first={missing[0]}")
+print(f"sampled Pad audio/cache verified: {checked} endpoint records across {len(by_preset)} presets")
 PY
-"$PYTHON" -m midibrave.cli validate --config "$RECON_CONFIG"
 
 torchrun6() {
   if [[ -x "$TORCHRUN" ]]; then
@@ -192,50 +191,20 @@ torchrun6() {
   fi
 }
 
-sweep_rave_batch() {
-  local winner_file=$RUN_ROOT/rave-batch-sweep/winner.txt
-  local results=$RUN_ROOT/rave-batch-sweep/results.tsv
-  if [[ -s "$winner_file" ]]; then
-    cat "$winner_file"
-    return
-  fi
-  mkdir -p "$RUN_ROOT/rave-batch-sweep"
-  : > "$results"
-  for batch in 32 64 96 128; do
-    local run_name=pad50_scratch_rave_sweep_b${batch}
-    local sweep_config=$CONFIG_ROOT/${run_name}.yaml
-    "$PYTHON" - "$RECON_CONFIG" "$sweep_config" "$run_name" "$batch" <<'PY'
-import sys
-from pathlib import Path
-import yaml
-
-source, destination = map(Path, sys.argv[1:3])
-raw = yaml.safe_load(source.read_text(encoding="utf-8"))
-raw["train"]["run_name"] = sys.argv[3]
-raw["train"]["batch_per_gpu"] = int(sys.argv[4])
-raw["train"]["rave_steps"] = 20
-raw["train"]["log_every"] = 20
-raw["train"]["checkpoint_every"] = 20
-destination.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-PY
-    local run_dir=$RUN_ROOT/runs/$run_name/rave
-    local log=$LOG_ROOT/rave-sweep-b${batch}.out
-    local started ended elapsed_ms
-    started=$(date +%s%N)
-    if torchrun6 -m midibrave.trainer --config "$sweep_config" --stage rave \
-        --max-steps 20 --batch-per-gpu "$batch" > "$log" 2>&1; then
-      ended=$(date +%s%N)
-      elapsed_ms=$(( (ended - started) / 1000000 ))
-      local score
-      score=$("$PYTHON" - "$run_dir" "$elapsed_ms" "$batch" "$WORLD_SIZE" <<'PY'
+tensorboard_throughput() {
+  local run_dir=$1 elapsed_ms=$2 batch=$3
+  "$PYTHON" - "$run_dir" "$elapsed_ms" "$batch" "$WORLD_SIZE" <<'PY'
 import sys
 from pathlib import Path
 
-run_dir, elapsed_ms, batch, world = Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+run_dir = Path(sys.argv[1])
+elapsed_ms, batch, world = map(int, sys.argv[2:])
 score = None
 try:
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-    for event_file in sorted(run_dir.glob("events.out.tfevents.*"), reverse=True):
+    event_files = sorted(run_dir.glob("events.out.tfevents.*"),
+                         key=lambda path: path.stat().st_mtime, reverse=True)
+    for event_file in event_files:
         accumulator = EventAccumulator(str(event_file), size_guidance={"scalars": 0})
         accumulator.Reload()
         values = accumulator.Scalars("train/samples_per_second")
@@ -248,18 +217,71 @@ if score is None:
     score = 20.0 * batch * world * 1000.0 / max(1, elapsed_ms)
 print(f"{score:.6f}")
 PY
-)
-      printf '%s\t%s\t%s\n' "$batch" "$score" "$elapsed_ms" | tee -a "$results" >&2
+}
+
+sweep_stage_batch() {
+  local label=$1 config=$2 stage=$3 warm_start=$4
+  shift 4
+  local candidates=("$@")
+  local sweep_root=$RUN_ROOT/${label}-batch-sweep
+  local winner_file=$sweep_root/winner.txt
+  local results=$sweep_root/results.tsv
+  if [[ -s "$winner_file" ]]; then
+    cat "$winner_file"
+    return
+  fi
+  mkdir -p "$sweep_root"
+  : > "$results"
+  for batch in "${candidates[@]}"; do
+    local run_name=pad50_scratch_${label}_sweep_b${batch}
+    local sweep_config=$CONFIG_ROOT/${run_name}.yaml
+    "$PYTHON" - "$config" "$sweep_config" "$run_name" "$batch" "$stage" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+source, destination = map(Path, sys.argv[1:3])
+raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+raw["train"]["run_name"] = sys.argv[3]
+raw["train"]["batch_per_gpu"] = int(sys.argv[4])
+raw["train"][f"{sys.argv[5]}_steps"] = 20
+raw["train"]["log_every"] = 20
+raw["train"]["checkpoint_every"] = 20
+destination.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+PY
+    local run_dir=$RUN_ROOT/runs/$run_name/$stage
+    local log=$LOG_ROOT/${label}-sweep-b${batch}.out
+    local start_args=()
+    if [[ -n "$warm_start" ]]; then
+      [[ -f "$warm_start" ]] || {
+        echo "missing sweep warm start: $warm_start" >&2
+        return 1
+      }
+      start_args=(--warm-start "$warm_start")
+    fi
+    local started ended elapsed_ms
+    started=$(date +%s%N)
+    if torchrun6 -m midibrave.trainer --config "$sweep_config" --stage "$stage" \
+        --max-steps 20 --batch-per-gpu "$batch" "${start_args[@]}" > "$log" 2>&1; then
+      ended=$(date +%s%N)
+      elapsed_ms=$(( (ended - started) / 1000000 ))
+      local score
+      score=$(tensorboard_throughput "$run_dir" "$elapsed_ms" "$batch")
+      printf '%s\t%s\tOK\t%s\n' "$batch" "$score" "$elapsed_ms" \
+        | tee -a "$results" >&2
     elif grep -Eqi 'CUDA.*out of memory|out of memory|CUBLAS_STATUS_ALLOC_FAILED' "$log"; then
-      printf '%s\tOOM\t0\n' "$batch" | tee -a "$results" >&2
+      printf '%s\t0\tOOM\t0\n' "$batch" | tee -a "$results" >&2
     else
-      echo "RAVE batch sweep failed for batch=$batch; inspect $log" >&2
-      return 1
+      printf '%s\t0\tFAIL\t0\n' "$batch" | tee -a "$results" >&2
+      echo "$label batch sweep failed for batch=$batch; continuing; inspect $log" >&2
     fi
   done
   local winner
-  winner=$(awk '$2 != "OOM" {print $1, $2}' "$results" | sort -k2,2gr | head -n 1 | awk '{print $1}')
-  [[ -n "$winner" ]] || { echo "all RAVE batch candidates OOM" >&2; return 1; }
+  winner=$(awk '$3 == "OK" && $2 + 0 > best {best=$2 + 0; winner=$1} END {print winner}' "$results")
+  [[ -n "$winner" ]] || {
+    echo "no successful $label batch candidate" >&2
+    return 1
+  }
   printf '%s\n' "$winner" > "$winner_file"
   printf '%s\n' "$winner"
 }
@@ -302,8 +324,10 @@ RAVE_FINAL=$(checkpoint_path pad50_scratch_rave_full rave "$RAVE_FULL_STEPS")
 PREDICTOR_FINAL=$(checkpoint_path pad50_scratch_predictor predictor "$PREDICTOR_STEPS")
 ROLLOUT_FINAL=$(checkpoint_path pad50_scratch_rollout rollout "$ROLLOUT_STEPS")
 
-# Only this first call may initialize randomly.
-RAVE_BATCH=$(sweep_rave_batch)
+# Only the sweep candidates and this first formal stage initialize randomly.
+# Use the full-control graph for sizing: reconstruction-only batches do not
+# include the counterfactual decoder, analytic pitch, or CLAP waveform graph.
+RAVE_BATCH=$(sweep_stage_batch rave-full "$FULL_CONFIG" rave "" 16 32 64 96)
 echo "=== RAVE batch sweep winner: $RAVE_BATCH per GPU ==="
 run_stage "$RECON_CONFIG" rave pad50_scratch_rave_reconstruction \
   "$RAVE_RECON_STEPS" "" "$RAVE_BATCH"
@@ -343,12 +367,20 @@ if [[ ! -f "$SEED_BANK" ]]; then
     --checkpoint-hash "$rave_hash" --output "$SEED_BANK"
 fi
 
-# The predictor stage creates CALIBRATION on rank zero before its first update.
+# The first predictor sweep candidate creates CALIBRATION on rank zero before
+# its first update; all later candidates and the formal run reuse that artifact.
+PREDICTOR_BATCH=$(sweep_stage_batch predictor "$PREDICTOR_CONFIG" predictor \
+  "$RAVE_FINAL" 32 64 96 128)
+echo "=== predictor batch sweep winner: $PREDICTOR_BATCH per GPU ==="
 run_stage "$PREDICTOR_CONFIG" predictor pad50_scratch_predictor \
-  "$PREDICTOR_STEPS" "$RAVE_FINAL"
+  "$PREDICTOR_STEPS" "$RAVE_FINAL" "$PREDICTOR_BATCH"
 [[ -f "$CALIBRATION" ]] || { echo "missing predictive calibration: $CALIBRATION" >&2; exit 1; }
+
+ROLLOUT_BATCH=$(sweep_stage_batch rollout "$ROLLOUT_CONFIG" rollout \
+  "$PREDICTOR_FINAL" 8 16 24 32)
+echo "=== rollout batch sweep winner: $ROLLOUT_BATCH per GPU ==="
 run_stage "$ROLLOUT_CONFIG" rollout pad50_scratch_rollout \
-  "$ROLLOUT_STEPS" "$PREDICTOR_FINAL"
+  "$ROLLOUT_STEPS" "$PREDICTOR_FINAL" "$ROLLOUT_BATCH"
 
 cat <<EOF
 === scratch Pad curriculum complete ===
