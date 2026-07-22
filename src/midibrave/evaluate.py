@@ -281,7 +281,8 @@ def _predictive_control_partners(records: list[Any], source: Any) -> tuple[Any, 
 
 @torch.no_grad()
 def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str,
-                        sequences: int = 8, device_name: str = "cuda") -> dict[str, Any]:
+                        sequences: int = 8, device_name: str = "cuda",
+                        examples: int = 8) -> dict[str, Any]:
     """Evaluate true cached continuations for 1/8/32/128 rolling steps."""
     from .trainer import load_predictive_statistics
 
@@ -329,6 +330,12 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
     control_nonfinite_count = 0
     reports = []
     seed_rows = []
+    destination = Path(output_path)
+    destination.mkdir(parents=True, exist_ok=True)
+    audition_root = destination / "examples"
+    audition_rows: list[dict[str, Any]] = []
+    if examples > 0:
+        audition_root.mkdir(parents=True, exist_ok=True)
     for record in records:
         cache_path = Path(config.data.cache_root) / "rave" / f"{record.cache_id}.npz"
         if not cache_path.is_file():
@@ -509,6 +516,65 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
             "path_progress": [float(value) for value in progress.cpu()],
             "seed_washout_ratio": float(seed_washout_ratio.cpu()),
         })
+        if len(audition_rows) < examples:
+            audition_frames = max(control_frames, 512)
+            audition_samples = audition_frames * p.samples_per_latent
+            source_rollout, source_render = _fixed_predictive_control_rollout(
+                model, history, source_clap, note, velocity,
+                audition_frames, p.stride_frames, path_seed[:1])
+            _, midi_render = _fixed_predictive_control_rollout(
+                model, history, source_clap, midi_note, velocity,
+                audition_frames, p.stride_frames, path_seed[:1])
+            _, timbre_render = _fixed_predictive_control_rollout(
+                model, history, target_clap_tensor, note, velocity,
+                audition_frames, p.stride_frames, path_seed[:1])
+
+            def reference_segment(item: Any) -> np.ndarray:
+                value = load_audio(
+                    record_audio_path(item, roots), config.data.sample_rate)
+                segment = value[future_start:future_start + audition_samples]
+                if len(segment) < audition_samples:
+                    segment = np.pad(segment, (0, audition_samples - len(segment)))
+                return segment.astype(np.float32, copy=False)
+
+            stem = f"{len(audition_rows):02d}-{record.sample_id}"
+            waveforms = {
+                "source-reference": reference_segment(record),
+                "source-rollout": source_render[0, 0].float().cpu().numpy(),
+                "midi-reference": reference_segment(midi_record),
+                "midi-swap": midi_render[0, 0].float().cpu().numpy(),
+                "timbre-reference": reference_segment(timbre_record),
+                "timbre-direct": timbre_render[0, 0].float().cpu().numpy(),
+            }
+            tracks = []
+            labels = {
+                "source-reference": "原始延续",
+                "source-rollout": "模型延续",
+                "midi-reference": "目标音高真值",
+                "midi-swap": "MIDI 改音高",
+                "timbre-reference": "目标音色真值",
+                "timbre-direct": "直接 CLAP 音色",
+            }
+            for kind, waveform in waveforms.items():
+                filename = f"{stem}-{kind}.wav"
+                sf.write(audition_root / filename, waveform,
+                         config.data.sample_rate, subtype="FLOAT")
+                tracks.append({
+                    "kind": kind, "label": labels[kind],
+                    "file": f"examples/{filename}",
+                })
+            audition_rows.append({
+                "index": len(audition_rows),
+                "source_id": record.sample_id,
+                "source_preset": record.preset_id,
+                "source_note": int(record.midi_note),
+                "midi_target_id": midi_record.sample_id,
+                "midi_target_note": int(midi_record.midi_note),
+                "timbre_target_id": timbre_record.sample_id,
+                "timbre_target_preset": timbre_record.preset_id,
+                "duration_seconds": audition_samples / config.data.sample_rate,
+                "tracks": tracks,
+            })
         reports.append(report)
         seed_rows.append({
             "sample_id": record.sample_id,
@@ -564,12 +630,18 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
                 "late/early normalized latent distance must decrease"),
         },
     }
-    destination = Path(output_path)
-    destination.mkdir(parents=True, exist_ok=True)
     (destination / "predictive-metrics.json").write_text(
         json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (destination / "predictive-control-paths.jsonl").write_text(
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in control_rows),
+        encoding="utf-8")
+    (destination / "audition-manifest.json").write_text(
+        json.dumps({
+            "schema": 1,
+            "checkpoint": str(Path(checkpoint_path).resolve()),
+            "sample_rate": config.data.sample_rate,
+            "examples": audition_rows,
+        }, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8")
     print(json.dumps(output, sort_keys=True))
     return output
@@ -1291,7 +1363,8 @@ def main() -> None:
                 args.batch_size, args.examples, args.device)
         else:
             evaluate_predictive(
-                args.config, args.checkpoint, args.output, args.pairs, args.device)
+                args.config, args.checkpoint, args.output, args.pairs, args.device,
+                args.examples)
     else:
         evaluate(args.config, args.checkpoint, args.output, args.pairs,
                  args.batch_size, args.examples, args.grid_presets, args.velocity_pairs)

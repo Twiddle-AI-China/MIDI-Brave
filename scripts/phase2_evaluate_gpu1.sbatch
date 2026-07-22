@@ -17,6 +17,7 @@ repo=/home/yfhuang/Latent-Cosmos-Synth-midiBrave/MidiBrave-v2
 image=midibrave:v0.10.0-clap-recon
 config=${CONFIG:-/workspace/MidiBrave/configs/v3/octopus_pad50_phase2.yaml}
 pairs=${PAIRS:-128}
+examples=${EXAMPLES:-8}
 
 mkdir -p "$OUTPUT"
 srun --kill-on-bad-exit=1 --cpu-bind=cores docker run --rm \
@@ -26,4 +27,4 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores docker run --rm \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
   -w /workspace/MidiBrave "$image" \
   python -m midibrave.evaluate --config "$config" --checkpoint "$CHECKPOINT" \
-  --output "$OUTPUT" --pairs "$pairs" --device cuda
+  --output "$OUTPUT" --pairs "$pairs" --examples "$examples" --device cuda

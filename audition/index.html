@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Latent Cosmos · Listening Deck</title>
+  <style>
+    :root {
+      --ink: #0b1016;
+      --panel: #151d26;
+      --panel-2: #1d2732;
+      --line: #34414e;
+      --paper: #d9e3ea;
+      --muted: #8999a6;
+      --amber: #ffb44b;
+      --blue: #75c9ff;
+      --red: #ff6e68;
+      --shadow: rgba(0, 0, 0, .42);
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--ink); color: var(--paper); font-family: "Segoe UI", "PingFang SC", sans-serif; }
+    body { margin: 0; min-height: 100vh; background:
+      radial-gradient(circle at 74% 0%, rgba(117,201,255,.08), transparent 30rem),
+      linear-gradient(135deg, #0a0f14, #101820 58%, #0a0f14); }
+    button, input { font: inherit; }
+    button { color: inherit; }
+
+    .shell { max-width: 1540px; margin: 0 auto; padding: 22px; }
+    .topbar { display: grid; grid-template-columns: 1fr auto; gap: 22px; align-items: end;
+      border-bottom: 1px solid var(--line); padding: 6px 0 18px; }
+    .eyebrow { font: 700 11px/1.2 Consolas, monospace; letter-spacing: .18em; color: var(--amber); }
+    h1 { margin: 5px 0 0; font: 800 clamp(28px, 4vw, 58px)/.92 "Arial Narrow", "Segoe UI", sans-serif;
+      letter-spacing: -.045em; text-transform: uppercase; }
+    .status { display: flex; align-items: center; gap: 10px; font: 700 12px Consolas, monospace; color: var(--muted); }
+    .lamp { width: 9px; height: 9px; border-radius: 50%; background: var(--amber);
+      box-shadow: 0 0 14px rgba(255,180,75,.75); }
+
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 0; }
+    .tool, .file-label { min-height: 36px; padding: 8px 12px; border: 1px solid var(--line);
+      background: #111820; border-radius: 4px; cursor: pointer; transition: border-color .15s, transform .15s; }
+    .tool:hover, .file-label:hover { border-color: var(--blue); }
+    .tool:active, .file-label:active { transform: translateY(1px); }
+    .tool[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
+    .file-label input { display: none; }
+    .volume { display: flex; align-items: center; gap: 8px; margin-left: auto;
+      color: var(--muted); font: 700 11px Consolas, monospace; }
+    input[type="range"] { accent-color: var(--amber); width: 130px; }
+
+    .workspace { display: grid; grid-template-columns: 250px minmax(0,1fr); gap: 16px; }
+    .browser, .deck { border: 1px solid var(--line); background: rgba(21,29,38,.88);
+      box-shadow: 0 20px 60px var(--shadow); }
+    .browser { min-height: 680px; }
+    .panel-head { display: flex; justify-content: space-between; align-items: center; height: 46px;
+      padding: 0 14px; border-bottom: 1px solid var(--line); font: 700 11px Consolas, monospace;
+      letter-spacing: .08em; color: var(--muted); }
+    #sampleList { padding: 8px; }
+    .sample-button { width: 100%; display: grid; grid-template-columns: 36px 1fr; gap: 8px;
+      padding: 10px 8px; border: 0; border-bottom: 1px solid #26313c; background: transparent;
+      text-align: left; cursor: pointer; color: var(--muted); }
+    .sample-button:hover { background: rgba(117,201,255,.05); color: var(--paper); }
+    .sample-button.active { background: var(--amber); color: #13181e; }
+    .sample-number { font: 800 12px Consolas, monospace; }
+    .sample-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+
+    .deck { min-width: 0; }
+    .readout { display: grid; grid-template-columns: minmax(0,1fr) repeat(3, auto); gap: 14px;
+      align-items: center; padding: 16px 18px; border-bottom: 1px solid var(--line); background: #10171f; }
+    .readout-title { min-width: 0; }
+    .readout-title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font: 800 18px "Arial Narrow", sans-serif; letter-spacing: .02em; }
+    .readout-title span { color: var(--muted); font: 11px Consolas, monospace; }
+    .datum { min-width: 82px; padding-left: 14px; border-left: 1px solid var(--line); }
+    .datum small { display: block; color: var(--muted); font: 9px Consolas, monospace; letter-spacing: .12em; }
+    .datum b { color: var(--blue); font: 800 19px Consolas, monospace; }
+
+    .pairs { padding: 14px; display: grid; gap: 12px; }
+    .pair { display: grid; grid-template-columns: 132px repeat(2, minmax(0,1fr)); border: 1px solid var(--line); }
+    .pair-label { padding: 14px; background: #10171f; border-right: 1px solid var(--line); }
+    .pair-label b { display: block; font: 800 15px "Arial Narrow", sans-serif; text-transform: uppercase; }
+    .pair-label span { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+    .track { position: relative; min-width: 0; padding: 12px; background: var(--panel); }
+    .track + .track { border-left: 1px solid var(--line); }
+    .track-top { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; }
+    .play { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line);
+      background: var(--panel-2); cursor: pointer; color: var(--amber); font-size: 13px; }
+    .play:hover { border-color: var(--amber); }
+    .track.playing .play { background: var(--amber); color: #15191e; }
+    .track-label { min-width: 0; }
+    .track-label b { display: block; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .track-label span { color: var(--muted); font: 10px Consolas, monospace; }
+    .wave { display: block; width: 100%; height: 68px; background: #0c1218; border: 1px solid #26323e; cursor: pointer; }
+    .time { margin-top: 5px; text-align: right; color: var(--muted); font: 9px Consolas, monospace; }
+    .key { position: absolute; top: 9px; right: 9px; color: #556574; font: 10px Consolas, monospace; }
+
+    .empty { min-height: 560px; display: grid; place-items: center; padding: 32px; text-align: center; color: var(--muted); }
+    .empty strong { display: block; color: var(--paper); font: 800 24px "Arial Narrow", sans-serif; margin-bottom: 7px; }
+    .foot { display: flex; justify-content: space-between; gap: 20px; padding: 14px 2px 0;
+      color: var(--muted); font: 10px/1.5 Consolas, monospace; }
+    .foot em { color: var(--red); font-style: normal; }
+    :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+    @media (max-width: 900px) {
+      .workspace { grid-template-columns: 1fr; }
+      .browser { min-height: auto; }
+      #sampleList { display: flex; overflow-x: auto; }
+      .sample-button { min-width: 180px; }
+      .pair { grid-template-columns: 1fr; }
+      .pair-label { border-right: 0; border-bottom: 1px solid var(--line); }
+      .track + .track { border-left: 0; border-top: 1px solid var(--line); }
+      .readout { grid-template-columns: 1fr 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">LATENT COSMOS SYNTH / CURRENT CHECKPOINT</div>
+        <h1>Listening deck</h1>
+      </div>
+      <div class="status"><span class="lamp"></span><span id="statusText">读取试听数据</span></div>
+    </header>
+
+    <div class="toolbar">
+      <button class="tool" id="blindButton" aria-pressed="false">盲听标签</button>
+      <button class="tool" id="loopButton" aria-pressed="true">循环播放</button>
+      <button class="tool" id="stopButton">全部停止</button>
+      <label class="file-label">载入本地 manifest<input id="manifestPicker" type="file" accept="application/json"></label>
+      <label class="volume">VOLUME <input id="volume" type="range" min="0" max="1" step=".01" value=".8"></label>
+    </div>
+
+    <section class="workspace">
+      <aside class="browser">
+        <div class="panel-head"><span>TAKES</span><span id="takeCount">00</span></div>
+        <div id="sampleList"></div>
+      </aside>
+      <section class="deck">
+        <div id="content" class="empty">
+          <div><strong>等待渲染音频</strong>页面会自动读取 audition-manifest.json，也可以手动载入。</div>
+        </div>
+      </section>
+    </section>
+
+    <footer class="foot">
+      <span>快捷键 1–6 播放当前六条轨道 · Space 停止</span>
+      <span><em>注意</em>：这是 Phase3 2k checkpoint 的真实输出，不是训练 loss 的声音代理。</span>
+    </footer>
+  </main>
+
+  <script>
+    const state = { data: null, index: 0, blind: false, loop: true, volume: .8, audios: [] };
+    const pairs = [
+      { title: 'Baseline', hint: '原音与自由滚动', kinds: ['source-reference', 'source-rollout'] },
+      { title: 'MIDI control', hint: '同音色，改目标音高', kinds: ['midi-reference', 'midi-swap'] },
+      { title: 'CLAP control', hint: '同音高，直接换目标音色', kinds: ['timbre-reference', 'timbre-direct'] }
+    ];
+    const $ = s => document.querySelector(s);
+    const fmtNote = n => `N${String(n).padStart(3, '0')}`;
+
+    function stopAll() {
+      state.audios.forEach(a => { a.pause(); a.currentTime = 0; });
+      document.querySelectorAll('.track').forEach(x => x.classList.remove('playing'));
+    }
+
+    function renderList() {
+      const list = $('#sampleList'); list.innerHTML = '';
+      state.data.examples.forEach((item, i) => {
+        const b = document.createElement('button');
+        b.className = `sample-button${i === state.index ? ' active' : ''}`;
+        b.innerHTML = `<span class="sample-number">${String(i + 1).padStart(2, '0')}</span><span class="sample-name">${item.source_id}</span>`;
+        b.onclick = () => { stopAll(); state.index = i; renderList(); renderDeck(); };
+        list.appendChild(b);
+      });
+      $('#takeCount').textContent = String(state.data.examples.length).padStart(2, '0');
+    }
+
+    async function drawWave(canvas, src, audio) {
+      const ctx = canvas.getContext('2d');
+      const paintBase = () => { ctx.fillStyle = '#0c1218'; ctx.fillRect(0,0,canvas.width,canvas.height); };
+      paintBase();
+      try {
+        const buffer = await fetch(src).then(r => r.arrayBuffer());
+        const ac = new (window.AudioContext || window.webkitAudioContext)();
+        const decoded = await ac.decodeAudioData(buffer); const data = decoded.getChannelData(0);
+        const bins = Math.max(80, Math.floor(canvas.width / 3)); const step = Math.max(1, Math.floor(data.length / bins));
+        ctx.strokeStyle = '#ffb44b'; ctx.lineWidth = 1; ctx.beginPath();
+        for (let i=0;i<bins;i++) {
+          let peak = 0; for (let j=0;j<step;j++) peak = Math.max(peak, Math.abs(data[i*step+j] || 0));
+          const x = i / (bins-1) * canvas.width, h = peak * canvas.height * .46;
+          ctx.moveTo(x, canvas.height/2-h); ctx.lineTo(x, canvas.height/2+h);
+        }
+        ctx.stroke(); await ac.close();
+      } catch (_) {
+        ctx.fillStyle = '#8999a6'; ctx.font = '10px Consolas'; ctx.fillText('WAVEFORM UNAVAILABLE', 10, 18);
+      }
+      const drawHead = () => {
+        const p = audio.duration ? audio.currentTime / audio.duration : 0;
+        ctx.fillStyle = 'rgba(117,201,255,.9)'; ctx.fillRect(p * canvas.width, 0, 2, canvas.height);
+        if (!audio.paused) requestAnimationFrame(() => { paintBase(); drawWaveStatic(); });
+      };
+      const snapshot = ctx.getImageData(0,0,canvas.width,canvas.height);
+      const drawWaveStatic = () => { ctx.putImageData(snapshot,0,0); drawHead(); };
+      audio.addEventListener('timeupdate', drawWaveStatic);
+      canvas.onclick = e => { if (audio.duration) audio.currentTime = e.offsetX / canvas.clientWidth * audio.duration; };
+    }
+
+    function makeTrack(track, keyIndex) {
+      const el = document.createElement('article'); el.className = 'track';
+      const shown = state.blind ? (keyIndex % 2 ? 'B' : 'A') : track.label;
+      el.innerHTML = `<span class="key">KEY ${keyIndex + 1}</span><div class="track-top"><button class="play" aria-label="播放">▶</button><div class="track-label"><b>${shown}</b><span>${track.kind}</span></div></div><canvas class="wave" width="720" height="136"></canvas><div class="time">00:00.000</div>`;
+      const audio = new Audio(track.file); audio.loop = state.loop; audio.volume = state.volume; state.audios[keyIndex] = audio;
+      const play = el.querySelector('.play'), time = el.querySelector('.time');
+      play.onclick = () => {
+        if (audio.paused) { stopAll(); audio.currentTime = 0; audio.play(); el.classList.add('playing'); play.textContent = '■'; }
+        else stopAll();
+      };
+      audio.onended = () => { el.classList.remove('playing'); play.textContent = '▶'; };
+      audio.ontimeupdate = () => { time.textContent = `${audio.currentTime.toFixed(3).padStart(6,'0')} / ${(audio.duration || 0).toFixed(3)}`; };
+      drawWave(el.querySelector('.wave'), track.file, audio);
+      return el;
+    }
+
+    function renderDeck() {
+      state.audios = []; const item = state.data.examples[state.index];
+      const byKind = Object.fromEntries(item.tracks.map(t => [t.kind, t]));
+      const content = $('#content'); content.className = ''; content.innerHTML = `
+        <div class="readout"><div class="readout-title"><strong>${item.source_id}</strong><span>${item.source_preset}</span></div>
+        <div class="datum"><small>SOURCE</small><b>${fmtNote(item.source_note)}</b></div>
+        <div class="datum"><small>MIDI TARGET</small><b>${fmtNote(item.midi_target_note)}</b></div>
+        <div class="datum"><small>LENGTH</small><b>${item.duration_seconds.toFixed(2)}s</b></div></div><div class="pairs"></div>`;
+      const root = content.querySelector('.pairs'); let key = 0;
+      pairs.forEach(pair => {
+        const row = document.createElement('section'); row.className = 'pair';
+        row.innerHTML = `<div class="pair-label"><b>${pair.title}</b><span>${pair.hint}</span></div>`;
+        pair.kinds.forEach(kind => row.appendChild(makeTrack(byKind[kind], key++)));
+        root.appendChild(row);
+      });
+    }
+
+    function loadData(data) {
+      if (!data || !Array.isArray(data.examples) || !data.examples.length) throw new Error('manifest 没有试听样本');
+      state.data = data; state.index = 0; $('#statusText').textContent = `${data.examples.length} TAKES READY`;
+      renderList(); renderDeck();
+    }
+
+    $('#blindButton').onclick = e => { state.blind = !state.blind; e.currentTarget.setAttribute('aria-pressed', state.blind); if(state.data) renderDeck(); };
+    $('#loopButton').onclick = e => { state.loop = !state.loop; e.currentTarget.setAttribute('aria-pressed', state.loop); state.audios.forEach(a => a.loop = state.loop); };
+    $('#stopButton').onclick = stopAll;
+    $('#volume').oninput = e => { state.volume = +e.target.value; state.audios.forEach(a => a.volume = state.volume); };
+    $('#manifestPicker').onchange = async e => { try { loadData(JSON.parse(await e.target.files[0].text())); } catch(err) { $('#statusText').textContent = err.message; } };
+    document.addEventListener('keydown', e => {
+      if (e.code === 'Space') { e.preventDefault(); stopAll(); }
+      const i = Number(e.key) - 1; if (i >= 0 && i < state.audios.length) document.querySelectorAll('.play')[i].click();
+    });
+    fetch('audition-manifest.json').then(r => { if(!r.ok) throw new Error(); return r.json(); }).then(loadData).catch(() => {
+      if (window.AUDITION_DATA) loadData(window.AUDITION_DATA); else $('#statusText').textContent = 'WAITING FOR WAVS';
+    });
+  </script>
+</body>
+</html>
