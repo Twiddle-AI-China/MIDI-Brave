@@ -267,17 +267,10 @@ def predictor_counterfactual_rollout(
     timbre_alpha = target_clap.new_zeros(target_clap.shape[0])
     timbre_positions = timbre_mask.nonzero().flatten()
     if timbre_positions.numel():
-        interpolation_steps = predictive.predictor_timbre_interpolation_steps
-        alpha = ((torch.arange(timbre_positions.numel(), device=history.device)
-                  % interpolation_steps) + 1).to(target_clap) / interpolation_steps
-        timbre_alpha[timbre_positions] = alpha
-        source = F.normalize(
-            batch["clap_a"].index_select(0, timbre_positions).float(), dim=-1)
+        timbre_alpha[timbre_positions] = 1.0
         target = F.normalize(batch["clap_a"].index_select(
             0, target_index[timbre_positions]).float(), dim=-1)
-        interpolated = F.normalize(
-            torch.lerp(source, target, alpha[:, None].float()), dim=-1)
-        target_clap[timbre_positions] = interpolated.to(target_clap)
+        target_clap[timbre_positions] = target.to(target_clap)
     target_note = torch.where(midi_mask, batch["note_b"], batch["note_a"])
     frames = predictive.predictor_control_rollout_frames
     result = rollout_blocks(
@@ -285,9 +278,13 @@ def predictor_counterfactual_rollout(
         model.midi_control(target_note, batch["velocity_a"], frames),
         predictive.stride_frames)
     sequence = torch.cat((history, result.latent), dim=-1)
-    audio = model.decode_latents(
-        sequence, target_clap, target_note, batch["velocity_a"],
-        batch.get("excitation_seed_a"))
+    decoded = model.decode_latent_transition(
+        sequence, batch["clap_a"], target_clap,
+        batch["note_a"], target_note,
+        batch["velocity_a"], batch["velocity_a"],
+        predictive.history_frames, batch.get("excitation_seed_a"))
+    future_start = predictive.history_frames * predictive.samples_per_latent
+    audio = decoded[..., future_start:]
     return PredictorCounterfactualRollout(
         audio=audio, rollout=result.latent, latent_sequence=sequence,
         midi_mask=midi_mask, timbre_mask=timbre_mask, target_index=target_index,
@@ -606,7 +603,7 @@ def configure_predictive_stage(model: PredictiveMidiBrave,
         PredictiveStage.RAVE: {
             "encoder", "rave_pitch_adversary", "clap_projection", "midi", "decoder"},
         PredictiveStage.PREDICTOR: {"predictor"},
-        PredictiveStage.ROLLOUT: {"predictor", "clap_projection", "midi", "decoder"},
+        PredictiveStage.ROLLOUT: {"predictor"},
         PredictiveStage.GAN: {"decoder", "predictor"} if rollout_gate_passed else {"decoder"},
     }[stage]
     trainable = set()

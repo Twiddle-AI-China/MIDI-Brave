@@ -100,6 +100,41 @@ class PredictiveMidiBrave(nn.Module):
         excitation = self._excitation_bands(note, samples, excitation_seed)
         return self.decoder(z_clap, z_midi, excitation, samples, z_rave=z_rave)
 
+    def decode_latent_transition(
+            self, z_rave: Tensor, source_clap: Tensor, target_clap: Tensor,
+            source_note: Tensor, target_note: Tensor,
+            source_velocity: Tensor, target_velocity: Tensor,
+            history_frames: int,
+            excitation_seed: Tensor | None = None) -> Tensor:
+        """Decode one control transition with history and future kept aligned."""
+        if (z_rave.ndim != 3
+                or z_rave.shape[1] != self.predictive_config.rave_latent_dim):
+            raise ValueError(
+                f"RAVE latent must have {self.predictive_config.rave_latent_dim} channels")
+        total_frames = z_rave.shape[-1]
+        if not 0 < history_frames < total_frames:
+            raise ValueError("history_frames must split a non-empty latent future")
+        future_frames = total_frames - history_frames
+        z_clap = torch.cat((
+            self.project_clap(source_clap, history_frames),
+            self.project_clap(target_clap, future_frames),
+        ), dim=-1)
+        z_midi = torch.cat((
+            self.midi_control(source_note, source_velocity, history_frames),
+            self.midi_control(target_note, target_velocity, future_frames),
+        ), dim=-1)
+        excitation = torch.cat((
+            self._excitation_bands(
+                source_note, history_frames * self.samples_per_latent,
+                excitation_seed),
+            self._excitation_bands(
+                target_note, future_frames * self.samples_per_latent,
+                excitation_seed),
+        ), dim=-1)
+        samples = total_frames * self.samples_per_latent
+        return self.decoder(
+            z_clap, z_midi, excitation, samples, z_rave=z_rave)
+
     def predict_future(self, history: Tensor, clap: Tensor, note: Tensor,
                        velocity: Tensor) -> LatentPrediction:
         frames = self.predictive_config.horizon_frames
