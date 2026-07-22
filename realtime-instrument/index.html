@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>MidiBrave — Latent Cartography</title>
+    <link rel="stylesheet" href="/instrument.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">MIDI-CONTROLLED · ENCODER-FREE</p>
+          <h1>MidiBrave <span>Latent Cartography</span></h1>
+        </div>
+        <div class="runtime-state" aria-live="polite">
+          <span class="status-lamp" id="statusLamp" aria-hidden="true"></span>
+          <span id="connectionStatus">Checking runtime</span>
+        </div>
+      </header>
+
+      <main class="console-grid">
+        <section class="field-panel" aria-labelledby="fieldTitle">
+          <header class="panel-heading">
+            <div>
+              <p class="panel-index">PCA FIELD</p>
+              <h2 id="fieldTitle">Timbre position</h2>
+            </div>
+            <output id="fieldCoordinates" aria-live="polite">X +0.000 · Y +0.000</output>
+          </header>
+          <div class="field-surface">
+            <canvas
+              id="xyCanvas"
+              tabindex="0"
+              aria-label="PCA timbre field. Drag to change timbre, or use the arrow keys."
+            ></canvas>
+            <span class="axis-label axis-label-x">PCA 01 →</span>
+            <span class="axis-label axis-label-y">PCA 02 →</span>
+          </div>
+          <p class="field-help">Drag to chart timbre. Arrow keys make fine adjustments.</p>
+        </section>
+
+        <aside class="control-rack" aria-label="Instrument controls">
+          <section class="rack-section transport-section">
+            <div class="transport-row">
+              <button class="primary-action" id="startButton" type="button">Start</button>
+              <button class="secondary-action" id="stopButton" type="button" disabled>Stop</button>
+            </div>
+            <div id="errorLog" class="error-log" aria-live="assertive"></div>
+          </section>
+
+          <section class="rack-section" aria-labelledby="voiceHeading">
+            <header class="rack-heading">
+              <p class="panel-index">VOICE</p>
+              <h2 id="voiceHeading">Performance</h2>
+            </header>
+
+            <label class="control-row" for="noteInput">
+              <span>Note</span>
+              <output id="noteValue" for="noteInput">C4 · 60</output>
+            </label>
+            <input id="noteInput" type="range" min="21" max="109" step="1" value="60">
+
+            <label class="control-row" for="velocityInput">
+              <span>Velocity</span>
+              <output id="velocityValue" for="velocityInput">80%</output>
+            </label>
+            <input id="velocityInput" type="range" min="0" max="1" step="0.01" value="0.8">
+
+            <label class="control-row" for="seedInput">
+              <span>Seed</span>
+              <output id="seedValue" for="seedInput">0</output>
+            </label>
+            <div class="seed-row">
+              <input id="seedInput" type="number" min="0" max="2147483647" step="1" value="0" inputmode="numeric">
+              <button id="reseedButton" class="secondary-action" type="button" disabled>Reseed</button>
+            </div>
+
+            <label class="control-row" for="volumeInput">
+              <span>Volume</span>
+              <output id="volumeValue" for="volumeInput">20%</output>
+            </label>
+            <input id="volumeInput" type="range" min="0" max="1" step="0.01" value="0.2">
+
+            <p class="key-guide"><kbd>A</kbd><kbd>W</kbd><kbd>S</kbd><kbd>E</kbd><kbd>D</kbd><kbd>F</kbd><kbd>T</kbd><kbd>G</kbd><kbd>Y</kbd><kbd>H</kbd><kbd>U</kbd><kbd>J</kbd><kbd>K</kbd></p>
+          </section>
+
+          <section class="rack-section telemetry-section" aria-labelledby="telemetryHeading">
+            <header class="rack-heading">
+              <p class="panel-index">SIGNAL</p>
+              <h2 id="telemetryHeading">Telemetry</h2>
+            </header>
+            <dl class="telemetry-grid">
+              <div><dt>CUDA</dt><dd id="cudaValue">—</dd></div>
+              <div><dt>Runtime</dt><dd id="runtimeHashValue">—</dd></div>
+              <div><dt>Render p95</dt><dd id="renderP95Value">—</dd></div>
+              <div><dt>Buffered</dt><dd id="bufferedValue">0.0 ms</dd></div>
+              <div><dt>Underruns</dt><dd id="underrunValue">0</dd></div>
+              <div><dt>MIDI</dt><dd id="midiValue">C4 · 60</dd></div>
+              <div><dt>XY</dt><dd id="xyValue">+0.000 / +0.000</dd></div>
+            </dl>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="/instrument.js"></script>
+  </body>
+</html>
