@@ -1119,7 +1119,8 @@ def load_predictive_warm_start(path: str | Path, model: PredictiveMidiBrave,
         PredictiveStage.RAVE: {PredictiveStage.RAVE},
         PredictiveStage.PREDICTOR: {
             PredictiveStage.RAVE, PredictiveStage.PREDICTOR},
-        PredictiveStage.ROLLOUT: {PredictiveStage.PREDICTOR},
+        PredictiveStage.ROLLOUT: {
+            PredictiveStage.PREDICTOR, PredictiveStage.ROLLOUT},
         PredictiveStage.GAN: {PredictiveStage.ROLLOUT},
     }[target_stage]
     payload = torch.load(path, map_location="cpu", weights_only=False)
