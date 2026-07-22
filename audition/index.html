@@ -2,261 +2,1125 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Latent Cosmos · Listening Deck</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Latent Cosmos Instrument</title>
   <style>
     :root {
-      --ink: #0b1016;
-      --panel: #151d26;
-      --panel-2: #1d2732;
-      --line: #34414e;
-      --paper: #d9e3ea;
-      --muted: #8999a6;
-      --amber: #ffb44b;
-      --blue: #75c9ff;
-      --red: #ff6e68;
-      --shadow: rgba(0, 0, 0, .42);
+      --bench: #707873;
+      --bench-dark: #5c645f;
+      --case: #202a30;
+      --case-edge: #11191d;
+      --face: #dedbcf;
+      --face-2: #c9c7bd;
+      --ink: #172126;
+      --muted: #667078;
+      --rule: #a9aaa4;
+      --screen: #07191a;
+      --screen-grid: #183b3a;
+      --signal: #65d7c5;
+      --signal-dim: #2c746c;
+      --action: #e75e35;
+      --action-dark: #a4371e;
+      --white: #f5f2e9;
+      --danger: #b83828;
+      --shadow: rgba(13, 20, 23, .34);
     }
 
     * { box-sizing: border-box; }
-    html { background: var(--ink); color: var(--paper); font-family: "Segoe UI", "PingFang SC", sans-serif; }
-    body { margin: 0; min-height: 100vh; background:
-      radial-gradient(circle at 74% 0%, rgba(117,201,255,.08), transparent 30rem),
-      linear-gradient(135deg, #0a0f14, #101820 58%, #0a0f14); }
-    button, input { font: inherit; }
-    button { color: inherit; }
 
-    .shell { max-width: 1540px; margin: 0 auto; padding: 22px; }
-    .topbar { display: grid; grid-template-columns: 1fr auto; gap: 22px; align-items: end;
-      border-bottom: 1px solid var(--line); padding: 6px 0 18px; }
-    .eyebrow { font: 700 11px/1.2 Consolas, monospace; letter-spacing: .18em; color: var(--amber); }
-    h1 { margin: 5px 0 0; font: 800 clamp(28px, 4vw, 58px)/.92 "Arial Narrow", "Segoe UI", sans-serif;
-      letter-spacing: -.045em; text-transform: uppercase; }
-    .status { display: flex; align-items: center; gap: 10px; font: 700 12px Consolas, monospace; color: var(--muted); }
-    .lamp { width: 9px; height: 9px; border-radius: 50%; background: var(--amber);
-      box-shadow: 0 0 14px rgba(255,180,75,.75); }
-
-    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 0; }
-    .tool, .file-label { min-height: 36px; padding: 8px 12px; border: 1px solid var(--line);
-      background: #111820; border-radius: 4px; cursor: pointer; transition: border-color .15s, transform .15s; }
-    .tool:hover, .file-label:hover { border-color: var(--blue); }
-    .tool:active, .file-label:active { transform: translateY(1px); }
-    .tool[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
-    .file-label input { display: none; }
-    .volume { display: flex; align-items: center; gap: 8px; margin-left: auto;
-      color: var(--muted); font: 700 11px Consolas, monospace; }
-    input[type="range"] { accent-color: var(--amber); width: 130px; }
-
-    .workspace { display: grid; grid-template-columns: 250px minmax(0,1fr); gap: 16px; }
-    .browser, .deck { border: 1px solid var(--line); background: rgba(21,29,38,.88);
-      box-shadow: 0 20px 60px var(--shadow); }
-    .browser { min-height: 680px; }
-    .panel-head { display: flex; justify-content: space-between; align-items: center; height: 46px;
-      padding: 0 14px; border-bottom: 1px solid var(--line); font: 700 11px Consolas, monospace;
-      letter-spacing: .08em; color: var(--muted); }
-    #sampleList { padding: 8px; }
-    .sample-button { width: 100%; display: grid; grid-template-columns: 36px 1fr; gap: 8px;
-      padding: 10px 8px; border: 0; border-bottom: 1px solid #26313c; background: transparent;
-      text-align: left; cursor: pointer; color: var(--muted); }
-    .sample-button:hover { background: rgba(117,201,255,.05); color: var(--paper); }
-    .sample-button.active { background: var(--amber); color: #13181e; }
-    .sample-number { font: 800 12px Consolas, monospace; }
-    .sample-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-
-    .deck { min-width: 0; }
-    .readout { display: grid; grid-template-columns: minmax(0,1fr) repeat(3, auto); gap: 14px;
-      align-items: center; padding: 16px 18px; border-bottom: 1px solid var(--line); background: #10171f; }
-    .readout-title { min-width: 0; }
-    .readout-title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      font: 800 18px "Arial Narrow", sans-serif; letter-spacing: .02em; }
-    .readout-title span { color: var(--muted); font: 11px Consolas, monospace; }
-    .datum { min-width: 82px; padding-left: 14px; border-left: 1px solid var(--line); }
-    .datum small { display: block; color: var(--muted); font: 9px Consolas, monospace; letter-spacing: .12em; }
-    .datum b { color: var(--blue); font: 800 19px Consolas, monospace; }
-
-    .pairs { padding: 14px; display: grid; gap: 12px; }
-    .pair { display: grid; grid-template-columns: 132px repeat(2, minmax(0,1fr)); border: 1px solid var(--line); }
-    .pair-label { padding: 14px; background: #10171f; border-right: 1px solid var(--line); }
-    .pair-label b { display: block; font: 800 15px "Arial Narrow", sans-serif; text-transform: uppercase; }
-    .pair-label span { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; line-height: 1.4; }
-    .track { position: relative; min-width: 0; padding: 12px; background: var(--panel); }
-    .track + .track { border-left: 1px solid var(--line); }
-    .track-top { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; }
-    .play { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line);
-      background: var(--panel-2); cursor: pointer; color: var(--amber); font-size: 13px; }
-    .play:hover { border-color: var(--amber); }
-    .track.playing .play { background: var(--amber); color: #15191e; }
-    .track-label { min-width: 0; }
-    .track-label b { display: block; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .track-label span { color: var(--muted); font: 10px Consolas, monospace; }
-    .wave { display: block; width: 100%; height: 68px; background: #0c1218; border: 1px solid #26323e; cursor: pointer; }
-    .time { margin-top: 5px; text-align: right; color: var(--muted); font: 9px Consolas, monospace; }
-    .key { position: absolute; top: 9px; right: 9px; color: #556574; font: 10px Consolas, monospace; }
-
-    .empty { min-height: 560px; display: grid; place-items: center; padding: 32px; text-align: center; color: var(--muted); }
-    .empty strong { display: block; color: var(--paper); font: 800 24px "Arial Narrow", sans-serif; margin-bottom: 7px; }
-    .foot { display: flex; justify-content: space-between; gap: 20px; padding: 14px 2px 0;
-      color: var(--muted); font: 10px/1.5 Consolas, monospace; }
-    .foot em { color: var(--red); font-style: normal; }
-    :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-
-    @media (max-width: 900px) {
-      .workspace { grid-template-columns: 1fr; }
-      .browser { min-height: auto; }
-      #sampleList { display: flex; overflow-x: auto; }
-      .sample-button { min-width: 180px; }
-      .pair { grid-template-columns: 1fr; }
-      .pair-label { border-right: 0; border-bottom: 1px solid var(--line); }
-      .track + .track { border-left: 0; border-top: 1px solid var(--line); }
-      .readout { grid-template-columns: 1fr 1fr; }
+    html {
+      min-width: 320px;
+      background: var(--bench);
+      color: var(--ink);
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     }
-    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        repeating-linear-gradient(92deg, rgba(255,255,255,.025) 0 1px, transparent 1px 7px),
+        linear-gradient(145deg, #828984 0%, var(--bench) 42%, var(--bench-dark) 100%);
+    }
+
+    button,
+    select,
+    input { font: inherit; }
+
+    button,
+    select { color: inherit; }
+
+    button { -webkit-tap-highlight-color: transparent; }
+
+    .page {
+      width: min(1480px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 30px 0 38px;
+    }
+
+    .instrument {
+      position: relative;
+      overflow: hidden;
+      border: 3px solid var(--case-edge);
+      border-radius: 24px;
+      background: var(--face);
+      box-shadow:
+        0 5px 0 #10171a,
+        0 24px 55px var(--shadow),
+        inset 0 1px 0 rgba(255,255,255,.8);
+    }
+
+    .screw {
+      position: absolute;
+      z-index: 3;
+      width: 12px;
+      height: 12px;
+      border: 1px solid #747972;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #f0eee5, #949990);
+      box-shadow: inset 0 0 0 2px #c7c8c0;
+    }
+
+    .screw::after {
+      content: "";
+      position: absolute;
+      top: 5px;
+      left: 2px;
+      width: 6px;
+      height: 1px;
+      background: #676c67;
+      transform: rotate(-25deg);
+    }
+
+    .screw.tl { top: 12px; left: 12px; }
+    .screw.tr { top: 12px; right: 12px; }
+    .screw.bl { bottom: 12px; left: 12px; }
+    .screw.br { right: 12px; bottom: 12px; }
+
+    .masthead {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 28px;
+      align-items: end;
+      padding: 27px 42px 22px;
+      border-bottom: 1px solid var(--rule);
+    }
+
+    .brand-line {
+      margin-bottom: 5px;
+      color: var(--action-dark);
+      font: 800 10px/1.2 Consolas, "SFMono-Regular", monospace;
+      letter-spacing: .22em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font: 900 clamp(32px, 5vw, 72px)/.84 "Arial Narrow", Impact, sans-serif;
+      letter-spacing: -.045em;
+      text-transform: uppercase;
+    }
+
+    h1 span {
+      display: inline-block;
+      color: var(--action);
+      transform: skewX(-7deg);
+    }
+
+    .system-state {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      max-width: 360px;
+      padding-bottom: 3px;
+      color: var(--muted);
+      font: 700 11px/1.4 Consolas, "SFMono-Regular", monospace;
+      text-align: right;
+    }
+
+    .lamp {
+      flex: 0 0 auto;
+      width: 10px;
+      height: 10px;
+      border: 1px solid #35564f;
+      border-radius: 50%;
+      background: var(--signal);
+      box-shadow: 0 0 10px rgba(101, 215, 197, .8);
+    }
+
+    .lamp.error {
+      border-color: #762a21;
+      background: var(--danger);
+      box-shadow: 0 0 10px rgba(184, 56, 40, .55);
+    }
+
+    .performance {
+      display: grid;
+      grid-template-columns: minmax(280px, .78fr) minmax(430px, 1.5fr);
+      min-height: 420px;
+    }
+
+    .control-bank {
+      padding: 27px 30px 29px 42px;
+      border-right: 1px solid var(--rule);
+    }
+
+    .section-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+      color: var(--muted);
+      font: 800 10px/1.2 Consolas, "SFMono-Regular", monospace;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    .section-label strong {
+      color: var(--ink);
+      font-weight: 900;
+    }
+
+    .selectors { display: grid; gap: 14px; }
+
+    .selector {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr);
+      align-items: stretch;
+      border: 1px solid var(--rule);
+      background: #ece9df;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.75);
+    }
+
+    .selector-code {
+      display: grid;
+      place-items: center;
+      border-right: 1px solid var(--rule);
+      color: var(--action-dark);
+      font: 900 22px/1 "Arial Narrow", Impact, sans-serif;
+    }
+
+    .selector-control { padding: 10px 12px 11px; }
+
+    .selector-control label {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--muted);
+      font: 800 9px/1.2 Consolas, "SFMono-Regular", monospace;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .selector-control select {
+      width: 100%;
+      min-height: 36px;
+      padding: 5px 32px 5px 8px;
+      border: 0;
+      border-radius: 0;
+      background: var(--white);
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .transport {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .play-button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 13px;
+      min-height: 72px;
+      border: 2px solid var(--action-dark);
+      border-radius: 4px;
+      background: var(--action);
+      color: #fff8ee;
+      box-shadow: inset 0 -5px 0 rgba(91, 26, 10, .22), 0 3px 0 #872b18;
+      font: 900 17px/1 "Arial Narrow", Impact, sans-serif;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: transform .12s, filter .12s;
+    }
+
+    .play-button:hover { filter: brightness(1.06); }
+    .play-button:active { transform: translateY(2px); box-shadow: inset 0 -2px 0 rgba(91,26,10,.22), 0 1px 0 #872b18; }
+    .play-button:disabled { cursor: not-allowed; filter: grayscale(.85); opacity: .55; }
+
+    .play-icon {
+      width: 0;
+      height: 0;
+      border-top: 9px solid transparent;
+      border-bottom: 9px solid transparent;
+      border-left: 14px solid currentColor;
+    }
+
+    .play-button.playing .play-icon {
+      width: 13px;
+      height: 16px;
+      border: 0;
+      border-left: 5px solid currentColor;
+      border-right: 5px solid currentColor;
+    }
+
+    .loop-button {
+      min-width: 76px;
+      border: 1px solid var(--rule);
+      background: #b9bbb4;
+      color: #4f595d;
+      font: 800 10px/1.25 Consolas, "SFMono-Regular", monospace;
+      letter-spacing: .08em;
+      cursor: pointer;
+    }
+
+    .loop-button[aria-pressed="true"] {
+      border-color: var(--signal-dim);
+      background: #183836;
+      color: var(--signal);
+      box-shadow: inset 0 0 0 2px #102927;
+    }
+
+    .scope-bank {
+      min-width: 0;
+      padding: 27px 42px 29px 30px;
+      background: linear-gradient(135deg, rgba(255,255,255,.15), transparent 50%);
+    }
+
+    .scope-frame {
+      position: relative;
+      overflow: hidden;
+      min-height: 278px;
+      border: 8px solid var(--case);
+      border-radius: 12px;
+      background: var(--screen);
+      box-shadow:
+        inset 0 0 35px rgba(0,0,0,.78),
+        0 4px 0 var(--case-edge);
+    }
+
+    .scope-frame::before {
+      content: "";
+      position: absolute;
+      z-index: 1;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(to bottom, transparent 0 3px, rgba(101,215,197,.035) 3px 4px);
+    }
+
+    #waveform {
+      position: absolute;
+      inset: 0;
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+
+    .scope-caption {
+      position: absolute;
+      z-index: 2;
+      top: 13px;
+      left: 16px;
+      color: rgba(101,215,197,.68);
+      font: 700 9px/1 Consolas, "SFMono-Regular", monospace;
+      letter-spacing: .16em;
+      pointer-events: none;
+    }
+
+    .scope-value {
+      position: absolute;
+      z-index: 2;
+      right: 16px;
+      bottom: 13px;
+      color: var(--signal);
+      font: 800 11px/1 Consolas, "SFMono-Regular", monospace;
+      pointer-events: none;
+    }
+
+    .readouts {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      margin-top: 15px;
+      border: 1px solid var(--rule);
+      background: var(--rule);
+    }
+
+    .readout {
+      min-width: 0;
+      padding: 10px 12px;
+      background: #ece9df;
+    }
+
+    .readout span {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font: 800 8px/1.2 Consolas, "SFMono-Regular", monospace;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+
+    .readout strong {
+      display: block;
+      overflow: hidden;
+      color: var(--ink);
+      font: 800 12px/1.3 Consolas, "SFMono-Regular", monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .volume-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 15px;
+      color: var(--muted);
+      font: 800 9px/1 Consolas, "SFMono-Regular", monospace;
+      letter-spacing: .12em;
+    }
+
+    .volume-row input {
+      width: 100%;
+      accent-color: var(--action);
+    }
+
+    .matrix-panel {
+      padding: 26px 42px 35px;
+      border-top: 1px solid var(--rule);
+      background: var(--face-2);
+    }
+
+    .matrix-intro {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: baseline;
+      margin-bottom: 16px;
+    }
+
+    .matrix-intro h2 {
+      margin: 0;
+      font: 900 21px/1 "Arial Narrow", Impact, sans-serif;
+      letter-spacing: .015em;
+      text-transform: uppercase;
+    }
+
+    .matrix-intro p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .matrix-stack { display: grid; gap: 12px; }
+
+    .matrix-row {
+      display: grid;
+      grid-template-columns: 175px minmax(0, 1fr);
+      min-height: 92px;
+      border: 1px solid #989b95;
+      background: #dad8cf;
+    }
+
+    .matrix-label {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 14px 16px;
+      border-right: 1px solid #989b95;
+      background: #c3c4bd;
+    }
+
+    .matrix-label strong {
+      font: 900 14px/1.15 "Arial Narrow", Impact, sans-serif;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .matrix-label span {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.35;
+    }
+
+    .matrix-options {
+      display: flex;
+      gap: 7px;
+      overflow-x: auto;
+      align-items: stretch;
+      padding: 9px;
+      scrollbar-color: #898d88 transparent;
+      scrollbar-width: thin;
+    }
+
+    .matrix-button {
+      position: relative;
+      flex: 0 0 auto;
+      min-width: 83px;
+      min-height: 72px;
+      padding: 10px 12px;
+      border: 1px solid #9ca09a;
+      border-radius: 2px;
+      background: #eeece4;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color .12s, background .12s, transform .12s;
+    }
+
+    .matrix-button:hover {
+      border-color: var(--action-dark);
+      transform: translateY(-1px);
+    }
+
+    .matrix-button.active {
+      border-color: #194a46;
+      background: #173a38;
+      color: var(--signal);
+      box-shadow: inset 0 0 0 2px #0c2826;
+    }
+
+    .matrix-button:disabled {
+      cursor: not-allowed;
+      opacity: .34;
+      transform: none;
+    }
+
+    .matrix-button b {
+      display: block;
+      max-width: 150px;
+      overflow: hidden;
+      font: 800 13px/1.25 Consolas, "SFMono-Regular", monospace;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .matrix-button small {
+      display: block;
+      margin-top: 7px;
+      color: var(--muted);
+      font: 700 9px/1.2 Consolas, "SFMono-Regular", monospace;
+    }
+
+    .matrix-button.active small { color: #92c9c1; }
+
+    .utility-bar {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: center;
+      padding: 12px 42px;
+      border-top: 1px solid #979a94;
+      background: var(--case);
+      color: #aeb8ba;
+      font: 700 9px/1.5 Consolas, "SFMono-Regular", monospace;
+      letter-spacing: .04em;
+    }
+
+    .load-label {
+      padding: 5px 8px;
+      border: 1px solid #576269;
+      color: var(--white);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .load-label:hover { border-color: var(--signal); color: var(--signal); }
+    .load-label input { display: none; }
+
+    .empty-state {
+      display: grid;
+      place-items: center;
+      min-height: 230px;
+      padding: 32px;
+      color: var(--signal-dim);
+      text-align: center;
+      font: 700 11px/1.7 Consolas, "SFMono-Regular", monospace;
+    }
+
+    :focus-visible {
+      outline: 3px solid #1f85a0;
+      outline-offset: 3px;
+    }
+
+    @media (max-width: 920px) {
+      .page { width: min(100% - 18px, 760px); padding-top: 13px; }
+      .masthead { grid-template-columns: 1fr; gap: 15px; padding: 25px 28px 19px; }
+      .system-state { text-align: left; }
+      .performance { grid-template-columns: 1fr; }
+      .control-bank { padding: 23px 28px; border-right: 0; border-bottom: 1px solid var(--rule); }
+      .scope-bank { padding: 23px 28px 27px; }
+      .matrix-panel { padding: 24px 28px 29px; }
+      .utility-bar { padding-inline: 28px; }
+    }
+
+    @media (max-width: 620px) {
+      .page { width: calc(100% - 10px); padding-top: 5px; }
+      .instrument { border-radius: 14px; }
+      .masthead, .control-bank, .scope-bank, .matrix-panel { padding-left: 18px; padding-right: 18px; }
+      .masthead { padding-top: 28px; }
+      .selector { grid-template-columns: 52px minmax(0, 1fr); }
+      .selector-code { font-size: 17px; }
+      .scope-frame { min-height: 220px; border-width: 6px; }
+      .readouts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .matrix-intro { grid-template-columns: 1fr; gap: 7px; }
+      .matrix-row { grid-template-columns: 1fr; }
+      .matrix-label { border-right: 0; border-bottom: 1px solid #989b95; }
+      .utility-bar { align-items: flex-start; padding-inline: 18px; flex-direction: column; gap: 9px; }
+      .transport { grid-template-columns: 1fr 68px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
   </style>
 </head>
 <body>
-  <main class="shell">
-    <header class="topbar">
-      <div>
-        <div class="eyebrow">LATENT COSMOS SYNTH / CURRENT CHECKPOINT</div>
-        <h1>Listening deck</h1>
+  <main class="page">
+    <section class="instrument" aria-label="Latent Cosmos 潜空间乐器">
+      <i class="screw tl" aria-hidden="true"></i>
+      <i class="screw tr" aria-hidden="true"></i>
+      <i class="screw bl" aria-hidden="true"></i>
+      <i class="screw br" aria-hidden="true"></i>
+
+      <header class="masthead">
+        <div>
+          <div class="brand-line">MIDI · TIMBRE · WAVE SEQUENCE</div>
+          <h1>Latent <span>Instrument</span></h1>
+        </div>
+        <div class="system-state" role="status" aria-live="polite">
+          <span class="lamp" id="statusLamp"></span>
+          <span id="statusText">正在读取 runtime-audition-manifest.json</span>
+        </div>
+      </header>
+
+      <div class="performance">
+        <section class="control-bank" aria-labelledby="controlTitle">
+          <div class="section-label"><strong id="controlTitle">Sound state</strong><span>三路独立控制</span></div>
+          <div class="selectors">
+            <div class="selector">
+              <div class="selector-code">S</div>
+              <div class="selector-control">
+                <label for="seedSelect">Wave seed · 初始波形状态</label>
+                <select id="seedSelect" disabled></select>
+              </div>
+            </div>
+            <div class="selector">
+              <div class="selector-code">T</div>
+              <div class="selector-control">
+                <label for="timbreSelect">Timbre latent · 音色语义</label>
+                <select id="timbreSelect" disabled></select>
+              </div>
+            </div>
+            <div class="selector">
+              <div class="selector-code">N</div>
+              <div class="selector-control">
+                <label for="noteSelect">MIDI note · 音高</label>
+                <select id="noteSelect" disabled></select>
+              </div>
+            </div>
+          </div>
+          <div class="transport">
+            <button class="play-button" id="playButton" type="button" disabled>
+              <span class="play-icon" aria-hidden="true"></span>
+              <span id="playLabel">播放当前状态</span>
+            </button>
+            <button class="loop-button" id="loopButton" type="button" aria-pressed="false">LOOP<br>OFF</button>
+          </div>
+        </section>
+
+        <section class="scope-bank" aria-labelledby="scopeTitle">
+          <div class="section-label"><strong id="scopeTitle">Generated signal</strong><span id="clipState">NO CLIP</span></div>
+          <div class="scope-frame">
+            <canvas id="waveform" tabindex="0" aria-label="音频波形；点击可跳转播放位置"></canvas>
+            <span class="scope-caption">RAVE LATENT → DECODER → PCM</span>
+            <span class="scope-value" id="timeReadout">00:00.000 / 00:00.000</span>
+          </div>
+          <div class="readouts">
+            <div class="readout"><span>Seed</span><strong id="seedReadout">—</strong></div>
+            <div class="readout"><span>Timbre</span><strong id="timbreReadout">—</strong></div>
+            <div class="readout"><span>MIDI</span><strong id="noteReadout">—</strong></div>
+            <div class="readout"><span>Sample rate</span><strong id="rateReadout">—</strong></div>
+          </div>
+          <label class="volume-row" for="volume">
+            OUTPUT
+            <input id="volume" type="range" min="0" max="1" step="0.01" value="0.82">
+            <span id="volumeValue">82%</span>
+          </label>
+        </section>
       </div>
-      <div class="status"><span class="lamp"></span><span id="statusText">读取试听数据</span></div>
-    </header>
 
-    <div class="toolbar">
-      <button class="tool" id="blindButton" aria-pressed="false">盲听标签</button>
-      <button class="tool" id="loopButton" aria-pressed="true">循环播放</button>
-      <button class="tool" id="stopButton">全部停止</button>
-      <label class="file-label">载入本地 manifest<input id="manifestPicker" type="file" accept="application/json"></label>
-      <label class="volume">VOLUME <input id="volume" type="range" min="0" max="1" step=".01" value=".8"></label>
-    </div>
-
-    <section class="workspace">
-      <aside class="browser">
-        <div class="panel-head"><span>TAKES</span><span id="takeCount">00</span></div>
-        <div id="sampleList"></div>
-      </aside>
-      <section class="deck">
-        <div id="content" class="empty">
-          <div><strong>等待渲染音频</strong>页面会自动读取 audition-manifest.json，也可以手动载入。</div>
+      <section class="matrix-panel" aria-labelledby="matrixTitle">
+        <div class="matrix-intro">
+          <h2 id="matrixTitle">Control matrix</h2>
+          <p>锁定另外两路，单击一个状态立即试听。</p>
+        </div>
+        <div class="matrix-stack">
+          <section class="matrix-row" aria-labelledby="notesTitle">
+            <div class="matrix-label">
+              <strong id="notesTitle">Change note</strong>
+              <span>固定音色与 seed，仅改变 MIDI 音高</span>
+            </div>
+            <div class="matrix-options" id="noteMatrix"></div>
+          </section>
+          <section class="matrix-row" aria-labelledby="timbresTitle">
+            <div class="matrix-label">
+              <strong id="timbresTitle">Change timbre</strong>
+              <span>固定 note 与 seed，直接切换音色语义 latent</span>
+            </div>
+            <div class="matrix-options" id="timbreMatrix"></div>
+          </section>
+          <section class="matrix-row" aria-labelledby="seedsTitle">
+            <div class="matrix-label">
+              <strong id="seedsTitle">Change seed</strong>
+              <span>固定 note 与音色，比较初始 RAVE 波形状态</span>
+            </div>
+            <div class="matrix-options" id="seedMatrix"></div>
+          </section>
         </div>
       </section>
-    </section>
 
-    <footer class="foot">
-      <span>快捷键 1–6 播放当前六条轨道 · Space 停止</span>
-      <span><em>注意</em>：这是 Phase3 2k checkpoint 的真实输出，不是训练 loss 的声音代理。</span>
-    </footer>
+      <footer class="utility-bar">
+        <span id="modelInfo">SPACE 播放/暂停 · [ ] 切 note · , . 切音色 · - = 切 seed · L 循环</span>
+        <label class="load-label">载入本地 manifest<input id="manifestPicker" type="file" accept="application/json,.json"></label>
+      </footer>
+    </section>
   </main>
 
   <script>
-    const state = { data: null, index: 0, blind: false, loop: true, volume: .8, audios: [] };
-    const pairs = [
-      { title: 'Baseline', hint: '原音与自由滚动', kinds: ['source-reference', 'source-rollout'] },
-      { title: 'MIDI control', hint: '同音色，改目标音高', kinds: ['midi-reference', 'midi-swap'] },
-      { title: 'CLAP control', hint: '同音高，直接换目标音色', kinds: ['timbre-reference', 'timbre-direct'] }
-    ];
-    const $ = s => document.querySelector(s);
-    const fmtNote = n => `N${String(n).padStart(3, '0')}`;
+    const $ = (selector) => document.querySelector(selector);
+    const state = {
+      manifest: null,
+      seedIndex: 0,
+      timbreIndex: 0,
+      noteIndex: 0,
+      loop: false,
+      volume: 0.82,
+      waveform: null,
+      waveformToken: 0,
+      animationFrame: 0,
+      audioContext: null
+    };
 
-    function stopAll() {
-      state.audios.forEach(a => { a.pause(); a.currentTime = 0; });
-      document.querySelectorAll('.track').forEach(x => x.classList.remove('playing'));
+    const audio = new Audio();
+    audio.preload = 'metadata';
+    audio.volume = state.volume;
+
+    function keyFor(seed, timbre, note) {
+      return `${String(seed)}\u241f${String(timbre)}\u241f${Number(note)}`;
     }
 
-    function renderList() {
-      const list = $('#sampleList'); list.innerHTML = '';
-      state.data.examples.forEach((item, i) => {
-        const b = document.createElement('button');
-        b.className = `sample-button${i === state.index ? ' active' : ''}`;
-        b.innerHTML = `<span class="sample-number">${String(i + 1).padStart(2, '0')}</span><span class="sample-name">${item.source_id}</span>`;
-        b.onclick = () => { stopAll(); state.index = i; renderList(); renderDeck(); };
-        list.appendChild(b);
+    function noteName(note) {
+      const names = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+      const value = Number(note);
+      return `${names[((value % 12) + 12) % 12]}${Math.floor(value / 12) - 1}`;
+    }
+
+    function formatTime(seconds) {
+      if (!Number.isFinite(seconds)) return '00:00.000';
+      const minutes = Math.floor(seconds / 60);
+      const rest = seconds - minutes * 60;
+      return `${String(minutes).padStart(2, '0')}:${rest.toFixed(3).padStart(6, '0')}`;
+    }
+
+    function currentSeed() { return state.manifest?.seeds[state.seedIndex]; }
+    function currentTimbre() { return state.manifest?.timbres[state.timbreIndex]; }
+    function currentNote() { return state.manifest?.notes[state.noteIndex]; }
+
+    function currentClip() {
+      if (!state.manifest) return null;
+      return state.clipMap.get(keyFor(currentSeed().id, currentTimbre().id, currentNote())) || null;
+    }
+
+    function setStatus(message, isError = false) {
+      $('#statusText').textContent = message;
+      $('#statusLamp').classList.toggle('error', isError);
+    }
+
+    function fillSelect(select, items, labelFor) {
+      select.replaceChildren();
+      items.forEach((item, index) => {
+        const option = document.createElement('option');
+        option.value = String(index);
+        option.textContent = labelFor(item, index);
+        select.appendChild(option);
       });
-      $('#takeCount').textContent = String(state.data.examples.length).padStart(2, '0');
+      select.disabled = false;
     }
 
-    async function drawWave(canvas, src, audio) {
-      const ctx = canvas.getContext('2d');
-      const paintBase = () => { ctx.fillStyle = '#0c1218'; ctx.fillRect(0,0,canvas.width,canvas.height); };
-      paintBase();
-      try {
-        const buffer = await fetch(src).then(r => r.arrayBuffer());
-        const ac = new (window.AudioContext || window.webkitAudioContext)();
-        const decoded = await ac.decodeAudioData(buffer); const data = decoded.getChannelData(0);
-        const bins = Math.max(80, Math.floor(canvas.width / 3)); const step = Math.max(1, Math.floor(data.length / bins));
-        ctx.strokeStyle = '#ffb44b'; ctx.lineWidth = 1; ctx.beginPath();
-        for (let i=0;i<bins;i++) {
-          let peak = 0; for (let j=0;j<step;j++) peak = Math.max(peak, Math.abs(data[i*step+j] || 0));
-          const x = i / (bins-1) * canvas.width, h = peak * canvas.height * .46;
-          ctx.moveTo(x, canvas.height/2-h); ctx.lineTo(x, canvas.height/2+h);
+    function findAvailableSelection() {
+      for (let seedIndex = 0; seedIndex < state.manifest.seeds.length; seedIndex += 1) {
+        for (let timbreIndex = 0; timbreIndex < state.manifest.timbres.length; timbreIndex += 1) {
+          for (let noteIndex = 0; noteIndex < state.manifest.notes.length; noteIndex += 1) {
+            const seed = state.manifest.seeds[seedIndex].id;
+            const timbre = state.manifest.timbres[timbreIndex].id;
+            const note = state.manifest.notes[noteIndex];
+            if (state.clipMap.has(keyFor(seed, timbre, note))) return { seedIndex, timbreIndex, noteIndex };
+          }
         }
-        ctx.stroke(); await ac.close();
-      } catch (_) {
-        ctx.fillStyle = '#8999a6'; ctx.font = '10px Consolas'; ctx.fillText('WAVEFORM UNAVAILABLE', 10, 18);
       }
-      const drawHead = () => {
-        const p = audio.duration ? audio.currentTime / audio.duration : 0;
-        ctx.fillStyle = 'rgba(117,201,255,.9)'; ctx.fillRect(p * canvas.width, 0, 2, canvas.height);
-        if (!audio.paused) requestAnimationFrame(() => { paintBase(); drawWaveStatic(); });
-      };
-      const snapshot = ctx.getImageData(0,0,canvas.width,canvas.height);
-      const drawWaveStatic = () => { ctx.putImageData(snapshot,0,0); drawHead(); };
-      audio.addEventListener('timeupdate', drawWaveStatic);
-      canvas.onclick = e => { if (audio.duration) audio.currentTime = e.offsetX / canvas.clientWidth * audio.duration; };
+      return null;
     }
 
-    function makeTrack(track, keyIndex) {
-      const el = document.createElement('article'); el.className = 'track';
-      const shown = state.blind ? (keyIndex % 2 ? 'B' : 'A') : track.label;
-      el.innerHTML = `<span class="key">KEY ${keyIndex + 1}</span><div class="track-top"><button class="play" aria-label="播放">▶</button><div class="track-label"><b>${shown}</b><span>${track.kind}</span></div></div><canvas class="wave" width="720" height="136"></canvas><div class="time">00:00.000</div>`;
-      const audio = new Audio(track.file); audio.loop = state.loop; audio.volume = state.volume; state.audios[keyIndex] = audio;
-      const play = el.querySelector('.play'), time = el.querySelector('.time');
-      play.onclick = () => {
-        if (audio.paused) { stopAll(); audio.currentTime = 0; audio.play(); el.classList.add('playing'); play.textContent = '■'; }
-        else stopAll();
-      };
-      audio.onended = () => { el.classList.remove('playing'); play.textContent = '▶'; };
-      audio.ontimeupdate = () => { time.textContent = `${audio.currentTime.toFixed(3).padStart(6,'0')} / ${(audio.duration || 0).toFixed(3)}`; };
-      drawWave(el.querySelector('.wave'), track.file, audio);
-      return el;
+    function validateManifest(data) {
+      if (!data || !Array.isArray(data.seeds) || !data.seeds.length) throw new Error('manifest 缺少 seeds');
+      if (!Array.isArray(data.timbres) || !data.timbres.length) throw new Error('manifest 缺少 timbres');
+      if (!Array.isArray(data.notes) || !data.notes.length) throw new Error('manifest 缺少 notes');
+      if (!Array.isArray(data.clips) || !data.clips.length) throw new Error('manifest 缺少 clips');
+      data.seeds.forEach((item) => { if (item.id === undefined) throw new Error('seed 缺少 id'); });
+      data.timbres.forEach((item) => { if (item.id === undefined) throw new Error('timbre 缺少 id'); });
+      data.clips.forEach((clip) => { if (!clip.file) throw new Error('clip 缺少 file'); });
+      return data;
     }
 
-    function renderDeck() {
-      state.audios = []; const item = state.data.examples[state.index];
-      const byKind = Object.fromEntries(item.tracks.map(t => [t.kind, t]));
-      const content = $('#content'); content.className = ''; content.innerHTML = `
-        <div class="readout"><div class="readout-title"><strong>${item.source_id}</strong><span>${item.source_preset}</span></div>
-        <div class="datum"><small>SOURCE</small><b>${fmtNote(item.source_note)}</b></div>
-        <div class="datum"><small>MIDI TARGET</small><b>${fmtNote(item.midi_target_note)}</b></div>
-        <div class="datum"><small>LENGTH</small><b>${item.duration_seconds.toFixed(2)}s</b></div></div><div class="pairs"></div>`;
-      const root = content.querySelector('.pairs'); let key = 0;
-      pairs.forEach(pair => {
-        const row = document.createElement('section'); row.className = 'pair';
-        row.innerHTML = `<div class="pair-label"><b>${pair.title}</b><span>${pair.hint}</span></div>`;
-        pair.kinds.forEach(kind => row.appendChild(makeTrack(byKind[kind], key++)));
-        root.appendChild(row);
+    function stopAudio(reset = false) {
+      audio.pause();
+      if (reset) audio.currentTime = 0;
+      updateTransport();
+      drawScope();
+    }
+
+    function updateTransport() {
+      const playing = !audio.paused;
+      $('#playButton').classList.toggle('playing', playing);
+      $('#playLabel').textContent = playing ? '暂停当前声音' : '播放当前状态';
+      if (playing) startScopeAnimation();
+    }
+
+    async function togglePlayback(restart = false) {
+      const clip = currentClip();
+      if (!clip) return;
+      if (!audio.paused && !restart) {
+        stopAudio(false);
+        return;
+      }
+      if (restart) audio.currentTime = 0;
+      try {
+        await audio.play();
+        updateTransport();
+      } catch (error) {
+        setStatus(`无法播放：${error.message}`, true);
+      }
+    }
+
+    function optionButton({ title, detail, active, available, onSelect }) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `matrix-button${active ? ' active' : ''}`;
+      button.disabled = !available;
+      button.setAttribute('aria-pressed', String(active));
+      const strong = document.createElement('b');
+      strong.textContent = title;
+      const small = document.createElement('small');
+      small.textContent = available ? detail : '未渲染';
+      button.append(strong, small);
+      button.addEventListener('click', onSelect);
+      return button;
+    }
+
+    function renderMatrices() {
+      const noteRoot = $('#noteMatrix');
+      const timbreRoot = $('#timbreMatrix');
+      const seedRoot = $('#seedMatrix');
+      noteRoot.replaceChildren();
+      timbreRoot.replaceChildren();
+      seedRoot.replaceChildren();
+
+      state.manifest.notes.forEach((note, index) => {
+        const available = state.clipMap.has(keyFor(currentSeed().id, currentTimbre().id, note));
+        noteRoot.appendChild(optionButton({
+          title: noteName(note),
+          detail: `MIDI ${note}`,
+          active: index === state.noteIndex,
+          available,
+          onSelect: () => selectState({ noteIndex: index }, true)
+        }));
+      });
+
+      state.manifest.timbres.forEach((timbre, index) => {
+        const available = state.clipMap.has(keyFor(currentSeed().id, timbre.id, currentNote()));
+        timbreRoot.appendChild(optionButton({
+          title: timbre.label || String(timbre.id),
+          detail: `T ${String(timbre.id)}`,
+          active: index === state.timbreIndex,
+          available,
+          onSelect: () => selectState({ timbreIndex: index }, true)
+        }));
+      });
+
+      state.manifest.seeds.forEach((seed, index) => {
+        const available = state.clipMap.has(keyFor(seed.id, currentTimbre().id, currentNote()));
+        seedRoot.appendChild(optionButton({
+          title: seed.label || String(seed.id),
+          detail: `S ${String(seed.id)}`,
+          active: index === state.seedIndex,
+          available,
+          onSelect: () => selectState({ seedIndex: index }, true)
+        }));
       });
     }
 
-    function loadData(data) {
-      if (!data || !Array.isArray(data.examples) || !data.examples.length) throw new Error('manifest 没有试听样本');
-      state.data = data; state.index = 0; $('#statusText').textContent = `${data.examples.length} TAKES READY`;
-      renderList(); renderDeck();
+    function syncReadouts() {
+      const clip = currentClip();
+      $('#seedReadout').textContent = currentSeed().label || String(currentSeed().id);
+      $('#timbreReadout').textContent = currentTimbre().label || String(currentTimbre().id);
+      $('#noteReadout').textContent = `${noteName(currentNote())} / ${currentNote()}`;
+      $('#rateReadout').textContent = state.manifest.sample_rate ? `${Number(state.manifest.sample_rate).toLocaleString()} Hz` : '—';
+      $('#clipState').textContent = clip ? 'CLIP READY' : 'COMBINATION MISSING';
+      $('#playButton').disabled = !clip;
+      $('#seedSelect').value = String(state.seedIndex);
+      $('#timbreSelect').value = String(state.timbreIndex);
+      $('#noteSelect').value = String(state.noteIndex);
     }
 
-    $('#blindButton').onclick = e => { state.blind = !state.blind; e.currentTarget.setAttribute('aria-pressed', state.blind); if(state.data) renderDeck(); };
-    $('#loopButton').onclick = e => { state.loop = !state.loop; e.currentTarget.setAttribute('aria-pressed', state.loop); state.audios.forEach(a => a.loop = state.loop); };
-    $('#stopButton').onclick = stopAll;
-    $('#volume').oninput = e => { state.volume = +e.target.value; state.audios.forEach(a => a.volume = state.volume); };
-    $('#manifestPicker').onchange = async e => { try { loadData(JSON.parse(await e.target.files[0].text())); } catch(err) { $('#statusText').textContent = err.message; } };
-    document.addEventListener('keydown', e => {
-      if (e.code === 'Space') { e.preventDefault(); stopAll(); }
-      const i = Number(e.key) - 1; if (i >= 0 && i < state.audios.length) document.querySelectorAll('.play')[i].click();
+    function selectState(next, autoplay = false) {
+      stopAudio(true);
+      Object.assign(state, next);
+      syncReadouts();
+      renderMatrices();
+      loadCurrentClip();
+      if (autoplay && currentClip()) togglePlayback(true);
+    }
+
+    function loadCurrentClip() {
+      const clip = currentClip();
+      state.waveform = null;
+      state.waveformToken += 1;
+      drawScope();
+      if (!clip) {
+        audio.removeAttribute('src');
+        audio.load();
+        setStatus('当前控制组合没有已渲染音频', true);
+        return;
+      }
+      audio.src = clip.file;
+      audio.loop = state.loop;
+      audio.volume = state.volume;
+      audio.load();
+      setStatus('当前控制状态已就绪');
+      loadWaveform(clip.file, state.waveformToken);
+    }
+
+    async function loadWaveform(file, token) {
+      try {
+        const response = await fetch(file);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.arrayBuffer();
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) throw new Error('浏览器不支持 AudioContext');
+        if (!state.audioContext) state.audioContext = new AudioContextClass();
+        const decoded = await state.audioContext.decodeAudioData(payload.slice(0));
+        if (token !== state.waveformToken) return;
+        const channel = decoded.getChannelData(0);
+        const bins = 620;
+        const blockSize = Math.max(1, Math.floor(channel.length / bins));
+        state.waveform = Array.from({ length: bins }, (_, bin) => {
+          const start = bin * blockSize;
+          const end = Math.min(channel.length, start + blockSize);
+          let min = 1;
+          let max = -1;
+          for (let index = start; index < end; index += 1) {
+            min = Math.min(min, channel[index]);
+            max = Math.max(max, channel[index]);
+          }
+          return [min, max];
+        });
+        drawScope();
+      } catch (error) {
+        if (token === state.waveformToken) {
+          state.waveform = [];
+          drawScope();
+        }
+      }
+    }
+
+    function canvasMetrics() {
+      const canvas = $('#waveform');
+      const rect = canvas.getBoundingClientRect();
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.max(1, Math.round(rect.width * ratio));
+      const height = Math.max(1, Math.round(rect.height * ratio));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      return { canvas, context: canvas.getContext('2d'), width, height, ratio };
+    }
+
+    function drawScope() {
+      const { context, width, height, ratio } = canvasMetrics();
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = '#07191a';
+      context.fillRect(0, 0, width, height);
+
+      context.strokeStyle = '#173735';
+      context.lineWidth = ratio;
+      context.beginPath();
+      for (let column = 1; column < 8; column += 1) {
+        const x = width * column / 8;
+        context.moveTo(x, 0);
+        context.lineTo(x, height);
+      }
+      for (let row = 1; row < 4; row += 1) {
+        const y = height * row / 4;
+        context.moveTo(0, y);
+        context.lineTo(width, y);
+      }
+      context.stroke();
+
+      if (Array.isArray(state.waveform) && state.waveform.length) {
+        const center = height / 2;
+        const gain = height * .39;
+        context.beginPath();
+        state.waveform.forEach((range, index) => {
+          const x = index / (state.waveform.length - 1) * width;
+          const y = center - range[1] * gain;
+          if (index === 0) context.moveTo(x, y); else context.lineTo(x, y);
+        });
+        for (let index = state.waveform.length - 1; index >= 0; index -= 1) {
+          const range = state.waveform[index];
+          const x = index / (state.waveform.length - 1) * width;
+          context.lineTo(x, center - range[0] * gain);
+        }
+        context.closePath();
+        const gradient = context.createLinearGradient(0, 0, 0, height);
+        gradient.addColorStop(0, 'rgba(101,215,197,.08)');
+        gradient.addColorStop(.5, 'rgba(101,215,197,.38)');
+        gradient.addColorStop(1, 'rgba(101,215,197,.08)');
+        context.fillStyle = gradient;
+        context.fill();
+        context.strokeStyle = '#65d7c5';
+        context.lineWidth = ratio * 1.15;
+        context.stroke();
+      } else {
+        context.strokeStyle = '#2c746c';
+        context.lineWidth = ratio;
+        context.beginPath();
+        context.moveTo(0, height / 2);
+        context.lineTo(width, height / 2);
+        context.stroke();
+      }
+
+      const duration = audio.duration || Number(state.manifest?.duration_seconds) || 0;
+      if (duration > 0) {
+        const progress = Math.max(0, Math.min(1, audio.currentTime / duration));
+        context.fillStyle = '#e75e35';
+        context.fillRect(progress * width, 0, Math.max(2, ratio * 1.5), height);
+      }
+      $('#timeReadout').textContent = `${formatTime(audio.currentTime)} / ${formatTime(duration)}`;
+    }
+
+    function startScopeAnimation() {
+      cancelAnimationFrame(state.animationFrame);
+      const tick = () => {
+        drawScope();
+        if (!audio.paused) state.animationFrame = requestAnimationFrame(tick);
+      };
+      state.animationFrame = requestAnimationFrame(tick);
+    }
+
+    function loadManifest(raw) {
+      const manifest = validateManifest(raw);
+      const clipMap = new Map();
+      manifest.clips.forEach((clip) => clipMap.set(keyFor(clip.seed, clip.timbre, clip.note), clip));
+      state.manifest = { ...manifest, clipMap };
+      state.clipMap = clipMap;
+
+      fillSelect($('#seedSelect'), manifest.seeds, (seed) => seed.label || String(seed.id));
+      fillSelect($('#timbreSelect'), manifest.timbres, (timbre) => timbre.label || String(timbre.id));
+      fillSelect($('#noteSelect'), manifest.notes, (note) => `${noteName(note)} · MIDI ${note}`);
+
+      const available = findAvailableSelection();
+      if (!available) throw new Error('manifest 中没有可播放的控制组合');
+      Object.assign(state, available);
+      $('#modelInfo').textContent = `CHECKPOINT ${manifest.checkpoint || '未标注'} · ${manifest.clips.length} RENDERS · SPACE 播放/暂停`;
+      syncReadouts();
+      renderMatrices();
+      loadCurrentClip();
+      setStatus(`${manifest.clips.length} 个推理渲染已就绪`);
+    }
+
+    function stepIndex(key, delta, autoplay = true) {
+      const lengths = {
+        noteIndex: state.manifest.notes.length,
+        timbreIndex: state.manifest.timbres.length,
+        seedIndex: state.manifest.seeds.length
+      };
+      const next = (state[key] + delta + lengths[key]) % lengths[key];
+      selectState({ [key]: next }, autoplay);
+    }
+
+    $('#seedSelect').addEventListener('change', (event) => selectState({ seedIndex: Number(event.target.value) }));
+    $('#timbreSelect').addEventListener('change', (event) => selectState({ timbreIndex: Number(event.target.value) }));
+    $('#noteSelect').addEventListener('change', (event) => selectState({ noteIndex: Number(event.target.value) }));
+    $('#playButton').addEventListener('click', () => togglePlayback(false));
+    $('#loopButton').addEventListener('click', (event) => {
+      state.loop = !state.loop;
+      audio.loop = state.loop;
+      event.currentTarget.setAttribute('aria-pressed', String(state.loop));
+      event.currentTarget.innerHTML = `LOOP<br>${state.loop ? 'ON' : 'OFF'}`;
     });
-    fetch('audition-manifest.json').then(r => { if(!r.ok) throw new Error(); return r.json(); }).then(loadData).catch(() => {
-      if (window.AUDITION_DATA) loadData(window.AUDITION_DATA); else $('#statusText').textContent = 'WAITING FOR WAVS';
+    $('#volume').addEventListener('input', (event) => {
+      state.volume = Number(event.target.value);
+      audio.volume = state.volume;
+      $('#volumeValue').textContent = `${Math.round(state.volume * 100)}%`;
     });
+    $('#waveform').addEventListener('pointerdown', (event) => {
+      if (!Number.isFinite(audio.duration)) return;
+      const rect = event.currentTarget.getBoundingClientRect();
+      audio.currentTime = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * audio.duration;
+      drawScope();
+    });
+    $('#waveform').addEventListener('keydown', (event) => {
+      if (!Number.isFinite(audio.duration)) return;
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        audio.currentTime = Math.max(0, Math.min(audio.duration, audio.currentTime + (event.key === 'ArrowLeft' ? -0.25 : 0.25)));
+        drawScope();
+      }
+    });
+    $('#manifestPicker').addEventListener('change', async (event) => {
+      try {
+        loadManifest(JSON.parse(await event.target.files[0].text()));
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    });
+
+    audio.addEventListener('play', updateTransport);
+    audio.addEventListener('pause', updateTransport);
+    audio.addEventListener('ended', updateTransport);
+    audio.addEventListener('loadedmetadata', drawScope);
+    audio.addEventListener('error', () => setStatus('音频文件无法读取，请检查 manifest 中的路径', true));
+    window.addEventListener('resize', drawScope);
+    document.addEventListener('keydown', (event) => {
+      if (!state.manifest || event.ctrlKey || event.metaKey || event.altKey) return;
+      const tag = event.target.tagName;
+      if (tag === 'SELECT' || tag === 'INPUT') return;
+      if (event.code === 'Space') { event.preventDefault(); togglePlayback(false); }
+      else if (event.key === '[') stepIndex('noteIndex', -1);
+      else if (event.key === ']') stepIndex('noteIndex', 1);
+      else if (event.key === ',') stepIndex('timbreIndex', -1);
+      else if (event.key === '.') stepIndex('timbreIndex', 1);
+      else if (event.key === '-') stepIndex('seedIndex', -1);
+      else if (event.key === '=') stepIndex('seedIndex', 1);
+      else if (event.key.toLowerCase() === 'l') $('#loopButton').click();
+    });
+
+    drawScope();
+    fetch('runtime-audition-manifest.json')
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(loadManifest)
+      .catch(() => setStatus('等待 runtime-audition-manifest.json；也可手动载入', true));
   </script>
 </body>
 </html>
