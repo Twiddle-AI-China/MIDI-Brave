@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import shutil
@@ -14,6 +15,7 @@ import torch
 
 from midibrave.config import Config
 from midibrave.data import SampleRecord, load_manifest
+from midibrave.seed_bank import SeedBank
 
 
 TimbreCandidate = tuple[str, str, np.ndarray]
@@ -52,11 +54,45 @@ def select_diverse_timbres(
     return [candidates[index] for index in selected]
 
 
+def resolve_seed_selections(
+        bank: SeedBank, seed_anchor_clap: np.ndarray, seed_count: int,
+        random_seed: int, top_k: int = 8,
+) -> list[dict[str, object]]:
+    if seed_count <= 0:
+        raise ValueError("seed count must be positive")
+    anchor = torch.from_numpy(
+        np.asarray(seed_anchor_clap, dtype=np.float32)).view(1, -1)
+    controls = torch.nn.functional.normalize(anchor, dim=1)
+    candidates = torch.nn.functional.normalize(
+        torch.from_numpy(bank.clap.copy()).float(), dim=1)
+    similarities = controls @ candidates.transpose(0, 1)
+    count = min(max(1, top_k), bank.clap.shape[0])
+    values, indices = torch.topk(similarities, count, dim=1)
+    if seed_count > count:
+        raise ValueError("seed count exceeds the distinct top-k candidates")
+    selected: list[dict[str, object]] = []
+    for seed_id in range(seed_count):
+        choice = (random_seed + seed_id) % count
+        bank_index = int(indices[0, choice].item())
+        selected.append({
+            "id": seed_id,
+            "label": f"Seed {chr(65 + seed_id)}",
+            "bank_index": bank_index,
+            "sample_id": bank.sample_ids[bank_index],
+            "distance": max(0.0, 1.0 - float(values[0, choice].item())),
+        })
+    return selected
+
+
 def validate_runtime_metadata(path: str | Path) -> dict[str, object]:
     metadata = json.loads(Path(path).read_text(encoding="utf-8"))
     if metadata.get("encoder_free") is not True:
         raise ValueError("runtime metadata must prove encoder_free=true")
-    for field in ("stride_frames", "samples_per_latent", "checkpoint_sha256"):
+    for field in (
+            "stride_frames", "samples_per_latent", "checkpoint_sha256",
+            "seed_bank_npz_sha256", "seed_bank_json_sha256",
+            "latent_statistics_sha256", "architecture", "history_frames",
+            "horizon_frames"):
         if field not in metadata:
             raise ValueError(f"runtime metadata is missing {field}")
     return metadata
@@ -81,38 +117,46 @@ def build_clip_manifest(
 
 @torch.inference_mode()
 def _render_audio_matrix(
-        runtime, claps: np.ndarray, combinations: Sequence[dict[str, int]],
+        runtime, claps: np.ndarray, seed_anchor_clap: np.ndarray,
+        combinations: Sequence[dict[str, int]],
         duration_samples: int, warmup_samples: int, block_samples: int,
         velocity: float, random_seed: int, device: torch.device,
 ) -> np.ndarray:
     batch = len(combinations)
     if batch == 0 or claps.shape[0] != batch:
         raise ValueError("CLAP controls must align with audition combinations")
+    if duration_samples <= 0 or block_samples <= 0:
+        raise ValueError("audition sample counts must be positive")
     clap_tensor = torch.from_numpy(
         np.asarray(claps, dtype=np.float32)).to(device=device)
-    histories = []
-    for index, combination in enumerate(combinations):
-        histories.append(runtime.initial_state(
-            clap_tensor[index:index + 1],
-            random_seed + int(combination["seed"]), 8,
-        ))
-    history = torch.cat(histories, dim=0)
-    notes = torch.tensor(
-        [row["note"] for row in combinations], device=device, dtype=torch.long)
-    velocities = torch.full(
-        (batch,), float(velocity), device=device, dtype=torch.float32)
+    anchor = torch.from_numpy(
+        np.asarray(seed_anchor_clap, dtype=np.float32)).to(device=device)
+    if anchor.ndim != 1 or anchor.shape[0] != clap_tensor.shape[1]:
+        raise ValueError("seed anchor CLAP dimension does not match target controls")
+    anchor = anchor.unsqueeze(0)
     warmup_blocks = math.ceil(warmup_samples / block_samples)
     render_blocks = math.ceil(duration_samples / block_samples)
-    rendered: list[torch.Tensor] = []
-    for step in range(warmup_blocks + render_blocks):
-        block, history = runtime.step(history, clap_tensor, notes, velocities)
-        if tuple(block.shape) != (batch, 1, block_samples):
-            raise RuntimeError("runtime emitted an invalid audio block shape")
-        if not torch.isfinite(block).all() or not torch.isfinite(history).all():
-            raise RuntimeError("runtime audition produced NaN/Inf")
-        if step >= warmup_blocks:
-            rendered.append(block[:, 0].float().cpu())
-    audio = torch.cat(rendered, dim=-1).numpy()[:, :duration_samples]
+    rows: list[np.ndarray] = []
+    for index, combination in enumerate(combinations):
+        history = runtime.initial_state(
+            anchor, random_seed + int(combination["seed"]), 8)
+        target_clap = clap_tensor[index:index + 1]
+        note = torch.tensor(
+            [combination["note"]], device=device, dtype=torch.long)
+        target_velocity = torch.full(
+            (1,), float(velocity), device=device, dtype=torch.float32)
+        rendered: list[torch.Tensor] = []
+        for step in range(warmup_blocks + render_blocks):
+            block, history = runtime.step(
+                history, target_clap, note, target_velocity)
+            if tuple(block.shape) != (1, 1, block_samples):
+                raise RuntimeError("runtime emitted an invalid audio block shape")
+            if not torch.isfinite(block).all() or not torch.isfinite(history).all():
+                raise RuntimeError("runtime audition produced NaN/Inf")
+            if step >= warmup_blocks:
+                rendered.append(block[0, 0].float().cpu())
+        rows.append(torch.cat(rendered).numpy()[:duration_samples])
+    audio = np.stack(rows)
     if audio.shape != (batch, duration_samples) or not np.isfinite(audio).all():
         raise RuntimeError("runtime audition produced invalid or NaN/Inf audio")
     return audio
@@ -147,9 +191,9 @@ def _candidate_timbres(
 
 def render_exported_runtime_audition(
         config_path: str, runtime_path: str, runtime_metadata_path: str,
-        output_path: str, seed_count: int, timbre_count: int, note_count: int,
-        duration_seconds: float, warmup_seconds: float, random_seed: int,
-        device_name: str,
+        seed_bank_path: str, output_path: str, seed_count: int,
+        timbre_count: int, note_count: int, duration_seconds: float,
+        warmup_seconds: float, random_seed: int, device_name: str,
 ) -> dict[str, object]:
     if min(seed_count, timbre_count, note_count) <= 0:
         raise ValueError("audition axis counts must be positive")
@@ -159,6 +203,30 @@ def render_exported_runtime_audition(
     if config.predictive is None:
         raise ValueError("runtime audition requires a predictive config")
     metadata = validate_runtime_metadata(runtime_metadata_path)
+    for field, expected in {
+        "architecture": config.predictive.architecture,
+        "history_frames": config.predictive.history_frames,
+        "horizon_frames": config.predictive.horizon_frames,
+        "stride_frames": config.predictive.stride_frames,
+        "samples_per_latent": config.predictive.samples_per_latent,
+    }.items():
+        if metadata[field] != expected:
+            raise ValueError(f"runtime metadata and config disagree on {field}")
+    seed_stem = Path(seed_bank_path)
+    seed_npz = seed_stem.with_suffix(".npz")
+    seed_json = seed_stem.with_suffix(".json")
+    for path, field in (
+            (seed_npz, "seed_bank_npz_sha256"),
+            (seed_json, "seed_bank_json_sha256")):
+        measured = hashlib.sha256(path.read_bytes()).hexdigest()
+        if measured != metadata[field]:
+            raise ValueError(f"runtime metadata {field} does not match the seed bank")
+    bank = SeedBank.load(seed_stem, {
+        "architecture": config.predictive.architecture,
+        "latent_dim": config.predictive.rave_latent_dim,
+        "history_frames": config.predictive.history_frames,
+        "samples_per_latent": config.predictive.samples_per_latent,
+    })
     block_samples = int(metadata["stride_frames"]) * int(
         metadata["samples_per_latent"])
     records = load_manifest(config.data.manifest)
@@ -166,18 +234,29 @@ def render_exported_runtime_audition(
     cache_root = Path(config.data.cache_root)
     timbres = select_diverse_timbres(
         _candidate_timbres(records, cache_root), timbre_count, random_seed)
+    seed_anchor = timbres[0][2]
+    seed_selections = resolve_seed_selections(
+        bank, seed_anchor, seed_count, random_seed)
     combinations, clips = build_clip_manifest(seed_count, timbres, notes)
     clap_matrix = np.stack([
         timbres[row["timbre"]][2] for row in combinations
     ]).astype(np.float32, copy=False)
     device = torch.device(device_name)
     runtime = torch.jit.load(str(runtime_path), map_location=device).to(device).eval()
+    anchor_tensor = torch.from_numpy(seed_anchor).to(device=device).unsqueeze(0)
+    for selection in seed_selections:
+        history = runtime.initial_state(
+            anchor_tensor, random_seed + int(selection["id"]), 8)
+        expected = torch.from_numpy(
+            bank.latents[int(selection["bank_index"])]).to(device=device)
+        if not torch.allclose(history[0], expected, rtol=1e-5, atol=1e-6):
+            raise RuntimeError("runtime seed selection does not match the audited seed bank")
     duration_samples = round(duration_seconds * config.data.sample_rate)
     warmup_samples = round(warmup_seconds * config.data.sample_rate)
     velocity = float(max(record.velocity for record in records))
     audio = _render_audio_matrix(
-        runtime, clap_matrix, combinations, duration_samples, warmup_samples,
-        block_samples, velocity, random_seed, device)
+        runtime, clap_matrix, seed_anchor, combinations, duration_samples,
+        warmup_samples, block_samples, velocity, random_seed, device)
 
     destination = Path(output_path)
     wav_root = destination / "runtime-examples"
@@ -189,17 +268,28 @@ def render_exported_runtime_audition(
     manifest: dict[str, object] = {
         "schema": 3,
         "encoder_free": True,
+        "checkpoint": f"sha256:{metadata['checkpoint_sha256']}",
         "checkpoint_sha256": metadata["checkpoint_sha256"],
+        "runtime_sha256": hashlib.sha256(Path(runtime_path).read_bytes()).hexdigest(),
+        "config_sha256": hashlib.sha256(Path(config_path).read_bytes()).hexdigest(),
         "runtime_metadata": "runtime.pt.json",
         "sample_rate": int(config.data.sample_rate),
         "duration_seconds": duration_samples / config.data.sample_rate,
+        "warmup_seconds": warmup_samples / config.data.sample_rate,
+        "warmup_blocks": math.ceil(warmup_samples / block_samples),
+        "block_samples": block_samples,
         "velocity": int(velocity),
         "random_seed": int(random_seed),
-        "architecture": metadata,
-        "seeds": [
-            {"id": index, "label": f"Seed {chr(65 + index)}"}
-            for index in range(seed_count)
-        ],
+        "architecture": {
+            field: metadata[field] for field in (
+                "architecture", "history_frames", "horizon_frames",
+                "stride_frames", "samples_per_latent")
+        },
+        "seed_anchor": {
+            "timbre": 0, "preset_id": timbres[0][0],
+            "sample_id": timbres[0][1],
+        },
+        "seeds": seed_selections,
         "timbres": [
             {"id": index, "label": f"Pad {index + 1}",
              "preset_id": item[0], "sample_id": item[1]}
@@ -227,6 +317,7 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--runtime", required=True)
     parser.add_argument("--runtime-metadata")
+    parser.add_argument("--seed-bank", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--seeds", type=int, default=3)
     parser.add_argument("--timbres", type=int, default=4)
@@ -239,7 +330,7 @@ def main() -> None:
     runtime_metadata = args.runtime_metadata or str(
         Path(args.runtime).with_suffix(Path(args.runtime).suffix + ".json"))
     render_exported_runtime_audition(
-        args.config, args.runtime, runtime_metadata, args.output,
+        args.config, args.runtime, runtime_metadata, args.seed_bank, args.output,
         args.seeds, args.timbres, args.notes, args.duration, args.warmup,
         args.random_seed, args.device)
 
