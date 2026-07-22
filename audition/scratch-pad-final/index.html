@@ -1,0 +1,836 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>潜空间试听台 · Scratch Pad</title>
+  <style>
+    :root {
+      --bench: #78858a;
+      --bench-shadow: #59656a;
+      --aluminium: #d7dde0;
+      --aluminium-hi: #edf1f1;
+      --aluminium-low: #b9c1c4;
+      --ink: #172229;
+      --muted: #59676e;
+      --line: #98a3a7;
+      --screen: #061d2a;
+      --screen-grid: #174253;
+      --screen-ink: #8ce9ff;
+      --seed: #f36b4f;
+      --timbre: #c662d7;
+      --note: #e6b83e;
+      --ok: #57d19b;
+      --error: #db4b45;
+      --white: #f8faf8;
+      --shadow: rgba(14, 24, 30, .34);
+      --display: "Bahnschrift Condensed", "Arial Narrow", sans-serif;
+      --body: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: "Cascadia Mono", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      min-width: 320px;
+      background: var(--bench);
+      color: var(--ink);
+      font-family: var(--body);
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        repeating-linear-gradient(89deg, rgba(255,255,255,.025) 0 1px, transparent 1px 9px),
+        linear-gradient(145deg, #8d999d 0%, var(--bench) 45%, var(--bench-shadow) 100%);
+    }
+
+    button, select, input { font: inherit; }
+    button, select { color: inherit; }
+
+    .page {
+      width: min(1440px, calc(100% - 30px));
+      margin: 0 auto;
+      padding: 26px 0 38px;
+    }
+
+    .instrument {
+      position: relative;
+      overflow: hidden;
+      border: 2px solid #2c393f;
+      border-radius: 20px;
+      background: var(--aluminium);
+      box-shadow: 0 5px 0 #233037, 0 25px 65px var(--shadow), inset 0 1px var(--white);
+    }
+
+    .instrument::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      opacity: .35;
+      background: repeating-linear-gradient(92deg, transparent 0 5px, rgba(40,55,62,.025) 5px 6px);
+    }
+
+    .screw {
+      position: absolute;
+      z-index: 5;
+      width: 11px;
+      height: 11px;
+      border: 1px solid #788387;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #f8faf8, #8f999c);
+      box-shadow: inset 0 0 0 2px #c6ccce;
+    }
+    .screw::after {
+      content: "";
+      position: absolute;
+      top: 4px;
+      left: 2px;
+      width: 5px;
+      height: 1px;
+      background: #526066;
+      transform: rotate(-24deg);
+    }
+    .screw.tl { top: 10px; left: 10px; }
+    .screw.tr { top: 10px; right: 10px; }
+    .screw.bl { bottom: 10px; left: 10px; }
+    .screw.br { right: 10px; bottom: 10px; }
+
+    .masthead {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(310px, .75fr);
+      gap: 34px;
+      align-items: end;
+      padding: 30px 42px 24px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font: 800 10px/1.2 var(--mono);
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before {
+      content: "";
+      width: 27px;
+      height: 3px;
+      background: linear-gradient(90deg, var(--seed) 0 33%, var(--timbre) 33% 66%, var(--note) 66%);
+    }
+
+    h1 {
+      margin: 0;
+      font: 900 clamp(38px, 6vw, 82px)/.83 var(--display);
+      letter-spacing: -.055em;
+      text-transform: uppercase;
+    }
+    h1 span {
+      color: transparent;
+      -webkit-text-stroke: 1.5px var(--ink);
+    }
+
+    .thesis {
+      margin: 13px 0 0;
+      max-width: 720px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .contract {
+      display: grid;
+      gap: 9px;
+      padding: 15px;
+      border: 1px solid #8c999e;
+      background: rgba(238,242,242,.58);
+      box-shadow: inset 0 1px rgba(255,255,255,.7);
+    }
+    .contract-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      font: 700 10px/1.35 var(--mono);
+    }
+    .contract-line span { color: var(--muted); }
+    .contract-line strong {
+      overflow: hidden;
+      text-align: right;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding-top: 9px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font: 700 10px/1.4 var(--mono);
+    }
+    .lamp {
+      flex: 0 0 auto;
+      width: 9px;
+      height: 9px;
+      border: 1px solid #2f7960;
+      border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 10px rgba(87,209,155,.8);
+    }
+    .lamp.loading { border-color: #8c6d20; background: var(--note); box-shadow: 0 0 10px rgba(230,184,62,.75); }
+    .lamp.error { border-color: #862b28; background: var(--error); box-shadow: 0 0 10px rgba(219,75,69,.65); }
+
+    .console {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(300px, .74fr) minmax(520px, 1.35fr);
+      min-height: 460px;
+    }
+
+    .controls {
+      padding: 28px 28px 30px 42px;
+      border-right: 1px solid var(--line);
+      background: linear-gradient(135deg, rgba(255,255,255,.26), transparent 62%);
+    }
+    .panel-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 17px;
+      color: var(--muted);
+      font: 800 9px/1.2 var(--mono);
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+    .panel-label strong { color: var(--ink); }
+
+    .axis-stack { display: grid; gap: 12px; }
+    .axis {
+      --axis-color: var(--seed);
+      display: grid;
+      grid-template-columns: 62px minmax(0, 1fr);
+      min-height: 83px;
+      border: 1px solid var(--line);
+      background: var(--aluminium-hi);
+      box-shadow: inset 0 1px white;
+    }
+    .axis.timbre { --axis-color: var(--timbre); }
+    .axis.note { --axis-color: var(--note); }
+    .axis-mark {
+      position: relative;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      border-right: 1px solid var(--line);
+      font: 900 28px/1 var(--display);
+    }
+    .axis-mark::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      height: 7px;
+      background: var(--axis-color);
+    }
+    .axis-field { padding: 11px 12px 10px; }
+    .axis-field label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font: 800 9px/1.15 var(--mono);
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+    .axis-field select {
+      width: 100%;
+      min-height: 36px;
+      padding: 5px 32px 5px 9px;
+      border: 1px solid #aeb7ba;
+      border-radius: 0;
+      background: #fff;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .axis-field select:disabled { opacity: .55; cursor: not-allowed; }
+
+    .transport {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 72px;
+      gap: 10px;
+      margin-top: 18px;
+    }
+    .play {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      min-height: 67px;
+      border: 2px solid #27363d;
+      border-radius: 3px;
+      background: #25343b;
+      color: var(--white);
+      box-shadow: inset 0 -5px rgba(0,0,0,.22), 0 3px #111c21;
+      font: 900 17px/1 var(--display);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .play:hover { background: #30434b; }
+    .play:active { transform: translateY(2px); box-shadow: inset 0 -2px rgba(0,0,0,.22), 0 1px #111c21; }
+    .play:disabled { opacity: .45; cursor: not-allowed; }
+    .play-icon {
+      width: 0;
+      height: 0;
+      border-top: 8px solid transparent;
+      border-bottom: 8px solid transparent;
+      border-left: 13px solid var(--screen-ink);
+    }
+    .play.playing .play-icon {
+      width: 13px;
+      height: 15px;
+      border: 0;
+      border-right: 4px solid var(--screen-ink);
+      border-left: 4px solid var(--screen-ink);
+    }
+    .loop {
+      border: 1px solid var(--line);
+      background: #b6bfc2;
+      color: #435159;
+      font: 800 9px/1.35 var(--mono);
+      cursor: pointer;
+    }
+    .loop[aria-pressed="true"] { border-color: #3b7180; background: var(--screen); color: var(--screen-ink); }
+
+    .scope-panel { min-width: 0; padding: 28px 42px 29px 29px; }
+    .scope {
+      position: relative;
+      overflow: hidden;
+      min-height: 318px;
+      border: 8px solid #26353c;
+      border-radius: 11px;
+      background: var(--screen);
+      box-shadow: inset 0 0 40px rgba(0,0,0,.75), 0 4px #132027;
+    }
+    .scope::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(to bottom, transparent 0 3px, rgba(140,233,255,.025) 3px 4px);
+    }
+    #waveform {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+    .scope-tag, .scope-time {
+      position: absolute;
+      z-index: 2;
+      color: rgba(140,233,255,.68);
+      font: 700 9px/1 var(--mono);
+      letter-spacing: .12em;
+      pointer-events: none;
+    }
+    .scope-tag { top: 14px; left: 16px; }
+    .scope-time { right: 16px; bottom: 14px; color: var(--screen-ink); }
+
+    .readouts {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      background: var(--line);
+    }
+    .readout { min-width: 0; padding: 10px 11px; background: #e9edee; }
+    .readout span {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font: 800 8px/1.2 var(--mono);
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+    .readout strong {
+      display: block;
+      overflow: hidden;
+      font: 800 11px/1.3 var(--mono);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .level {
+      display: grid;
+      grid-template-columns: auto minmax(100px, 1fr) 38px;
+      gap: 11px;
+      align-items: center;
+      margin-top: 14px;
+      color: var(--muted);
+      font: 800 9px/1 var(--mono);
+      letter-spacing: .1em;
+    }
+    .level input { width: 100%; accent-color: #2f6c7c; }
+
+    .matrix {
+      position: relative;
+      padding: 26px 42px 34px;
+      border-top: 1px solid var(--line);
+      background: var(--aluminium-low);
+    }
+    .matrix-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 22px;
+      align-items: baseline;
+      margin-bottom: 15px;
+    }
+    .matrix h2 { margin: 0; font: 900 24px/1 var(--display); letter-spacing: .02em; text-transform: uppercase; }
+    .matrix-head p { margin: 0; color: var(--muted); font-size: 12px; }
+    .matrix-stack { display: grid; gap: 10px; }
+    .matrix-row {
+      --axis-color: var(--seed);
+      display: grid;
+      grid-template-columns: 190px minmax(0, 1fr);
+      min-height: 88px;
+      border: 1px solid #879398;
+      background: #dce1e2;
+    }
+    .matrix-row.timbre { --axis-color: var(--timbre); }
+    .matrix-row.note { --axis-color: var(--note); }
+    .matrix-label {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 13px 16px 13px 22px;
+      border-right: 1px solid #879398;
+      background: #c5ccce;
+    }
+    .matrix-label::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      width: 7px;
+      background: var(--axis-color);
+    }
+    .matrix-label strong { font: 900 15px/1.1 var(--display); letter-spacing: .035em; text-transform: uppercase; }
+    .matrix-label span { margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+    .matrix-options {
+      display: flex;
+      gap: 7px;
+      overflow-x: auto;
+      align-items: stretch;
+      padding: 8px;
+      scrollbar-color: #7f8c91 transparent;
+      scrollbar-width: thin;
+    }
+    .matrix-button {
+      flex: 0 0 auto;
+      min-width: 106px;
+      min-height: 70px;
+      padding: 9px 11px;
+      border: 1px solid #9ba6aa;
+      border-bottom: 5px solid var(--axis-color);
+      border-radius: 2px;
+      background: #f3f5f4;
+      text-align: left;
+      cursor: pointer;
+      transition: transform .12s, background .12s, border-color .12s;
+    }
+    .matrix-button:hover { transform: translateY(-1px); border-color: #4a5b63; }
+    .matrix-button.active { background: #24363e; color: var(--white); border-color: #10232c; border-bottom-color: var(--axis-color); }
+    .matrix-button:disabled { opacity: .42; cursor: not-allowed; transform: none; }
+    .matrix-button b { display: block; font: 800 13px/1.2 var(--mono); }
+    .matrix-button small {
+      display: block;
+      max-width: 165px;
+      overflow: hidden;
+      margin-top: 6px;
+      color: var(--muted);
+      font: 700 9px/1.2 var(--mono);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .matrix-button.active small { color: #b8c8ce; }
+
+    .footer {
+      position: relative;
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 12px 42px;
+      border-top: 1px solid #394850;
+      background: #25333a;
+      color: #aebbc0;
+      font: 700 9px/1.45 var(--mono);
+    }
+    .footer strong { color: var(--screen-ink); font-weight: 700; }
+
+    :focus-visible { outline: 3px solid #087fa5; outline-offset: 3px; }
+
+    @media (max-width: 960px) {
+      .page { width: min(100% - 18px, 780px); padding-top: 12px; }
+      .masthead { grid-template-columns: 1fr; gap: 20px; padding: 29px 28px 23px; }
+      .console { grid-template-columns: 1fr; }
+      .controls { padding: 24px 28px; border-right: 0; border-bottom: 1px solid var(--line); }
+      .scope-panel { padding: 24px 28px 27px; }
+      .matrix { padding: 24px 28px 29px; }
+      .footer { padding-inline: 28px; }
+    }
+
+    @media (max-width: 620px) {
+      .page { width: calc(100% - 8px); padding-top: 4px; }
+      .instrument { border-radius: 13px; }
+      .masthead, .controls, .scope-panel, .matrix { padding-left: 17px; padding-right: 17px; }
+      .scope { min-height: 235px; border-width: 6px; }
+      .readouts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .matrix-head { display: block; }
+      .matrix-head p { margin-top: 7px; }
+      .matrix-row { grid-template-columns: 1fr; }
+      .matrix-label { border-right: 0; border-bottom: 1px solid #879398; }
+      .matrix-label::before { top: 0; right: 0; bottom: auto; width: auto; height: 5px; }
+      .footer { flex-direction: column; padding-inline: 17px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="instrument" aria-label="Scratch Pad 潜空间试听台">
+      <i class="screw tl" aria-hidden="true"></i><i class="screw tr" aria-hidden="true"></i>
+      <i class="screw bl" aria-hidden="true"></i><i class="screw br" aria-hidden="true"></i>
+
+      <header class="masthead">
+        <div>
+          <div class="eyebrow">Scratch Pad · runtime audition</div>
+          <h1>潜空间<span>试听台</span></h1>
+          <p class="thesis">锁定两个控制轴，只切换第三个：判断 MIDI 是否独立控制音高、CLAP 是否改变音色，以及预测的 RAVE 序列能否持续保留波形细节。</p>
+        </div>
+        <div class="contract" aria-label="模型运行契约">
+          <div class="contract-line"><span>推理路径</span><strong>Seed → Predictor → Decoder</strong></div>
+          <div class="contract-line"><span>音频编码器</span><strong>REMOVED</strong></div>
+          <div class="contract-line"><span>Checkpoint</span><strong id="checkpointReadout">—</strong></div>
+          <div class="status-line" role="status" aria-live="polite">
+            <span class="lamp loading" id="statusLamp"></span>
+            <span id="statusText">正在读取 encoder-free 试听清单…</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="console">
+        <section class="controls" aria-labelledby="controlsTitle">
+          <div class="panel-label"><strong id="controlsTitle">Control state</strong><span>三路独立控制</span></div>
+          <div class="axis-stack">
+            <div class="axis seed">
+              <div class="axis-mark">S</div>
+              <div class="axis-field">
+                <label for="seedSelect">RAVE seed · 初始波形状态</label>
+                <select id="seedSelect" disabled></select>
+              </div>
+            </div>
+            <div class="axis timbre">
+              <div class="axis-mark">T</div>
+              <div class="axis-field">
+                <label for="timbreSelect">Pad CLAP · 音色语义</label>
+                <select id="timbreSelect" disabled></select>
+              </div>
+            </div>
+            <div class="axis note">
+              <div class="axis-mark">N</div>
+              <div class="axis-field">
+                <label for="noteSelect">MIDI note · 音高</label>
+                <select id="noteSelect" disabled></select>
+              </div>
+            </div>
+          </div>
+          <div class="transport">
+            <button class="play" id="playButton" type="button" disabled>
+              <span class="play-icon" aria-hidden="true"></span>
+              <span id="playLabel">播放当前状态</span>
+            </button>
+            <button class="loop" id="loopButton" type="button" aria-pressed="false">LOOP<br>OFF</button>
+          </div>
+        </section>
+
+        <section class="scope-panel" aria-labelledby="scopeTitle">
+          <div class="panel-label"><strong id="scopeTitle">Generated signal</strong><span id="clipState">NO CLIP</span></div>
+          <div class="scope">
+            <canvas id="waveform" tabindex="0" aria-label="生成音频波形，点击可跳转播放位置"></canvas>
+            <span class="scope-tag">PREDICTED RAVE → DECODER → PCM</span>
+            <span class="scope-time" id="timeReadout">00:00.000 / 00:00.000</span>
+          </div>
+          <div class="readouts">
+            <div class="readout"><span>Seed</span><strong id="seedReadout">—</strong></div>
+            <div class="readout"><span>Timbre</span><strong id="timbreReadout">—</strong></div>
+            <div class="readout"><span>MIDI</span><strong id="noteReadout">—</strong></div>
+            <div class="readout"><span>Sample rate</span><strong id="rateReadout">—</strong></div>
+          </div>
+          <label class="level" for="volume">
+            <span>OUTPUT</span>
+            <input id="volume" type="range" min="0" max="1" step="0.01" value="0.82">
+            <span id="volumeValue">82%</span>
+          </label>
+        </section>
+      </div>
+
+      <section class="matrix" aria-labelledby="matrixTitle">
+        <div class="matrix-head">
+          <h2 id="matrixTitle">One-axis comparison</h2>
+          <p>单击一个控制值立即试听；另外两个轴保持锁定。</p>
+        </div>
+        <div class="matrix-stack">
+          <section class="matrix-row note" aria-labelledby="noteRowTitle">
+            <div class="matrix-label"><strong id="noteRowTitle">Change MIDI note</strong><span>检查独立音高控制与高低音区稳定性</span></div>
+            <div class="matrix-options" id="noteMatrix"></div>
+          </section>
+          <section class="matrix-row timbre" aria-labelledby="timbreRowTitle">
+            <div class="matrix-label"><strong id="timbreRowTitle">Change Pad timbre</strong><span>固定 note 与 seed，切换离散 CLAP 音色</span></div>
+            <div class="matrix-options" id="timbreMatrix"></div>
+          </section>
+          <section class="matrix-row seed" aria-labelledby="seedRowTitle">
+            <div class="matrix-label"><strong id="seedRowTitle">Change RAVE seed</strong><span>固定 note 与音色，比较初始序列状态</span></div>
+            <div class="matrix-options" id="seedMatrix"></div>
+          </section>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span><strong>SPACE</strong> 播放/暂停 · <strong>[ ]</strong> MIDI · <strong>, .</strong> 音色 · <strong>- =</strong> Seed · <strong>L</strong> 循环</span>
+        <span id="modelInfo">等待 runtime manifest</span>
+      </footer>
+      <audio id="audio" preload="auto"></audio>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const $ = (id) => document.getElementById(id);
+      const els = {
+        audio: $("audio"), seed: $("seedSelect"), timbre: $("timbreSelect"), note: $("noteSelect"),
+        play: $("playButton"), playLabel: $("playLabel"), loop: $("loopButton"), volume: $("volume"),
+        volumeValue: $("volumeValue"), canvas: $("waveform"), time: $("timeReadout"), clipState: $("clipState"),
+        lamp: $("statusLamp"), status: $("statusText"), checkpoint: $("checkpointReadout"), model: $("modelInfo"),
+        seedReadout: $("seedReadout"), timbreReadout: $("timbreReadout"), noteReadout: $("noteReadout"), rate: $("rateReadout"),
+        seedMatrix: $("seedMatrix"), timbreMatrix: $("timbreMatrix"), noteMatrix: $("noteMatrix")
+      };
+
+      const state = { manifest: null, clips: new Map(), seed: 0, timbre: 0, note: null, token: 0, samples: null };
+      let audioContext = null;
+
+      function key(seed, timbre, note) { return `${seed}:${timbre}:${note}`; }
+      function midiName(note) {
+        const names = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
+        return `${names[note % 12]}${Math.floor(note / 12) - 1}`;
+      }
+      function formatTime(seconds) {
+        if (!Number.isFinite(seconds)) seconds = 0;
+        const minutes = Math.floor(seconds / 60);
+        const remain = seconds - minutes * 60;
+        return `${String(minutes).padStart(2, "0")}:${remain.toFixed(3).padStart(6, "0")}`;
+      }
+      function setStatus(message, kind = "ok") {
+        els.status.textContent = message;
+        els.lamp.className = `lamp${kind === "ok" ? "" : ` ${kind}`}`;
+      }
+      function fail(error) {
+        console.error(error);
+        setStatus(`无法加载试听：${error.message}。请用本地 HTTP 服务打开并确认音频文件完整。`, "error");
+        els.clipState.textContent = "LOAD ERROR";
+        [els.seed, els.timbre, els.note, els.play].forEach((control) => control.disabled = true);
+      }
+
+      function option(value, label) {
+        const node = document.createElement("option");
+        node.value = String(value);
+        node.textContent = label;
+        return node;
+      }
+      function populateSelects() {
+        const m = state.manifest;
+        els.seed.replaceChildren(...m.seeds.map((item) => option(item.id, item.label)));
+        els.timbre.replaceChildren(...m.timbres.map((item) => option(item.id, `${item.label} · ${item.preset_id}`)));
+        els.note.replaceChildren(...m.notes.map((note) => option(note, `${midiName(note)} · MIDI ${note}`)));
+        state.seed = Number(m.seeds[0].id);
+        state.timbre = Number(m.timbres[0].id);
+        state.note = Number(m.notes[0]);
+        [els.seed, els.timbre, els.note, els.play].forEach((control) => control.disabled = false);
+      }
+
+      function matrixButton(axis, value, title, detail) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "matrix-button";
+        button.dataset.axis = axis;
+        button.dataset.value = String(value);
+        button.innerHTML = `<b>${title}</b><small>${detail}</small>`;
+        button.addEventListener("click", () => selectAxis(axis, value, true));
+        return button;
+      }
+      function populateMatrices() {
+        const m = state.manifest;
+        els.noteMatrix.replaceChildren(...m.notes.map((note) => matrixButton("note", note, midiName(note), `MIDI ${note}`)));
+        els.timbreMatrix.replaceChildren(...m.timbres.map((item) => matrixButton("timbre", item.id, item.label, item.preset_id)));
+        els.seedMatrix.replaceChildren(...m.seeds.map((item) => matrixButton("seed", item.id, item.label, `top-k state ${item.id + 1}`)));
+      }
+      function syncActive() {
+        els.seed.value = String(state.seed); els.timbre.value = String(state.timbre); els.note.value = String(state.note);
+        document.querySelectorAll(".matrix-button").forEach((button) => {
+          button.classList.toggle("active", Number(button.dataset.value) === Number(state[button.dataset.axis]));
+        });
+        const seed = state.manifest.seeds.find((item) => Number(item.id) === state.seed);
+        const timbre = state.manifest.timbres.find((item) => Number(item.id) === state.timbre);
+        els.seedReadout.textContent = seed?.label || `Seed ${state.seed}`;
+        els.timbreReadout.textContent = timbre?.preset_id || `Pad ${state.timbre + 1}`;
+        els.noteReadout.textContent = `${midiName(state.note)} / ${state.note}`;
+      }
+      function selectAxis(axis, value, autoplay) {
+        state[axis] = Number(value);
+        syncActive();
+        loadCurrent(autoplay);
+      }
+
+      async function decodeWaveform(url, token) {
+        const Context = window.AudioContext || window.webkitAudioContext;
+        if (!Context) return;
+        audioContext ||= new Context();
+        const response = await fetch(url, { cache: "force-cache" });
+        if (!response.ok) throw new Error(`音频请求失败 ${response.status}`);
+        const buffer = await response.arrayBuffer();
+        const decoded = await audioContext.decodeAudioData(buffer.slice(0));
+        if (token !== state.token) return;
+        state.samples = decoded.getChannelData(0).slice();
+        drawWaveform();
+      }
+
+      async function loadCurrent(autoplay = false) {
+        const clip = state.clips.get(key(state.seed, state.timbre, state.note));
+        if (!clip) return fail(new Error("当前控制组合没有对应音频"));
+        const token = ++state.token;
+        const wasPlaying = !els.audio.paused;
+        els.play.disabled = true;
+        els.clipState.textContent = "LOADING";
+        state.samples = null;
+        drawWaveform();
+        try {
+          els.audio.src = clip.file;
+          els.audio.load();
+          await decodeWaveform(clip.file, token);
+          if (token !== state.token) return;
+          els.play.disabled = false;
+          els.clipState.textContent = clip.file.split("/").pop();
+          setStatus("encoder-free runtime 音频已就绪", "ok");
+          if (autoplay || wasPlaying) await els.audio.play();
+        } catch (error) { fail(error); }
+      }
+
+      function drawWaveform() {
+        const canvas = els.canvas;
+        const rect = canvas.getBoundingClientRect();
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+        canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const width = rect.width, height = rect.height;
+        ctx.clearRect(0, 0, width, height);
+        ctx.strokeStyle = "#174253"; ctx.lineWidth = 1;
+        for (let x = 0; x <= width; x += width / 10) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
+        for (let y = 0; y <= height; y += height / 6) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+        if (!state.samples?.length) return;
+        const stride = Math.max(1, Math.floor(state.samples.length / Math.max(1, width)));
+        ctx.strokeStyle = "#8ce9ff"; ctx.lineWidth = 1.25; ctx.beginPath();
+        for (let x = 0; x < width; x += 1) {
+          const start = Math.floor(x * state.samples.length / width);
+          let lo = 1, hi = -1;
+          for (let i = start; i < Math.min(state.samples.length, start + stride); i++) { lo = Math.min(lo, state.samples[i]); hi = Math.max(hi, state.samples[i]); }
+          const y1 = (1 - hi) * height / 2, y2 = (1 - lo) * height / 2;
+          ctx.moveTo(x, y1); ctx.lineTo(x, y2);
+        }
+        ctx.stroke();
+        const progress = els.audio.duration ? els.audio.currentTime / els.audio.duration : 0;
+        ctx.strokeStyle = "#f36b4f"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(progress * width, 0); ctx.lineTo(progress * width, height); ctx.stroke();
+      }
+
+      async function togglePlay() {
+        if (els.audio.paused) await els.audio.play(); else els.audio.pause();
+      }
+      function stepAxis(axis, delta) {
+        const values = axis === "seed" ? state.manifest.seeds.map((x) => Number(x.id))
+          : axis === "timbre" ? state.manifest.timbres.map((x) => Number(x.id))
+          : state.manifest.notes.map(Number);
+        const index = values.indexOf(Number(state[axis]));
+        selectAxis(axis, values[(index + delta + values.length) % values.length], true);
+      }
+
+      async function boot() {
+        try {
+          const response = await fetch("runtime-audition-manifest.json", { cache: "no-store" });
+          if (!response.ok) throw new Error(`manifest 请求失败 ${response.status}`);
+          const manifest = await response.json();
+          if (manifest.encoder_free !== true) throw new Error("manifest 未证明 encoder-free=true");
+          if (!manifest.clips?.length || !manifest.seeds?.length || !manifest.timbres?.length || !manifest.notes?.length) throw new Error("manifest 控制矩阵不完整");
+          state.manifest = manifest;
+          manifest.clips.forEach((clip) => state.clips.set(key(clip.seed, clip.timbre, clip.note), clip));
+          const expected = manifest.seeds.length * manifest.timbres.length * manifest.notes.length;
+          if (state.clips.size !== expected) throw new Error(`应有 ${expected} 个组合，实际 ${state.clips.size}`);
+          populateSelects(); populateMatrices(); syncActive();
+          els.checkpoint.textContent = manifest.checkpoint_sha256.slice(0, 12);
+          els.rate.textContent = `${manifest.sample_rate.toLocaleString()} Hz`;
+          els.model.textContent = `${manifest.clips.length} clips · ${manifest.duration_seconds.toFixed(2)} s · schema ${manifest.schema}`;
+          els.audio.volume = Number(els.volume.value);
+          await loadCurrent(false);
+        } catch (error) { fail(error); }
+      }
+
+      els.seed.addEventListener("change", () => selectAxis("seed", els.seed.value, false));
+      els.timbre.addEventListener("change", () => selectAxis("timbre", els.timbre.value, false));
+      els.note.addEventListener("change", () => selectAxis("note", els.note.value, false));
+      els.play.addEventListener("click", () => togglePlay().catch(fail));
+      els.loop.addEventListener("click", () => {
+        els.audio.loop = !els.audio.loop; els.loop.setAttribute("aria-pressed", String(els.audio.loop));
+        els.loop.innerHTML = `LOOP<br>${els.audio.loop ? "ON" : "OFF"}`;
+      });
+      els.volume.addEventListener("input", () => {
+        els.audio.volume = Number(els.volume.value); els.volumeValue.textContent = `${Math.round(els.audio.volume * 100)}%`;
+      });
+      els.canvas.addEventListener("click", (event) => {
+        if (!els.audio.duration) return;
+        els.audio.currentTime = event.offsetX / els.canvas.clientWidth * els.audio.duration;
+      });
+      els.audio.addEventListener("play", () => { els.play.classList.add("playing"); els.playLabel.textContent = "暂停"; });
+      els.audio.addEventListener("pause", () => { els.play.classList.remove("playing"); els.playLabel.textContent = "播放当前状态"; });
+      els.audio.addEventListener("timeupdate", () => { els.time.textContent = `${formatTime(els.audio.currentTime)} / ${formatTime(els.audio.duration)}`; drawWaveform(); });
+      els.audio.addEventListener("error", () => fail(new Error("浏览器无法解码当前 WAV")));
+      window.addEventListener("resize", drawWaveform);
+      window.addEventListener("keydown", (event) => {
+        if (!state.manifest || /SELECT|INPUT/.test(document.activeElement?.tagName || "")) return;
+        const actions = { "[": ["note", -1], "]": ["note", 1], ",": ["timbre", -1], ".": ["timbre", 1], "-": ["seed", -1], "=": ["seed", 1] };
+        if (event.key === " ") { event.preventDefault(); togglePlay().catch(fail); }
+        else if (event.key.toLowerCase() === "l") els.loop.click();
+        else if (actions[event.key]) { event.preventDefault(); stepAxis(...actions[event.key]); }
+      });
+
+      drawWaveform();
+      boot();
+    })();
+  </script>
+</body>
+</html>
