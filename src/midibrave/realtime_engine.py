@@ -53,22 +53,26 @@ def verify_runtime_contract(
     if contract.get("encoder_free") is not True:
         raise ValueError("runtime must be encoder-free")
     for key, expected in required.items():
-        if int(contract.get(key, -1)) != expected:
+        value = contract.get(key)
+        if type(value) is not int or value != expected:
             raise ValueError(f"runtime {key} must equal {expected}")
     contract["block_samples"] = (
-        int(contract["stride_frames"]) * int(contract["samples_per_latent"])
+        contract["stride_frames"] * contract["samples_per_latent"]
     )
     return contract
 
 
 class RuntimeSession:
     def __init__(self, runtime, plane: TimbrePlane, device: torch.device,
-                 contract: dict[str, object]):
+                 contract: dict[str, object], runtime_lock=None):
         self.runtime = runtime
         self.plane = plane
         self.device = device
         self.contract = contract
         self.lock = threading.Lock()
+        self.runtime_lock = (
+            runtime_lock if runtime_lock is not None else threading.Lock()
+        )
         self.control = Control(0, 0.0, 0.0, 60, 0.8)
         self.history: torch.Tensor | None = None
         self.current_clap: torch.Tensor | None = None
@@ -76,6 +80,9 @@ class RuntimeSession:
     @staticmethod
     def _control(seq: int, x: float, y: float, note: int,
                  velocity: float) -> Control:
+        values = np.asarray((seq, x, y, note, velocity), dtype=np.float64)
+        if not np.isfinite(values).all():
+            raise ValueError("control values must be finite")
         return Control(
             int(seq),
             float(np.clip(x, -1.0, 1.0)),
@@ -91,12 +98,15 @@ class RuntimeSession:
     def start(self, *, x: float, y: float, note: int,
               velocity: float, seed: int) -> None:
         control = self._control(0, x, y, note, velocity)
+        with self.lock:
+            self.control = control
         anchor = self._anchor()
-        history = self.runtime.initial_state(anchor.unsqueeze(0), int(seed), 8)
+        with self.runtime_lock:
+            history = self.runtime.initial_state(
+                anchor.unsqueeze(0), int(seed), 8)
         if not bool(torch.isfinite(history).all()):
             raise RuntimeError("runtime initial history is non-finite")
         with self.lock:
-            self.control = control
             self.current_clap = anchor
             self.history = history
 
@@ -110,15 +120,15 @@ class RuntimeSession:
             return True
 
     def reseed(self, seed: int) -> None:
+        anchor = self._anchor()
+        with self.runtime_lock:
+            history = self.runtime.initial_state(
+                anchor.unsqueeze(0), int(seed), 8)
+        if not bool(torch.isfinite(history).all()):
+            raise RuntimeError("runtime initial history is non-finite")
         with self.lock:
-            control = self.control
-        self.start(
-            x=control.x,
-            y=control.y,
-            note=control.note,
-            velocity=control.velocity,
-            seed=seed,
-        )
+            self.current_clap = anchor
+            self.history = history
 
     def snapshot(self) -> Control:
         with self.lock:
@@ -151,12 +161,13 @@ class RuntimeSession:
         )
         started = time.perf_counter()
         with torch.inference_mode():
-            audio, new_history = self.runtime.step(
-                history,
-                trajectory,
-                note,
-                velocity,
-            )
+            with self.runtime_lock:
+                audio, new_history = self.runtime.step(
+                    history,
+                    trajectory,
+                    note,
+                    velocity,
+                )
             mono = audio.float().cpu().numpy()
         render_ms = (time.perf_counter() - started) * 1000.0
         expected = (1, 1, int(self.contract["block_samples"]))
@@ -179,6 +190,7 @@ class RealtimeEngine:
         self.plane = plane
         self.device = device
         self.contract = contract
+        self.runtime_lock = threading.Lock()
 
     @classmethod
     def load(cls, runtime_path: str | Path,
@@ -201,6 +213,7 @@ class RealtimeEngine:
             self.plane,
             self.device,
             self.contract,
+            self.runtime_lock,
         )
 
     def status(self) -> dict[str, object]:
