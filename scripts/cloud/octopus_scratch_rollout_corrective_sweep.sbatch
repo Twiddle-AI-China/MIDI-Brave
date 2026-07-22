@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=80
 #SBATCH --gres=gpu:8
 #SBATCH --mem=120G
-#SBATCH --time=00:40:00
+#SBATCH --time=04:00:00
 #SBATCH --output=/data/midibrave-v3/launches/scratch-pad-corrective-20260722/logs/sweep-%j.out
 
 set -euo pipefail
@@ -20,7 +20,8 @@ statistics=/data/midibrave-v3/cache/scratch-pad-20260722/rave-statistics.npz
 calibration=/data/midibrave-v3/cache/scratch-pad-20260722/predictive-calibration.json
 sweep_root="/data/midibrave-v3/sweeps/scratch-pad-corrective-${SLURM_JOB_ID}"
 summary="$sweep_root/summary.tsv"
-candidates=(${CANDIDATES:-32 40 44 48})
+sweep_steps=${SWEEP_STEPS:-100}
+candidates=(${CANDIDATES:-32 48 64 80})
 
 mkdir -p "$launch/logs" "$sweep_root"
 printf 'batch_per_gpu\tstatus\telapsed_seconds\tsamples_per_second\tpeak_memory_mib\ttotal_memory_mib\tevent\n' > "$summary"
@@ -31,9 +32,9 @@ for batch in "${candidates[@]}"; do
   monitor="$sweep_root/gpu-b${batch}.csv"
   run_dir="/data/midibrave-v3/runs/${run_name}/rollout"
   sed \
-    -e "s/run_name: pad50_scratch_rollout_corrective_v100_8gpu/run_name: ${run_name}/" \
-    -e 's/rollout_steps: 100000/rollout_steps: 2/' \
-    -e 's/checkpoint_every: 5000/checkpoint_every: 2/' \
+    -e "s/run_name: pad50_scratch_rollout_corrective_v100_8gpu_sweep100/run_name: ${run_name}/" \
+    -e "s/rollout_steps: 100000/rollout_steps: ${sweep_steps}/" \
+    -e "s/checkpoint_every: 5000/checkpoint_every: ${sweep_steps}/" \
     -e 's/log_every: 20/log_every: 1/' \
     "$template" > "$config"
 
@@ -53,7 +54,7 @@ for batch in "${candidates[@]}"; do
     -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
     -w /workspace/MidiBrave "$image" \
     torchrun --standalone --nproc_per_node=8 -m midibrave.trainer \
-    --config "$config" --stage rollout --max-steps 2 \
+    --config "$config" --stage rollout --max-steps "$sweep_steps" \
     --batch-per-gpu "$batch" --latent-statistics "$statistics" \
     --calibration "$calibration" --warm-start "$checkpoint"
   status=$?
