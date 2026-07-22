@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+import hashlib
+from pathlib import Path
+
 import numpy as np
 import torch
 import yaml
-from pathlib import Path
-import hashlib
 
 from midibrave.config import Config
 from midibrave.export_predictive import PredictiveRuntime, export_predictive_runtime
@@ -109,7 +111,11 @@ def test_export_writes_audited_encoder_free_artifact(tmp_path: Path):
     result = export_predictive_runtime(
         config_path, checkpoint, bank_path, output)
     assert output.is_file()
-    assert Path(str(output) + ".json").is_file()
+    metadata_path = Path(str(output) + ".json")
+    assert metadata_path.is_file()
     assert result["encoder_free"] is True
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["runtime_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert metadata["sample_rate"] == config.data.sample_rate
     loaded = torch.jit.load(str(output))
     assert not any("encoder" in key for key in loaded.state_dict())

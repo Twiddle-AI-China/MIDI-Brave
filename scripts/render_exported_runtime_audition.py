@@ -92,7 +92,7 @@ def validate_runtime_metadata(path: str | Path) -> dict[str, object]:
             "stride_frames", "samples_per_latent", "checkpoint_sha256",
             "seed_bank_npz_sha256", "seed_bank_json_sha256",
             "latent_statistics_sha256", "architecture", "history_frames",
-            "horizon_frames"):
+            "horizon_frames", "runtime_sha256", "sample_rate"):
         if field not in metadata:
             raise ValueError(f"runtime metadata is missing {field}")
     return metadata
@@ -203,6 +203,11 @@ def render_exported_runtime_audition(
     if config.predictive is None:
         raise ValueError("runtime audition requires a predictive config")
     metadata = validate_runtime_metadata(runtime_metadata_path)
+    measured_runtime_hash = hashlib.sha256(Path(runtime_path).read_bytes()).hexdigest()
+    if measured_runtime_hash != metadata["runtime_sha256"]:
+        raise ValueError("runtime metadata runtime_sha256 does not match runtime.pt")
+    if int(metadata["sample_rate"]) != int(config.data.sample_rate):
+        raise ValueError("runtime metadata and config disagree on sample_rate")
     for field, expected in {
         "architecture": config.predictive.architecture,
         "history_frames": config.predictive.history_frames,
@@ -270,7 +275,7 @@ def render_exported_runtime_audition(
         "encoder_free": True,
         "checkpoint": f"sha256:{metadata['checkpoint_sha256']}",
         "checkpoint_sha256": metadata["checkpoint_sha256"],
-        "runtime_sha256": hashlib.sha256(Path(runtime_path).read_bytes()).hexdigest(),
+        "runtime_sha256": measured_runtime_hash,
         "config_sha256": hashlib.sha256(Path(config_path).read_bytes()).hexdigest(),
         "runtime_metadata": "runtime.pt.json",
         "sample_rate": int(config.data.sample_rate),

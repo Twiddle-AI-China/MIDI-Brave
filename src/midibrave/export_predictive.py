@@ -331,6 +331,8 @@ def export_predictive_runtime(config_path: str | Path, checkpoint_path: str | Pa
         "seed_bank_npz_sha256": _sha256(Path(seed_bank_path).with_suffix(".npz")),
         "seed_bank_json_sha256": _sha256(Path(seed_bank_path).with_suffix(".json")),
         "latent_statistics_sha256": statistics_hash,
+        "runtime_sha256": _sha256(output),
+        "sample_rate": config.data.sample_rate,
         "encoder_free": True,
     }
     metadata_path = output.with_suffix(output.suffix + ".json")

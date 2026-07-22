@@ -91,6 +91,25 @@ def test_runtime_metadata_requires_reproducibility_contract(tmp_path):
         validate_runtime_metadata(metadata_path)
 
 
+def test_runtime_metadata_binds_runtime_and_sample_rate(tmp_path):
+    metadata_path = tmp_path / "runtime.pt.json"
+    metadata_path.write_text(json.dumps({
+        "encoder_free": True,
+        "stride_frames": 4,
+        "samples_per_latent": 128,
+        "checkpoint_sha256": "checkpoint",
+        "seed_bank_npz_sha256": "npz",
+        "seed_bank_json_sha256": "json",
+        "latent_statistics_sha256": "stats",
+        "architecture": "predictive_rave_v1",
+        "history_frames": 16,
+        "horizon_frames": 8,
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="runtime_sha256"):
+        validate_runtime_metadata(metadata_path)
+
+
 def test_seed_selections_are_distinct_and_auditable():
     bank = SeedBank(
         latents=np.arange(3 * 2 * 3, dtype=np.float32).reshape(3, 2, 3),
