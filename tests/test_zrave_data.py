@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+import pytest
+
+from midibrave.latent_cache import save_latent_cache
 from midibrave.zrave_config import (
     ZraveConfig,
     ZraveDataConfig,
@@ -12,7 +16,12 @@ from midibrave.zrave_config import (
     ZraveRaveConfig,
     ZraveTrainConfig,
 )
-from midibrave.zrave_data import read_jsonl, select_balanced_manifest
+from midibrave.zrave_data import (
+    latent_cache_path,
+    pack_cached_latents,
+    read_jsonl,
+    select_balanced_manifest,
+)
 
 
 CATEGORIES = ("Pad", "Bass", "Lead", "Pluck", "Keys")
@@ -147,3 +156,78 @@ def test_balanced_selection_prefers_distinct_banks(tmp_path: Path) -> None:
     for category in CATEGORIES:
         selected = metadata["selected_presets"][category]
         assert len({item["bank"] for item in selected[:6]}) == 6
+
+
+def _write_synthetic_caches(
+    config: ZraveConfig,
+    *,
+    wrong_sample_id: bool = False,
+) -> tuple[list[dict[str, object]], str]:
+    checkpoint = Path(config.rave.checkpoint)
+    checkpoint.write_bytes(b"frozen-rave-checkpoint")
+    import hashlib
+
+    checkpoint_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    rows: list[dict[str, object]] = []
+    for index, split in enumerate(("train", "validation", "test")):
+        sample_id = f"sample-{index}"
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "preset_id": f"preset-{index}",
+                "midi_note": 60,
+                "velocity": 100,
+                "audio_path": f"{sample_id}.wav",
+                "duration_seconds": 5.0,
+                "split": split,
+                "zrave_category": CATEGORIES[index],
+                "zrave_bank": f"bank-{index}",
+            }
+        )
+        frames = 220 + index
+        latent = np.arange(16 * frames, dtype=np.float32).reshape(16, frames)
+        save_latent_cache(
+            latent_cache_path(config, sample_id),
+            latent,
+            "wrong-id" if wrong_sample_id and index == 1 else sample_id,
+            128,
+            checkpoint_hash,
+        )
+    _write_jsonl(Path(config.data.selected_manifest), rows)
+    return rows, checkpoint_hash
+
+
+def test_pack_cached_latents_trims_warmup_and_uses_train_statistics(
+    tmp_path: Path,
+) -> None:
+    config = _fixture_config(tmp_path)
+    rows, checkpoint_hash = _write_synthetic_caches(config)
+
+    metadata = pack_cached_latents(config)
+
+    pack_root = Path(config.data.packed_root)
+    latents = np.load(pack_root / "latents.npy", mmap_mode="r")
+    lengths = np.load(pack_root / "lengths.npy")
+    splits = np.load(pack_root / "splits.npy")
+    statistics = np.load(pack_root / "statistics.npz")
+    assert latents.shape == (len(rows), 158, 16)
+    assert latents.dtype == np.float16
+    np.testing.assert_array_equal(lengths, np.asarray([156, 157, 158]))
+    np.testing.assert_array_equal(splits, np.asarray([0, 1, 2]))
+    assert np.all(lengths > 128 + 16)
+    assert metadata.rave_checkpoint_sha256 == checkpoint_hash
+    expected_train = np.arange(16 * 220, dtype=np.float32).reshape(16, 220)
+    expected_train = expected_train[:, 64:].T
+    np.testing.assert_allclose(
+        statistics["mean"],
+        expected_train.mean(axis=0),
+        rtol=1e-5,
+    )
+
+
+def test_pack_rejects_cache_contract_mismatch(tmp_path: Path) -> None:
+    config = _fixture_config(tmp_path)
+    _write_synthetic_caches(config, wrong_sample_id=True)
+
+    with pytest.raises(ValueError, match="sample_id mismatch"):
+        pack_cached_latents(config)
