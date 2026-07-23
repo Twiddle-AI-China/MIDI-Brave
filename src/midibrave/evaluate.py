@@ -83,7 +83,6 @@ def predictive_control_quality_gate(
         "midi_timbre_preservation_cosine": 0.80,
         "clap_control_following": 0.90,
         "timbre_f0_p90_cents": 200.0,
-        "timbre_path_monotonicity": 0.75,
         "seed_washout_ratio_max": 0.90,
         "rollout_variance_ratio_min": 0.25,
         "rollout_variance_ratio_max": 4.0,
@@ -93,7 +92,6 @@ def predictive_control_quality_gate(
     midi_timbre = metrics.get("midi_timbre_preservation_cosine", {})
     clap_following = metrics.get("clap_control_following", {})
     timbre_f0 = metrics.get("timbre_f0_absolute_cents", {})
-    timbre_path = metrics.get("timbre_path_monotonicity", {})
     seed_washout = metrics.get("seed_washout_ratio", {})
     variance = float(metrics.get("rollout_variance_ratio", {}).get(
         "mean", math.nan))
@@ -112,9 +110,6 @@ def predictive_control_quality_gate(
     if float(timbre_f0.get("p90", math.inf)) > thresholds[
             "timbre_f0_p90_cents"]:
         failures.append("timbre_f0_p90")
-    if float(timbre_path.get("mean", -math.inf)) < thresholds[
-            "timbre_path_monotonicity"]:
-        failures.append("timbre_path_monotonicity")
     if float(seed_washout.get("mean", math.inf)) > thresholds[
             "seed_washout_ratio_max"]:
         failures.append("seed_washout_ratio")

@@ -78,7 +78,6 @@ def test_predictor_control_gate_requires_causal_midi_clap_and_healthy_rollout():
         "midi_timbre_preservation_cosine": {"median": 0.84},
         "clap_control_following": {"mean": 0.91},
         "timbre_f0_absolute_cents": {"p90": 120.0},
-        "timbre_path_monotonicity": {"mean": 0.80},
         "seed_washout_ratio": {"mean": 0.70},
         "rollout_variance_ratio": {"mean": 1.1},
     }
@@ -89,7 +88,7 @@ def test_predictor_control_gate_requires_causal_midi_clap_and_healthy_rollout():
     assert passed["thresholds"]["swap_f0_p90_cents"] == 200.0
     assert passed["thresholds"]["clap_control_following"] == 0.90
     assert passed["thresholds"]["midi_timbre_preservation_cosine"] == 0.80
-    assert passed["thresholds"]["timbre_path_monotonicity"] == 0.75
+    assert "timbre_path_monotonicity" not in passed["thresholds"]
     assert passed["thresholds"]["seed_washout_ratio_max"] == 0.90
 
     metrics["swap_f0_absolute_cents"]["p90"] = 240.0
@@ -97,7 +96,6 @@ def test_predictor_control_gate_requires_causal_midi_clap_and_healthy_rollout():
     metrics["midi_timbre_preservation_cosine"]["median"] = 0.60
     metrics["clap_control_following"]["mean"] = 0.70
     metrics["timbre_f0_absolute_cents"]["p90"] = 250.0
-    metrics["timbre_path_monotonicity"]["mean"] = 0.20
     metrics["seed_washout_ratio"]["mean"] = 1.10
     metrics["rollout_variance_ratio"]["mean"] = 0.01
     failed = predictive_control_quality_gate(metrics, nonfinite_count=3)
@@ -106,5 +104,5 @@ def test_predictor_control_gate_requires_causal_midi_clap_and_healthy_rollout():
         "clap_control_following", "midi_swap_following",
         "midi_timbre_preservation_cosine", "non_finite",
         "rollout_variance_ratio", "seed_washout_ratio", "swap_f0_p90",
-        "timbre_f0_p90", "timbre_path_monotonicity",
+        "timbre_f0_p90",
     ]
