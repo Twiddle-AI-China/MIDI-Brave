@@ -15,7 +15,7 @@ from .realtime_plane import TimbrePlane
 
 
 EXPECTED_RUNTIME_SHA256 = (
-    "c9b93dcec1a471ccbf97fab9074717f8cec1f2598dfa5d86e808d05a153f78ec"
+    "0453a6adcd7dae9166e65667ad4d36d2c8107147351a1aaaf792ac35a6899a81"
 )
 STARTUP_WARMUP_BLOCKS = 16
 
