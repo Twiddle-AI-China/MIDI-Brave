@@ -274,6 +274,25 @@ def _predictive_control_partners(records: list[Any], source: Any) -> tuple[Any, 
     return midi, timbre
 
 
+def _predictive_evaluation_slices(
+        warmup_frames: int, history_frames: int, rollout_frames: int,
+        samples_per_latent: int) -> tuple[slice, slice, slice]:
+    """Return aligned cache/audio slices after the RAVE encoder warmup."""
+    if warmup_frames < 0:
+        raise ValueError("warmup frames cannot be negative")
+    if history_frames <= 0 or rollout_frames <= 0 or samples_per_latent <= 0:
+        raise ValueError("history, rollout, and samples per latent must be positive")
+    history_stop = warmup_frames + history_frames
+    future_stop = history_stop + rollout_frames
+    return (
+        slice(warmup_frames, history_stop),
+        slice(history_stop, future_stop),
+        slice(
+            history_stop * samples_per_latent,
+            future_stop * samples_per_latent),
+    )
+
+
 @torch.no_grad()
 def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str,
                         sequences: int = 8, device_name: str = "cuda",
@@ -311,7 +330,10 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
     roots = configured_roots(config.data, config.data.manifest)
     p = config.predictive
     rollout_frames = max(PREDICTIVE_HORIZONS) * p.stride_frames
-    total_frames = p.history_frames + rollout_frames
+    history_slice, future_slice, audio_future_slice = _predictive_evaluation_slices(
+        config.model.warmup_latent_frames, p.history_frames, rollout_frames,
+        p.samples_per_latent)
+    total_frames = int(future_slice.stop)
     control_frames = p.predictor_control_rollout_frames
     control_steps = control_frames // p.stride_frames
     if str(control_steps) not in {str(value) for value in PREDICTIVE_HORIZONS}:
@@ -344,12 +366,12 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
                     or latent.shape[-1] < total_frames):
                 continue
         audio = load_audio(record_audio_path(record, roots), config.data.sample_rate)
-        required_samples = total_frames * p.samples_per_latent
+        required_samples = int(audio_future_slice.stop)
         if len(audio) < required_samples:
             continue
         clap = np.load(
             Path(config.data.cache_root) / "clap" / f"{record.cache_id}.npy").astype(np.float32)
-        history = torch.from_numpy(latent[:, :p.history_frames]).unsqueeze(0).to(device)
+        history = torch.from_numpy(latent[:, history_slice]).unsqueeze(0).to(device)
         clap_tensor = torch.from_numpy(clap).unsqueeze(0).to(device)
         note = torch.tensor([record.midi_note], device=device)
         velocity = torch.tensor([record.velocity], device=device, dtype=torch.float32)
@@ -368,12 +390,12 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         elapsed = time.perf_counter() - started
-        future_start = p.history_frames * p.samples_per_latent
-        predicted_audio = decoded[..., future_start:]
+        decoded_future_start = p.history_frames * p.samples_per_latent
+        predicted_audio = decoded[..., decoded_future_start:]
         reference_audio = torch.from_numpy(
-            audio[future_start:required_samples].copy()).view(1, 1, -1).to(device)
+            audio[audio_future_slice].copy()).view(1, 1, -1).to(device)
         reference_latent = torch.from_numpy(
-            latent[:, p.history_frames:total_frames]).unsqueeze(0).to(device)
+            latent[:, future_slice]).unsqueeze(0).to(device)
         report = predictive_rollout_report(
             predicted_latent, reference_latent, predicted_audio, reference_audio,
             statistics, p.stride_frames, p.samples_per_latent, elapsed,
@@ -392,7 +414,7 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
             timbre_latent = cached["latent"].astype(np.float32, copy=True)
             if (str(cached["checkpoint_hash"].item()) != rave_checkpoint_hash
                     or timbre_latent.shape[0] != p.rave_latent_dim
-                    or timbre_latent.shape[-1] < p.history_frames):
+                    or timbre_latent.shape[-1] < int(history_slice.stop)):
                 continue
         target_clap = np.load(timbre_clap_path).astype(np.float32)
         source_clap = F.normalize(clap_tensor.float(), dim=-1)
@@ -421,7 +443,7 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
             model, history, source_clap, midi_note, velocity,
             control_frames, p.stride_frames, path_seed[:1])
         alternate_history = torch.from_numpy(
-            timbre_latent[:, :p.history_frames]).unsqueeze(0).to(device)
+            timbre_latent[:, history_slice]).unsqueeze(0).to(device)
         alternate_latent, _ = _fixed_predictive_control_rollout(
             model, alternate_history, target_clap_tensor, note, velocity,
             control_frames, p.stride_frames, path_seed[:1])
@@ -527,7 +549,8 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
             def reference_segment(item: Any) -> np.ndarray:
                 value = load_audio(
                     record_audio_path(item, roots), config.data.sample_rate)
-                segment = value[future_start:future_start + audition_samples]
+                start = int(audio_future_slice.start)
+                segment = value[start:start + audition_samples]
                 if len(segment) < audition_samples:
                     segment = np.pad(segment, (0, audition_samples - len(segment)))
                 return segment.astype(np.float32, copy=False)
@@ -602,6 +625,8 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
         "latent_statistics_sha256": statistics_hash,
         "calibration_sha256": contract.get("calibration_hash"),
         "evaluated_sequences": len(reports), "seeds": seed_rows,
+        "seed_offset_frames": int(history_slice.start),
+        "seed_offset_samples": int(history_slice.start) * p.samples_per_latent,
         "control_stride_frames": p.stride_frames,
         "control_stride_samples": p.stride_frames * p.samples_per_latent,
         "control_rollout_frames": control_frames,
@@ -618,8 +643,8 @@ def evaluate_predictive(config_path: str, checkpoint_path: str, output_path: str
                 "MIDI changes target pitch while source CLAP remains fixed; timbre-path "
                 "changes keep the source MIDI note fixed"),
             "timbre_navigation": (
-                "CLAP controls are directly interpolated at fixed MIDI and identical "
-                "source history; monotonic target-direction progress is gated"),
+                "CLAP endpoints are applied directly at fixed MIDI and identical "
+                "source history; only endpoint control following is gated"),
             "seed_washout": (
                 "the same target controls roll from source and target-preset histories; "
                 "late/early normalized latent distance must decrease"),

@@ -94,10 +94,14 @@ def build_seed_bank_from_cache(config: Config, checkpoint_hash: str,
     notes = []
     velocities = []
     sample_ids = []
+    seed_offset_frames = config.model.warmup_latent_frames
+    seed_offset_samples = (
+        seed_offset_frames * config.predictive.samples_per_latent)
     for record in records:
         latent = load_latent_window(
             cache_root / "rave" / f"{record.cache_id}.npz",
-            record.sample_id, 0, config.predictive.history_frames,
+            record.sample_id, seed_offset_samples,
+            config.predictive.history_frames,
             config.predictive.rave_latent_dim,
             config.predictive.samples_per_latent, checkpoint_hash)
         clap_value = np.load(cache_root / "clap" / f"{record.cache_id}.npy").astype(np.float32)
@@ -111,6 +115,8 @@ def build_seed_bank_from_cache(config: Config, checkpoint_hash: str,
         "latent_dim": config.predictive.rave_latent_dim,
         "history_frames": config.predictive.history_frames,
         "samples_per_latent": config.predictive.samples_per_latent,
+        "seed_offset_frames": seed_offset_frames,
+        "seed_offset_samples": seed_offset_samples,
         "checkpoint_hash": checkpoint_hash,
         "architecture": config.predictive.architecture,
     }

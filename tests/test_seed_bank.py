@@ -64,12 +64,24 @@ def test_cli_builder_materializes_seed_bank_from_cache(tmp_path):
     config = replace(config, data=data)
     rave_root = manifest.parent / "cache" / "rave"
     for record in load_manifest(manifest):
+        latent = (
+            np.arange(32, dtype=np.float32)[None, :]
+            + 100.0 * record.midi_note
+        )
         save_latent_cache(
             rave_root / f"{record.cache_id}.npz",
-            np.full((16, 32), record.midi_note, dtype=np.float32),
+            np.repeat(latent, 16, axis=0),
             record.sample_id, 128, "checkpoint-a")
     output = tmp_path / "seeds" / "bank"
     result = build_seed_bank_from_cache(config, "checkpoint-a", output)
     assert result["seeds"] == len(load_manifest(manifest))
     loaded = SeedBank.load(output, {"checkpoint_hash": "checkpoint-a"})
     assert loaded.latents.shape[1:] == (16, 16)
+    assert loaded.metadata["seed_offset_frames"] == 8
+    assert loaded.metadata["seed_offset_samples"] == 8 * 128
+    expected = (
+        np.arange(8, 24, dtype=np.float32)[None, :]
+        + 100.0 * loaded.notes[:, None, None]
+    )
+    np.testing.assert_array_equal(
+        loaded.latents, np.broadcast_to(expected, loaded.latents.shape))

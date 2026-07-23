@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import torch
 
-from midibrave.evaluate import (predictive_control_quality_gate,
+from midibrave.evaluate import (_predictive_evaluation_slices,
+                                predictive_control_quality_gate,
                                 predictive_rave_quality_gate,
                                 predictive_rollout_report)
 from midibrave.predictive_losses import LatentStatistics
@@ -16,6 +17,16 @@ def _inputs():
     predicted_audio = reference_audio + 0.01 * torch.randn_like(reference_audio)
     statistics = LatentStatistics(torch.ones(3), torch.ones(3), torch.ones(3))
     return predicted, reference, predicted_audio, reference_audio, statistics
+
+
+def test_predictive_evaluation_skips_rave_encoder_warmup():
+    history, future, audio = _predictive_evaluation_slices(
+        warmup_frames=8, history_frames=16, rollout_frames=32,
+        samples_per_latent=128)
+
+    assert history == slice(8, 24)
+    assert future == slice(24, 56)
+    assert audio == slice(24 * 128, 56 * 128)
 
 
 def test_predictive_report_emits_all_horizons_and_stride_contract():
