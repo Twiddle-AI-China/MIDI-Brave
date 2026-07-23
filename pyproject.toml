@@ -20,6 +20,9 @@ test = ["pytest==8.3.5"]
 midibrave = "midibrave.cli:main"
 midibrave-train = "midibrave.trainer:main"
 midibrave-evaluate = "midibrave.evaluate:main"
+midibrave-zrave-prepare = "midibrave.zrave_data:main"
+midibrave-zrave-train = "midibrave.zrave_train:main"
+midibrave-zrave-evaluate = "midibrave.zrave_evaluate:main"
 
 [build-system]
 requires = ["hatchling"]
