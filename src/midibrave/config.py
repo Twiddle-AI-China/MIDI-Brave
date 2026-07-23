@@ -204,6 +204,8 @@ class PredictiveConfig:
     predictor_control_rollout_frames: int = 128
     predictor_control_gradient_fraction_max: float = 0.25
     predictor_timbre_interpolation_steps: int = 4
+    predictor_timbre_exact_note: bool = False
+    predictor_window_clap_targets: bool = False
 
 
 @dataclass(frozen=True)

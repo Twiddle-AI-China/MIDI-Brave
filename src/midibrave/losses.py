@@ -343,8 +343,11 @@ class FrozenClapReconstructionObjective(nn.Module):
     def waveform_gradients_to_embeddings(
             self, prediction: Tensor, target_embedding: Tensor,
             source_embedding: Tensor, valid_samples: Tensor,
-            margin: float = 0.1) -> ClapControlGradient:
+            margin: float = 0.1,
+            source_margin_weight: float = 1.0) -> ClapControlGradient:
         """Move generated audio toward target control and away from source."""
+        if source_margin_weight < 0.0:
+            raise ValueError("CLAP source margin weight must be non-negative")
         expected = (prediction.shape[0],)
         if target_embedding.ndim != 2 or source_embedding.shape != target_embedding.shape:
             raise ValueError("CLAP source and target embeddings must have shape [B,D]")
@@ -372,7 +375,8 @@ class FrozenClapReconstructionObjective(nn.Module):
         target_cosine = F.cosine_similarity(generated_embedding, target, dim=-1)
         source_cosine = F.cosine_similarity(generated_embedding, source, dim=-1)
         losses = ((1.0 - target_cosine).clamp_min(0.0)
-                  + F.relu(source_cosine - target_cosine + margin))
+                  + source_margin_weight
+                  * F.relu(source_cosine - target_cosine + margin))
         gradients, = torch.autograd.grad(losses.sum(), generated, allow_unused=False)
         if not bool(torch.isfinite(losses).all().item()
                     and torch.isfinite(gradients).all().item()):
@@ -404,6 +408,36 @@ class FrozenClapReconstructionObjective(nn.Module):
             clipped_norms.detach(), ClapHealth.zeros(prediction),
             target_cosine.detach(), source_cosine.detach(),
             target_cosine.detach().gt(source_cosine.detach()))
+
+    def waveform_gradients_to_waveforms(
+            self, prediction: Tensor, target_audio: Tensor,
+            source_audio: Tensor, valid_samples: Tensor,
+            margin: float = 0.1,
+            source_margin_weight: float = 1.0) -> ClapControlGradient:
+        """Use equal-length real windows as CLAP control references."""
+        if target_audio.shape != prediction.shape or source_audio.shape != prediction.shape:
+            raise ValueError(
+                "CLAP control reference waveforms must match the prediction")
+        reference_audio = torch.cat(
+            (target_audio.detach().float(), source_audio.detach().float()))
+        reference_valid = torch.cat((valid_samples, valid_samples))
+        try:
+            with torch.no_grad():
+                reference_embedding = self._embedding(
+                    reference_audio, reference_valid, role="target")
+        except _NonFiniteClapEmbedding as error:
+            losses = prediction.new_zeros(prediction.shape[0])
+            gradients = prediction.new_zeros(prediction.shape)
+            norms = prediction.new_zeros(prediction.shape[0])
+            cosine = prediction.new_zeros(prediction.shape[0])
+            return ClapControlGradient(
+                losses, gradients, norms, norms.clone(), error.health,
+                cosine, cosine.clone(),
+                torch.zeros_like(cosine, dtype=torch.bool))
+        target_embedding, source_embedding = reference_embedding.chunk(2)
+        return self.waveform_gradients_to_embeddings(
+            prediction, target_embedding, source_embedding, valid_samples,
+            margin=margin, source_margin_weight=source_margin_weight)
 
 
 class MultiResolutionSTFTLoss(nn.Module):

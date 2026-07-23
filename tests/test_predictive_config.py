@@ -70,6 +70,20 @@ def test_phase3_preserves_controls_and_has_a_dedicated_sweep_config():
     assert sweep.train.log_every == 1
 
 
+def test_control_rescue_uses_pitch_matched_window_clap_targets():
+    config = Config.load(
+        "configs/v3/octopus_scratch_pad_control_rescue.yaml")
+
+    assert config.predictive is not None
+    assert config.train.run_name == (
+        "pad50_scratch_control_rescue_window_clap_v1")
+    assert config.train.batch_per_gpu == 32
+    assert config.train.rollout_steps == 1000
+    assert config.train.checkpoint_every == 500
+    assert config.predictive.predictor_timbre_exact_note
+    assert config.predictive.predictor_window_clap_targets
+
+
 def test_v3_rejects_stride_beyond_horizon(tmp_path: Path):
     text = Path("configs/v3/smoke.yaml").read_text(encoding="utf-8")
     path = tmp_path / "bad.yaml"

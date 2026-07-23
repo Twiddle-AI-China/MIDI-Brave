@@ -58,7 +58,9 @@ class PredictiveLossSchedule:
 
 def counterfactual_control_assignment(
         preset_ids: list[str], notes: Tensor, velocities: Tensor,
-        device: torch.device) -> tuple[Tensor, Tensor, Tensor]:
+        device: torch.device,
+        require_exact_timbre_note: bool = False,
+        ) -> tuple[Tensor, Tensor, Tensor]:
     """Split a batch and choose pitch-aligned cross-preset timbre targets."""
     count = len(preset_ids)
     if notes.shape != (count,) or velocities.shape != (count,):
@@ -72,11 +74,15 @@ def counterfactual_control_assignment(
     velocity = velocities.to(device=device, dtype=torch.float32)
     # CLAP contains pitch as well as timbre. Prefer the same note, then the
     # closest velocity, so a timbre edit does not quietly fight fixed MIDI.
-    score = (note[:, None] - note[None, :]).abs() * 256.0
+    note_distance = (note[:, None] - note[None, :]).abs()
+    score = note_distance * 256.0
     score = score + (velocity[:, None] - velocity[None, :]).abs()
-    score = score.masked_fill(~cross_preset, torch.inf)
+    eligible = cross_preset
+    if require_exact_timbre_note:
+        eligible = eligible & note_distance.eq(0)
+    score = score.masked_fill(~eligible, torch.inf)
     best = score.argmin(dim=1)
-    target = torch.where(cross_preset.any(dim=1), best, indices)
+    target = torch.where(eligible.any(dim=1), best, indices)
     timbre = ~midi & target.ne(indices)
     midi = ~timbre
     return midi, timbre, target
@@ -262,7 +268,8 @@ def predictor_counterfactual_rollout(
     history = source_latent[..., :predictive.history_frames]
     midi_mask, timbre_mask, target_index = counterfactual_control_assignment(
         list(batch["preset_id"]), batch["note_a"], batch["velocity_a"],
-        history.device)
+        history.device,
+        require_exact_timbre_note=predictive.predictor_timbre_exact_note)
     target_clap = batch["clap_a"].clone()
     timbre_alpha = target_clap.new_zeros(target_clap.shape[0])
     timbre_positions = timbre_mask.nonzero().flatten()
@@ -439,7 +446,11 @@ def _predictive_control_objective(
         raise ValueError("predictive controls require a v3 config")
     if swap_pitch is None:
         raise ValueError("predictive MIDI control requires a pitch objective")
-    required = {"note_b", "pitch_confidence_a", "pitch_valid_mask_a", "preset_id"}
+    required = {
+        "note_b", "pitch_confidence_a", "pitch_valid_mask_a", "preset_id",
+    }
+    if config.predictive.predictor_window_clap_targets:
+        required.update({"audio_a", "audio_b"})
     missing = required - batch.keys()
     if missing:
         raise ValueError(f"predictive control batch is missing: {sorted(missing)}")
@@ -539,10 +550,17 @@ def _predictive_control_objective(
             valid = torch.full(
                 (midi_audio.shape[0],), midi_audio.shape[-1],
                 device=midi_audio.device, dtype=torch.long)
-            preservation = clap_objective.waveform_gradients_to_embeddings(
-                midi_audio, counterfactual.source_clap.index_select(0, midi_indices),
-                counterfactual.source_clap.index_select(0, midi_indices),
-                valid, margin=0.0)
+            if config.predictive.predictor_window_clap_targets:
+                preservation = clap_objective.waveform_gradients_to_waveforms(
+                    midi_audio, batch["audio_b"].index_select(0, midi_indices),
+                    batch["audio_a"].index_select(0, midi_indices),
+                    valid, margin=0.0, source_margin_weight=0.0)
+            else:
+                preservation = clap_objective.waveform_gradients_to_embeddings(
+                    midi_audio,
+                    counterfactual.source_clap.index_select(0, midi_indices),
+                    counterfactual.source_clap.index_select(0, midi_indices),
+                    valid, margin=0.0, source_margin_weight=0.0)
             midi_clap_loss = preservation.losses.mean()
             midi_clap_cosine = preservation.target_cosine.mean()
             health = _clap_health_vector(preservation.health, midi_audio.device)
@@ -561,10 +579,18 @@ def _predictive_control_objective(
             valid = torch.full(
                 (timbre_audio.shape[0],), timbre_audio.shape[-1],
                 device=timbre_audio.device, dtype=torch.long)
-            clap_result = clap_objective.waveform_gradients_to_embeddings(
-                timbre_audio, counterfactual.target_clap.index_select(
-                    0, timbre_indices), counterfactual.source_clap.index_select(
-                    0, timbre_indices), valid)
+            if config.predictive.predictor_window_clap_targets:
+                target_indices = counterfactual.target_index.index_select(
+                    0, timbre_indices)
+                clap_result = clap_objective.waveform_gradients_to_waveforms(
+                    timbre_audio, batch["audio_a"].index_select(
+                        0, target_indices), batch["audio_a"].index_select(
+                        0, timbre_indices), valid)
+            else:
+                clap_result = clap_objective.waveform_gradients_to_embeddings(
+                    timbre_audio, counterfactual.target_clap.index_select(
+                        0, timbre_indices), counterfactual.source_clap.index_select(
+                        0, timbre_indices), valid)
             timbre_clap_loss = clap_result.losses.mean()
             clap_target_cosine = clap_result.target_cosine.mean()
             clap_source_cosine = clap_result.source_cosine.mean()

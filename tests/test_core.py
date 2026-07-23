@@ -179,6 +179,71 @@ def test_clap_control_gradient_targets_embedding_and_reports_following():
         result.following, result.target_cosine.gt(result.source_cosine))
 
 
+def test_clap_control_can_align_pitch_matched_target_without_repelling_source():
+    objective = FrozenClapReconstructionObjective(
+        None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
+        encoder=_FakeDifferentiableClap())
+    prediction = torch.randn(2, 1, 1024)
+    target_audio = torch.randn(2, 1, 1024)
+    source_audio = torch.randn(2, 1, 1024)
+    valid = torch.full((2,), 1024, dtype=torch.long)
+    with torch.no_grad():
+        target = objective._embedding(target_audio, valid, role="target")
+        source = objective._embedding(source_audio, valid, role="target")
+
+    result = objective.waveform_gradients_to_embeddings(
+        prediction, target, source, valid, source_margin_weight=0.0)
+    direct = prediction.detach().float().requires_grad_(True)
+    direct_embedding = objective._embedding(direct, valid, role="generated")
+    direct_loss = (1.0 - torch.nn.functional.cosine_similarity(
+        direct_embedding, target, dim=-1)).clamp_min(0.0).sum()
+    direct_gradient, = torch.autograd.grad(direct_loss, direct)
+
+    assert torch.allclose(result.gradients, direct_gradient, rtol=1e-4, atol=1e-6)
+
+
+def test_clap_control_can_use_equal_length_reference_waveforms():
+    objective = FrozenClapReconstructionObjective(
+        None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
+        encoder=_FakeDifferentiableClap())
+    prediction = torch.randn(2, 1, 1024)
+    target_audio = torch.randn(2, 1, 1024)
+    source_audio = torch.randn(2, 1, 1024)
+    valid = torch.full((2,), 1024, dtype=torch.long)
+
+    result = objective.waveform_gradients_to_waveforms(
+        prediction, target_audio, source_audio, valid,
+        source_margin_weight=0.0)
+    with torch.no_grad():
+        target = objective._embedding(target_audio, valid, role="target")
+        source = objective._embedding(source_audio, valid, role="target")
+    expected = objective.waveform_gradients_to_embeddings(
+        prediction, target, source, valid, source_margin_weight=0.0)
+
+    assert torch.allclose(result.losses, expected.losses, rtol=1e-5, atol=1e-7)
+    assert torch.allclose(result.gradients, expected.gradients, rtol=1e-5, atol=1e-7)
+    assert torch.allclose(
+        result.target_cosine, expected.target_cosine, rtol=1e-5, atol=1e-7)
+
+
+def test_clap_control_nonfinite_reference_window_skips_auxiliary_gradient():
+    objective = FrozenClapReconstructionObjective(
+        None, 48000, torch.device("cpu"), maximum_gradient_norm=0.0,
+        encoder=_FailOnClapCall(fail_on_call=1))
+    prediction = torch.randn(2, 1, 1024)
+    target_audio = torch.randn(2, 1, 1024)
+    source_audio = torch.randn(2, 1, 1024)
+    valid = torch.full((2,), 1024, dtype=torch.long)
+
+    result = objective.waveform_gradients_to_waveforms(
+        prediction, target_audio, source_audio, valid)
+
+    assert torch.equal(result.losses, torch.zeros(2))
+    assert torch.equal(result.gradients, torch.zeros_like(prediction))
+    assert result.health.skipped.item() == 1
+    assert result.health.target_failures.item() == 1
+
+
 class _NonFiniteClap(nn.Module):
     def get_audio_embedding_from_data(self, waveforms, use_tensor=True):
         assert use_tensor
