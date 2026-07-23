@@ -57,7 +57,7 @@ kill -0 "$tensorboard_pid"
 
 srun --kill-on-bad-exit=1 --cpu-bind=cores \
   docker run --rm \
-    --gpus "device=${CUDA_VISIBLE_DEVICES}" \
+    --gpus "\"device=${CUDA_VISIBLE_DEVICES}\"" \
     --shm-size=32g \
     -v "$repo:$container_repo:ro" \
     -v /data:/data \
