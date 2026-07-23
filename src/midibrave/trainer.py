@@ -214,8 +214,12 @@ def _seed_washout_loss(
         )
         early = distance[..., :window_frames].mean(dim=-1)
         late = distance[..., -window_frames:].mean(dim=-1)
-        loss = F.relu(late - maximum_ratio * early).mean()
-        ratio = (late / early.clamp_min(1e-8)).mean()
+        # The early separation is a baseline, not an optimization target.
+        # Detaching it prevents the predictor from satisfying the hinge by
+        # deliberately making the two seeds diverge more at the start.
+        baseline = early.detach()
+        loss = F.relu(late - maximum_ratio * baseline).mean()
+        ratio = (late / baseline.clamp_min(1e-8)).mean()
     return loss, ratio
 
 

@@ -276,6 +276,22 @@ def test_seed_washout_penalizes_growth_but_not_contraction():
     assert shrinking_ratio.item() < 1.0
 
 
+def test_seed_washout_cannot_reduce_loss_by_increasing_early_distance():
+    statistics = LatentStatistics(
+        torch.ones(2), torch.ones(2), torch.ones(2))
+    first = torch.zeros(1, 2, 16, requires_grad=True)
+    second = torch.ones_like(first)
+    second[..., -4:] = 2.0
+
+    loss, ratio = _seed_washout_loss(
+        first, second, statistics, window_frames=4)
+    loss.backward()
+
+    assert ratio.item() > 1.0
+    assert first.grad[..., :4].abs().max().item() == pytest.approx(0.0)
+    assert first.grad[..., -4:].abs().sum().item() > 0.0
+
+
 def test_seed_washout_identical_rollouts_have_finite_zero_gradient():
     statistics = LatentStatistics(
         torch.ones(2), torch.ones(2), torch.ones(2))
