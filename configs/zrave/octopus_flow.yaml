@@ -1,0 +1,91 @@
+seed: 20260725
+data:
+  unified_manifest: /data/midibrave-zrave-flow/manifests/all-synth.jsonl
+  manifest_report: /data/midibrave-zrave-flow/manifests/all-synth.report.json
+  cache_root: /data/midibrave-zrave-flow/cache
+  packed_root: /data/midibrave-zrave-flow/packs/all-synth
+  shard_records: 4096
+  sources:
+    - name: serum_full
+      kind: registry
+      manifest: /data/datasets/TimbreDatasets/registry/timbreclap_dataset.db
+      audio_root: /data/datasets/Timbre_A/serum-octopus-v1
+      weight: 0.55
+      maximum_future_frames: 64
+      registry_dataset_id: serum-octopus-v1
+      allowed_categories: [Pad, Lead, Bass, Pluck, Keys, Arp, Chord, Synth]
+    - name: dexed_dense
+      kind: jsonl
+      manifest: /data/datasets/latent-cosmos-synth/dexed-dataset/metadata/samples.jsonl
+      audio_root: /data/datasets/latent-cosmos-synth/dexed-dataset
+      weight: 0.20
+      maximum_future_frames: 64
+    - name: serum_dense
+      kind: jsonl
+      manifest: /data/datasets/latent-cosmos-synth/serum-dataset/metadata/samples.jsonl
+      audio_root: /data/datasets/latent-cosmos-synth/serum-dataset
+      weight: 0.15
+      maximum_future_frames: 20
+      preset_metadata: /data/datasets/latent-cosmos-synth/serum-dataset/metadata/presets.jsonl
+    - name: dexed_surge_broad
+      kind: jsonl
+      manifest: /data/datasets/Timbre_A/new_dexed_surge/multi_render/manifest.jsonl
+      audio_root: /data/datasets/Timbre_A/new_dexed_surge/multi_render
+      weight: 0.10
+      maximum_future_frames: 64
+rave:
+  checkpoint: /data/midibrave-zrave-standalone/models/freesoundloop10k_raspi_b2048_r44100_z16.ts
+  expected_sha256: 3ec093e132ce75d7fee3b8b734c739ebf8711a57ee332a60bce4359e2e34073e
+  sample_rate: 44100
+  latent_hop: 2048
+model:
+  latent_dim: 16
+  context_frames: 32
+  future_frames: 64
+  d_model: 384
+  context_layers: 4
+  future_layers: 8
+  heads: 8
+  feedforward_dim: 1536
+  dropout: 0.0
+  note_min: 21
+  note_max: 109
+  condition_dropout: 0.10
+  pitch_guidance: 3.0
+  solver_steps: 8
+  wander_delay_frames: [16, 32, 48]
+loss:
+  flow: 1.0
+  pitch_initial: 0.30
+  pitch_minimum: 0.10
+  pitch_maximum: 1.00
+  pitch_warmup_updates: 1000
+  pitch_gradient_minimum_ratio: 0.20
+  pitch_gradient_maximum_ratio: 0.35
+  pitch_gradient_measure_every: 100
+  boundary: 0.10
+  statistics: 0.02
+  boundary_frames: 8
+optimizer:
+  learning_rate: 0.0001
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.95
+train:
+  output_root: /data/midibrave-zrave-flow/runs/flow-v1
+  batch_per_gpu: 128
+  max_updates: 100000
+  warmup_updates: 1000
+  short_future_updates: 5000
+  checkpoint_every: 5000
+  validation_every: 5000
+  early_stop_gate_passes: 3
+  log_every: 20
+  gradient_clip: 1.0
+  precision: amp_fp16
+  exposure_start_fraction: 0.80
+  exposure_probability: 0.25
+  exposure_prefix_frames: 32
+  pitch_transition_fraction: 0.20
+  seed: 20260725
