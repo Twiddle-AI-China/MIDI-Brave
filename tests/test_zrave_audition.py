@@ -24,6 +24,12 @@ CATEGORIES = ("Pad", "Bass", "Lead", "Pluck", "Keys")
 RENDER_SCRIPT = (
     Path(__file__).parents[1] / "scripts" / "render_zrave_audition.py"
 )
+SBATCH_SCRIPT = (
+    Path(__file__).parents[1]
+    / "scripts"
+    / "cloud"
+    / "octopus_zrave_audition.sbatch"
+)
 
 
 class _CountingModel:
@@ -257,3 +263,17 @@ def test_render_script_exposes_reproducible_cli_contract() -> None:
     ):
         assert option in script
     assert "render_audition" in script
+
+
+def test_octopus_audition_uses_exactly_one_slurm_gpu() -> None:
+    script = SBATCH_SCRIPT.read_text(encoding="utf-8")
+
+    assert "#SBATCH --partition=gpu1" in script
+    assert "#SBATCH --gres=gpu:1" in script
+    assert "#SBATCH --gres=gpu:2" not in script
+    assert "scripts/render_zrave_audition.py" in script
+    assert "checkpoints/best.pt" in script
+    assert "best-8000-v1" in script
+    assert "zrave-sequence-comparison/index.html" in script
+    assert "wav_count" in script
+    assert "-ne 32" in script
