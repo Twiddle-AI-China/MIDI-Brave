@@ -17,6 +17,7 @@ assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 select_candidate = MODULE.select_candidate
+load_candidates = MODULE.load_candidates
 
 
 def _candidate(
@@ -75,3 +76,24 @@ def test_sweep_fails_when_no_candidate_is_valid() -> None:
                 for batch in (128, 256, 384, 512)
             ]
         )
+
+
+def test_sweep_loads_an_explicit_batch_contract(tmp_path: Path) -> None:
+    batches = (1024, 1536, 2048, 2560)
+    for batch in batches:
+        (tmp_path / f"batch-{batch}.json").write_text(
+            __import__("json").dumps(_candidate(batch, float(batch))),
+            encoding="utf-8",
+        )
+
+    candidates = load_candidates(tmp_path, batches)
+
+    assert tuple(
+        int(candidate["batch_per_gpu"]) for candidate in candidates
+    ) == batches
+    assert all("report_path" in candidate for candidate in candidates)
+
+
+def test_sweep_rejects_duplicate_explicit_batches(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unique"):
+        load_candidates(tmp_path, (1024, 1024))

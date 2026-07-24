@@ -45,3 +45,6 @@ def test_standalone_cloud_jobs_ban_conditional_dependencies() -> None:
     assert "octopus_standalone50.yaml" in scripts
     assert scripts.count("#sbatch --gres=gpu:8") == 3
     assert "--benchmark-updates 100" in scripts
+    for batch in (1024, 1536, 2048, 2560):
+        assert str(batch) in scripts
+    assert "--batches 1024 1536 2048 2560" in scripts

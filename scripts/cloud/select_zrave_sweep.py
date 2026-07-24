@@ -59,18 +59,17 @@ def _atomic_json(path: Path, payload: object) -> None:
     temporary.replace(path)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Select the highest-throughput valid Z-RAVE batch."
-    )
-    parser.add_argument("--sweep-root", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--latest-output")
-    args = parser.parse_args()
-    root = Path(args.sweep_root)
+def load_candidates(
+    root: Path,
+    batches: tuple[int, ...],
+) -> list[dict[str, Any]]:
+    if not batches or any(batch <= 0 for batch in batches):
+        raise ValueError("sweep batches must be positive")
+    if len(set(batches)) != len(batches):
+        raise ValueError("sweep batches must be unique")
     candidates: list[dict[str, Any]] = []
     observed_batches: list[int] = []
-    for batch in EXPECTED_BATCHES:
+    for batch in batches:
         path = root / f"batch-{batch}.json"
         if not path.is_file():
             raise FileNotFoundError(f"missing sweep report: {path}")
@@ -78,17 +77,37 @@ def main() -> None:
         candidate["report_path"] = str(path.resolve())
         candidates.append(candidate)
         observed_batches.append(int(candidate.get("batch_per_gpu", -1)))
-    if tuple(observed_batches) != EXPECTED_BATCHES:
+    if tuple(observed_batches) != batches:
         raise ValueError(
             f"sweep batch contract mismatch: {observed_batches}"
         )
+    return candidates
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Select the highest-throughput valid Z-RAVE batch."
+    )
+    parser.add_argument("--sweep-root", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--latest-output")
+    parser.add_argument(
+        "--batches",
+        nargs="+",
+        type=int,
+        default=list(EXPECTED_BATCHES),
+    )
+    args = parser.parse_args()
+    root = Path(args.sweep_root)
+    batches = tuple(args.batches)
+    candidates = load_candidates(root, batches)
     winner = select_candidate(candidates)
     selection = {
         "schema": 1,
         "rule": (
             "highest median global windows/s; within 2% choose smaller batch"
         ),
-        "expected_batches": list(EXPECTED_BATCHES),
+        "expected_batches": list(batches),
         "candidates": candidates,
         "selected": winner,
         "batch_per_gpu": int(winner["batch_per_gpu"]),

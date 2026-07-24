@@ -29,7 +29,7 @@ print(int(json.load(open(sys.argv[1]))["batch_per_gpu"]))
 PY
 )
 case "$batch" in
-  256|512|768|1024) ;;
+  1024|1536|2048|2560) ;;
   *)
     echo "invalid selected batch: $batch" >&2
     exit 2

@@ -23,7 +23,7 @@ latest=$root/sweeps/latest-selection.json
 test -f "$root/packs/serum-balanced50/index.json"
 mkdir -p "$sweep_root"
 
-for batch in 256 512 768 1024; do
+for batch in 1024 1536 2048 2560; do
   report=$sweep_root/batch-${batch}.json
   set +e
   srun --kill-on-bad-exit=1 --cpu-bind=cores \
@@ -74,4 +74,5 @@ done
 python3 "$repo/scripts/cloud/select_zrave_sweep.py" \
   --sweep-root "$sweep_root" \
   --output "$sweep_root/selection.json" \
-  --latest-output "$latest"
+  --latest-output "$latest" \
+  --batches 1024 1536 2048 2560
