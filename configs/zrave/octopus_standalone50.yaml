@@ -44,7 +44,7 @@ train:
   warmup_updates: 200
   checkpoint_every: 500
   validation_every: 250
-  validation_batches: 64
+  validation_batches: 4
   validation_rollout_frames: 64
   early_stop_validations: 6
   log_every: 20

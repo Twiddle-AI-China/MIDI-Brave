@@ -37,6 +37,7 @@ def test_standalone_config_has_the_measured_codec_contract() -> None:
     assert config.train.warmup_updates == 200
     assert config.train.checkpoint_every == 500
     assert config.train.validation_every == 250
+    assert config.train.validation_batches == 4
     assert config.train.validation_rollout_frames == 64
 
 
