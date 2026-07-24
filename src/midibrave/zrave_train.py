@@ -520,7 +520,8 @@ def condition_rollout_history(
 ) -> Tensor:
     if depth < 0:
         raise ValueError("rollout depth must be non-negative")
-    context_frames = int(model.config.context_frames)
+    unwrapped = getattr(model, "module", model)
+    context_frames = int(unwrapped.config.context_frames)
     if history.ndim != 3 or history.shape[1] != context_frames:
         raise ValueError(
             f"history must contain exactly {context_frames} frames"
@@ -822,7 +823,7 @@ def _train(args: argparse.Namespace) -> None:
         started = time.perf_counter()
         with torch.autocast("cuda", dtype=torch.float16):
             conditioned_history = condition_rollout_history(
-                model,
+                training_model,
                 history,
                 rollout_depth,
             )

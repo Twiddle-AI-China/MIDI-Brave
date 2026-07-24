@@ -275,6 +275,17 @@ class _IncrementModel:
         return ZravePrediction(delta=delta, latent=latent)
 
 
+class _NoGradWrapper:
+    def __init__(self) -> None:
+        self.module = _IncrementModel()
+        self.calls = 0
+
+    def __call__(self, history: torch.Tensor) -> ZravePrediction:
+        self.calls += 1
+        assert torch.is_grad_enabled() is False
+        return self.module(history)
+
+
 def test_condition_rollout_history_detaches_generated_chunks() -> None:
     history = torch.zeros(2, 4, 16, requires_grad=True)
 
@@ -286,6 +297,22 @@ def test_condition_rollout_history_detaches_generated_chunks() -> None:
 
     assert conditioned.shape == history.shape
     assert conditioned.requires_grad is False
+    torch.testing.assert_close(
+        conditioned[:, -1],
+        torch.full((2, 16), 4.0),
+    )
+
+
+def test_condition_rollout_history_uses_distributed_wrapper_forward() -> None:
+    wrapper = _NoGradWrapper()
+
+    conditioned = condition_rollout_history(
+        wrapper,
+        torch.zeros(2, 4, 16),
+        depth=2,
+    )
+
+    assert wrapper.calls == 2
     torch.testing.assert_close(
         conditioned[:, -1],
         torch.full((2, 16), 4.0),
