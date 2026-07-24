@@ -1,0 +1,968 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Z-RAVE 序列预测试听台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #151713;
+      --muted: #66695f;
+      --paper: #f1ede3;
+      --panel: #fffdf7;
+      --line: #252821;
+      --soft-line: #c9c5b9;
+      --signal: #f14d2f;
+      --signal-dark: #9e250f;
+      --acid: #c8ef63;
+      --blue: #7cc7e8;
+      --shadow: 5px 5px 0 var(--line);
+      font-family: "Arial Narrow", "Roboto Condensed", "Helvetica Neue",
+        Arial, sans-serif;
+      font-synthesis: none;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      min-width: 320px;
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      color: inherit;
+    }
+
+    .shell {
+      width: min(1420px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 80px;
+    }
+
+    .masthead {
+      display: grid;
+      grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.75fr);
+      gap: 24px;
+      align-items: end;
+      padding: 26px;
+      border: 2px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow,
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow {
+      margin: 0 0 14px;
+      color: var(--signal-dark);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 860px;
+      margin-bottom: 12px;
+      font-size: clamp(38px, 6vw, 82px);
+      line-height: 0.88;
+      letter-spacing: -0.055em;
+      text-transform: uppercase;
+    }
+
+    .lede {
+      max-width: 760px;
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: clamp(16px, 2vw, 21px);
+      line-height: 1.45;
+    }
+
+    .contract {
+      padding: 18px;
+      border: 2px solid var(--line);
+      background: var(--acid);
+      transform: rotate(0.7deg);
+    }
+
+    .contract strong {
+      display: block;
+      margin-bottom: 9px;
+      font-size: 18px;
+      text-transform: uppercase;
+    }
+
+    .contract p {
+      margin-bottom: 0;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .status-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+      margin: 28px 0 20px;
+      padding: 12px 14px;
+      border-top: 2px solid var(--line);
+      border-bottom: 2px solid var(--line);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .status-line[data-state="error"] {
+      color: #fff;
+      background: var(--signal-dark);
+    }
+
+    .status-dot {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      margin-right: 9px;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: var(--acid);
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-bottom: 36px;
+      border: 2px solid var(--line);
+      background: var(--panel);
+    }
+
+    .legend-item {
+      min-height: 92px;
+      padding: 16px;
+      border-right: 2px solid var(--line);
+    }
+
+    .legend-item:last-child {
+      border-right: 0;
+    }
+
+    .legend-key {
+      display: block;
+      margin-bottom: 7px;
+      font: 800 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+    }
+
+    .legend-title {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 18px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    .legend-copy {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .section-heading {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: baseline;
+      margin: 48px 0 18px;
+    }
+
+    .section-heading h2 {
+      margin-bottom: 0;
+      font-size: clamp(27px, 4vw, 48px);
+      letter-spacing: -0.035em;
+      text-transform: uppercase;
+    }
+
+    .section-heading p {
+      max-width: 650px;
+      margin-bottom: 0;
+      color: var(--muted);
+      line-height: 1.4;
+      text-align: right;
+    }
+
+    .category {
+      margin: 0 0 26px;
+    }
+
+    .category-head {
+      display: grid;
+      grid-template-columns: 66px 1fr auto;
+      gap: 14px;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 3px solid var(--line);
+    }
+
+    .category-index {
+      padding: 7px 8px;
+      color: var(--panel);
+      background: var(--line);
+      font: 800 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+      text-align: center;
+    }
+
+    .category h3 {
+      margin: 0;
+      font-size: 30px;
+      letter-spacing: -0.025em;
+      text-transform: uppercase;
+    }
+
+    .category-count {
+      color: var(--muted);
+      font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+      text-transform: uppercase;
+    }
+
+    .comparison-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      padding-top: 18px;
+    }
+
+    .comparison-card,
+    .random-card {
+      position: relative;
+      border: 2px solid var(--line);
+      background: var(--panel);
+      transition: transform 120ms ease, box-shadow 120ms ease;
+    }
+
+    .comparison-card {
+      padding: 18px;
+    }
+
+    .comparison-card.is-active {
+      box-shadow: var(--shadow);
+      transform: translate(-2px, -2px);
+    }
+
+    .comparison-card:focus-visible {
+      outline: 4px solid var(--blue);
+      outline-offset: 2px;
+    }
+
+    .card-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: flex-start;
+      margin-bottom: 18px;
+    }
+
+    .split-label {
+      display: inline-block;
+      margin-bottom: 7px;
+      color: var(--signal-dark);
+      font: 800 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .preset {
+      margin-bottom: 0;
+      font: 700 14px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+      overflow-wrap: anywhere;
+    }
+
+    .midi-stamp {
+      min-width: 98px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      background: var(--paper);
+      font: 700 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+      text-align: right;
+    }
+
+    .variant-switcher {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border: 2px solid var(--line);
+    }
+
+    .variant-button {
+      min-height: 54px;
+      padding: 8px 6px;
+      border: 0;
+      border-right: 2px solid var(--line);
+      background: transparent;
+      cursor: pointer;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+
+    .variant-button:last-child {
+      border-right: 0;
+    }
+
+    .variant-button:hover {
+      background: var(--paper);
+    }
+
+    .variant-button[aria-pressed="true"] {
+      color: #fff;
+      background: var(--signal);
+    }
+
+    .variant-button small {
+      display: block;
+      margin-top: 4px;
+      font: 600 9px/1.15 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+      opacity: 0.82;
+    }
+
+    .transport {
+      display: grid;
+      grid-template-columns: 46px minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 15px 0 4px;
+    }
+
+    .play-button {
+      width: 46px;
+      height: 46px;
+      border: 2px solid var(--line);
+      background: var(--acid);
+      cursor: pointer;
+      font-weight: 900;
+    }
+
+    .play-button:hover {
+      color: #fff;
+      background: var(--line);
+    }
+
+    .scrubber {
+      width: 100%;
+      height: 22px;
+      margin: 0;
+      accent-color: var(--signal);
+      cursor: pointer;
+    }
+
+    .time-readout {
+      min-width: 86px;
+      font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+      text-align: right;
+    }
+
+    .card-foot {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      margin-top: 9px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .loop-control {
+      display: inline-flex;
+      gap: 7px;
+      align-items: center;
+      cursor: pointer;
+    }
+
+    .keyboard-hint {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .random-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .random-card {
+      padding: 20px;
+      border-top: 8px solid var(--blue);
+    }
+
+    .random-card h3 {
+      margin-bottom: 6px;
+      font-size: 24px;
+      text-transform: uppercase;
+    }
+
+    .random-meta {
+      margin-bottom: 18px;
+      color: var(--muted);
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+      overflow-wrap: anywhere;
+    }
+
+    .seed-timeline {
+      position: relative;
+      height: 44px;
+      margin-bottom: 14px;
+      border: 2px solid var(--line);
+      background: var(--paper);
+    }
+
+    .seed-region {
+      position: absolute;
+      inset: 0 auto 0 0;
+      background: var(--acid);
+    }
+
+    .seed-marker {
+      position: absolute;
+      top: -8px;
+      bottom: -8px;
+      width: 3px;
+      background: var(--signal);
+    }
+
+    .seed-marker::after {
+      position: absolute;
+      top: -18px;
+      left: 6px;
+      width: max-content;
+      content: "SEED → PREDICT";
+      color: var(--signal-dark);
+      font: 800 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+    }
+
+    .timeline-labels {
+      display: flex;
+      justify-content: space-between;
+      padding: 14px 10px 0;
+      font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
+        monospace;
+    }
+
+    .random-card audio {
+      width: 100%;
+    }
+
+    .technical {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-top: 46px;
+      border: 2px solid var(--line);
+      background: var(--line);
+      gap: 2px;
+    }
+
+    .technical-item {
+      min-height: 126px;
+      padding: 16px;
+      background: var(--panel);
+    }
+
+    .technical-item strong {
+      display: block;
+      margin-bottom: 12px;
+      font-size: 13px;
+      text-transform: uppercase;
+    }
+
+    .technical-item code {
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .footer-note {
+      max-width: 920px;
+      margin: 34px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 860px) {
+      .masthead,
+      .comparison-grid,
+      .random-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .contract {
+        transform: none;
+      }
+
+      .section-heading {
+        display: block;
+      }
+
+      .section-heading p {
+        margin-top: 8px;
+        text-align: left;
+      }
+
+      .legend {
+        grid-template-columns: 1fr;
+      }
+
+      .legend-item {
+        border-right: 0;
+        border-bottom: 2px solid var(--line);
+      }
+
+      .legend-item:last-child {
+        border-bottom: 0;
+      }
+
+      .technical {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 540px) {
+      .shell {
+        width: min(100% - 18px, 1420px);
+        padding-top: 9px;
+      }
+
+      .masthead {
+        padding: 18px;
+      }
+
+      .variant-button {
+        min-height: 60px;
+        font-size: 11px;
+      }
+
+      .transport {
+        grid-template-columns: 44px minmax(0, 1fr);
+      }
+
+      .time-readout {
+        grid-column: 2;
+      }
+
+      .card-foot {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body data-version="1">
+  <main class="shell">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">Latent sequence lab · held-out 5 × 2</p>
+        <h1>Z-RAVE 序列预测试听台</h1>
+        <p class="lede">
+          在同一时间位置快速切换原始音频、真实 latent 直接重建与
+          Transformer 自回归重建。三路共享控制条件与增益，专门听预测误差。
+        </p>
+      </div>
+      <aside class="contract">
+        <strong>比较原则 / Listening contract</strong>
+        <p>
+          128 帧真实 seed 只用于预热，A/B/C 中不会播放。按 1、2、3
+          切换版本，空格播放。先听 Direct vs Predicted，再判断 Transformer；
+          原音频与 Direct 的差距属于 decoder ceiling。
+        </p>
+      </aside>
+    </header>
+
+    <div class="status-line" id="statusLine" data-state="loading" role="status"
+      aria-live="polite">
+      <span><span class="status-dot"></span><span id="statusText">正在读取试听清单…</span></span>
+      <span id="statusMeta">MANIFEST / WAIT</span>
+    </div>
+
+    <section class="legend" aria-label="试听版本说明">
+      <div class="legend-item">
+        <span class="legend-key">KEY 1 / A</span>
+        <span class="legend-title">原始音频</span>
+        <span class="legend-copy">Original · 数据集里的同一未来时间片段。</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-key">KEY 2 / B</span>
+        <span class="legend-title">直接重建</span>
+        <span class="legend-copy">Direct reconstruction · 真实 Z-RAVE future。</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-key">KEY 3 / C</span>
+        <span class="legend-title">预测重建</span>
+        <span class="legend-copy">Predicted sequence · 只用 seed 自回归生成 future。</span>
+      </div>
+    </section>
+
+    <section aria-labelledby="comparisonTitle">
+      <div class="section-heading">
+        <h2 id="comparisonTitle">五类乐器 · A/B/C</h2>
+        <p>
+          每类包含 validation 与 test 各一个未见过的 preset。
+          每张卡的时间轴会在切换版本时保持当前位置。
+        </p>
+      </div>
+      <div id="comparisonGroups"></div>
+    </section>
+
+    <section aria-labelledby="randomTitle">
+      <div class="section-heading">
+        <h2 id="randomTitle">随机 seed 续写</h2>
+        <p>
+          两组从 held-out 数据随机抽取的真实 Z-RAVE 开头。这里会播放
+          seed 与预测 future，并明确标出二者分界。
+        </p>
+      </div>
+      <div class="random-grid" id="randomContinuations"></div>
+    </section>
+
+    <section class="technical" id="technicalContract"
+      aria-label="模型与渲染技术信息"></section>
+
+    <p class="footer-note">
+      <strong>Pad-focused decoder warning：</strong>
+      当前 frozen decoder 主要由 Pad 数据训练。Bass、Lead、Pluck、Keys
+      的 Original → Direct 可能已经损失明显；这不应算在 Transformer
+      头上。判断序列预测器时，请以 <strong>Direct vs Predicted</strong>
+      为主。页面完全静态，不上传音频，也不依赖网络服务。
+    </p>
+  </main>
+
+  <script>
+    const CATEGORY_ORDER = ["Pad", "Bass", "Lead", "Pluck", "Keys"];
+    const VARIANTS = [
+      { key: "original", short: "1 原始", english: "Original" },
+      { key: "direct", short: "2 直解", english: "Direct reconstruction" },
+      { key: "predicted", short: "3 预测", english: "Predicted sequence" }
+    ];
+    const manifestURL = new URL("audition-manifest.json", window.location.href);
+    const allPlayers = new Set();
+    let activeCard = null;
+    let manifest = null;
+
+    function assetURL(path) {
+      return new URL(path, manifestURL).href;
+    }
+
+    function formatTime(value) {
+      if (!Number.isFinite(value)) return "0:00.000";
+      const minutes = Math.floor(value / 60);
+      const seconds = (value - minutes * 60).toFixed(3).padStart(6, "0");
+      return `${minutes}:${seconds}`;
+    }
+
+    function shortHash(value) {
+      return value ? `${value.slice(0, 12)}…${value.slice(-8)}` : "missing";
+    }
+
+    function setStatus(state, text, meta) {
+      const line = document.getElementById("statusLine");
+      line.dataset.state = state;
+      document.getElementById("statusText").textContent = text;
+      document.getElementById("statusMeta").textContent = meta;
+    }
+
+    function pauseOtherPlayers(current) {
+      allPlayers.forEach((player) => {
+        if (player !== current && !player.paused) player.pause();
+      });
+    }
+
+    function setActiveCard(card) {
+      if (activeCard === card) return;
+      document.querySelectorAll(".comparison-card.is-active").forEach((item) => {
+        item.classList.remove("is-active");
+      });
+      activeCard = card;
+      if (activeCard) activeCard.classList.add("is-active");
+    }
+
+    function bindAudioState(card, audio) {
+      const playButton = card.querySelector(".play-button");
+      const scrubber = card.querySelector(".scrubber");
+      const readout = card.querySelector(".time-readout");
+
+      audio.addEventListener("play", () => {
+        pauseOtherPlayers(audio);
+        setActiveCard(card);
+        playButton.textContent = "Ⅱ";
+        playButton.setAttribute("aria-label", "暂停");
+      });
+      audio.addEventListener("pause", () => {
+        playButton.textContent = "▶";
+        playButton.setAttribute("aria-label", "播放");
+      });
+      audio.addEventListener("loadedmetadata", () => {
+        readout.textContent = `${formatTime(audio.currentTime)} / ${formatTime(audio.duration)}`;
+      });
+      audio.addEventListener("timeupdate", () => {
+        const ratio = audio.duration ? audio.currentTime / audio.duration : 0;
+        scrubber.value = String(Math.round(ratio * 1000));
+        readout.textContent = `${formatTime(audio.currentTime)} / ${formatTime(audio.duration)}`;
+      });
+      playButton.addEventListener("click", () => {
+        if (audio.paused) {
+          audio.play().catch((error) => {
+            setStatus("error", `浏览器拒绝播放：${error.message}`, "AUDIO / ERROR");
+          });
+        } else {
+          audio.pause();
+        }
+      });
+      scrubber.addEventListener("input", () => {
+        if (audio.duration) {
+          audio.currentTime = (Number(scrubber.value) / 1000) * audio.duration;
+        }
+      });
+    }
+
+    async function switchVariant(card, variant) {
+      const audio = card.querySelector("audio");
+      if (card.dataset.variant === variant) return;
+      const paths = JSON.parse(card.dataset.variants);
+      const previousTime = audio.currentTime;
+      const wasPlaying = !audio.paused;
+      audio.pause();
+      card.dataset.variant = variant;
+      card.querySelectorAll(".variant-button").forEach((button) => {
+        const selected = button.dataset.variant === variant;
+        button.setAttribute("aria-pressed", String(selected));
+      });
+      await new Promise((resolve) => {
+        const done = () => resolve();
+        audio.addEventListener("loadedmetadata", done, { once: true });
+        audio.addEventListener("error", done, { once: true });
+        audio.src = assetURL(paths[variant]);
+        audio.load();
+      });
+      if (Number.isFinite(audio.duration)) {
+        audio.currentTime = Math.min(previousTime, Math.max(0, audio.duration - 0.01));
+      }
+      if (wasPlaying) {
+        await audio.play().catch(() => {});
+      }
+    }
+
+    function createComparisonCard(row) {
+      const card = document.createElement("article");
+      card.className = "comparison-card";
+      card.tabIndex = 0;
+      card.dataset.variant = "original";
+      card.dataset.variants = JSON.stringify(row.audio);
+      card.innerHTML = `
+        <div class="card-top">
+          <div>
+            <span class="split-label">${row.split}</span>
+            <p class="preset">${row.preset_id}</p>
+          </div>
+          <div class="midi-stamp">NOTE ${row.midi_note}<br>VEL ${row.velocity}</div>
+        </div>
+        <div class="variant-switcher" role="group" aria-label="选择试听版本"></div>
+        <div class="transport">
+          <button class="play-button" type="button" aria-label="播放">▶</button>
+          <input class="scrubber" type="range" min="0" max="1000" value="0"
+            aria-label="播放位置">
+          <span class="time-readout">0:00.000 / 0:00.000</span>
+        </div>
+        <div class="card-foot">
+          <label class="loop-control">
+            <input class="loop-toggle" type="checkbox" checked> 循环
+          </label>
+          <span class="keyboard-hint">FOCUS · 1 / 2 / 3 · SPACE</span>
+        </div>
+        <audio preload="metadata"></audio>
+      `;
+
+      const switcher = card.querySelector(".variant-switcher");
+      VARIANTS.forEach((variant) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "variant-button";
+        button.dataset.variant = variant.key;
+        button.setAttribute("aria-pressed", String(variant.key === "original"));
+        button.innerHTML = `${variant.short}<small>${variant.english}</small>`;
+        button.addEventListener("click", () => {
+          setActiveCard(card);
+          switchVariant(card, variant.key);
+        });
+        switcher.appendChild(button);
+      });
+
+      const audio = card.querySelector("audio");
+      audio.src = assetURL(row.audio.original);
+      audio.loop = true;
+      allPlayers.add(audio);
+      bindAudioState(card, audio);
+      card.querySelector(".loop-toggle").addEventListener("change", (event) => {
+        audio.loop = event.target.checked;
+      });
+      card.addEventListener("pointerdown", () => setActiveCard(card));
+      card.addEventListener("focus", () => setActiveCard(card));
+      return card;
+    }
+
+    function renderComparisons(rows) {
+      const root = document.getElementById("comparisonGroups");
+      root.replaceChildren();
+      CATEGORY_ORDER.forEach((category, categoryIndex) => {
+        const categoryRows = rows.filter((row) => row.category === category);
+        const section = document.createElement("section");
+        section.className = "category";
+        section.innerHTML = `
+          <div class="category-head">
+            <span class="category-index">${String(categoryIndex + 1).padStart(2, "0")}</span>
+            <h3>${category}</h3>
+            <span class="category-count">${categoryRows.length} held-out rows</span>
+          </div>
+          <div class="comparison-grid"></div>
+        `;
+        const grid = section.querySelector(".comparison-grid");
+        categoryRows.forEach((row) => grid.appendChild(createComparisonCard(row)));
+        root.appendChild(section);
+      });
+      setActiveCard(root.querySelector(".comparison-card"));
+    }
+
+    function createRandomCard(row, index) {
+      const card = document.createElement("article");
+      card.className = "random-card";
+      const totalFrames = row.seed_frames + row.predicted_frames;
+      const seedPercent = (row.seed_frames / totalFrames) * 100;
+      card.innerHTML = `
+        <span class="split-label">RANDOM ${String(index + 1).padStart(2, "0")}</span>
+        <h3>${row.category} · ${row.split}</h3>
+        <p class="random-meta">
+          ${row.preset_id}<br>
+          NOTE ${row.midi_note} / VEL ${row.velocity} /
+          boundary ${row.transition_seconds.toFixed(3)}s
+        </p>
+        <div class="seed-timeline" aria-label="真实 seed 与预测序列分界">
+          <span class="seed-region" style="width:${seedPercent}%"></span>
+          <span class="seed-marker" style="left:${seedPercent}%"></span>
+          <span class="timeline-labels">
+            <span>REAL Z-RAVE HEAD</span><span>AUTOREGRESSIVE FUTURE</span>
+          </span>
+        </div>
+        <audio controls preload="metadata" src="${assetURL(row.file)}"></audio>
+      `;
+      const audio = card.querySelector("audio");
+      allPlayers.add(audio);
+      audio.addEventListener("play", () => pauseOtherPlayers(audio));
+      return card;
+    }
+
+    function renderRandomContinuations(rows) {
+      const root = document.getElementById("randomContinuations");
+      root.replaceChildren();
+      rows.forEach((row, index) => root.appendChild(createRandomCard(row, index)));
+    }
+
+    function renderTechnicalContract(data) {
+      const transformer = data.models.transformer;
+      const decoder = data.models.decoder;
+      const clap = data.models.clap;
+      const root = document.getElementById("technicalContract");
+      root.innerHTML = `
+        <div class="technical-item">
+          <strong>Transformer / update ${transformer.update}</strong>
+          <code>${transformer.architecture}<br>${shortHash(transformer.sha256)}</code>
+        </div>
+        <div class="technical-item">
+          <strong>Pad-focused decoder / update ${decoder.update}</strong>
+          <code>format-5 frozen decoder<br>${shortHash(decoder.sha256)}</code>
+        </div>
+        <div class="technical-item">
+          <strong>Render contract</strong>
+          <code>
+            seed ${data.context_frames}f · future ${data.future_frames}f<br>
+            hop ${data.latent_hop} · ${data.sample_rate} Hz ·
+            ${data.audible_duration_seconds.toFixed(3)} s
+          </code>
+        </div>
+        <span class="visually-hidden">CLAP ${shortHash(clap.sha256)}</span>
+      `;
+    }
+
+    document.addEventListener("keydown", (event) => {
+      if (!activeCard || event.repeat) return;
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
+      const keyMap = { "1": "original", "2": "direct", "3": "predicted" };
+      if (keyMap[event.key]) {
+        event.preventDefault();
+        switchVariant(activeCard, keyMap[event.key]);
+        return;
+      }
+      if (event.code === "Space") {
+        event.preventDefault();
+        activeCard.querySelector(".play-button").click();
+      }
+    });
+
+    async function boot() {
+      try {
+        const response = await fetch(manifestURL, { cache: "no-store" });
+        if (!response.ok) throw new Error(`manifest HTTP ${response.status}`);
+        manifest = await response.json();
+        if (manifest.schema !== 1) throw new Error("unsupported manifest schema");
+        renderComparisons(manifest.comparisons);
+        renderRandomContinuations(manifest.random_continuations);
+        renderTechnicalContract(manifest);
+        setStatus(
+          "ready",
+          `已载入 ${manifest.comparisons.length} 组三路对比 + ${manifest.random_continuations.length} 组随机续写`,
+          `UPDATE ${manifest.models.transformer.update} / READY`
+        );
+      } catch (error) {
+        setStatus(
+          "error",
+          `加载失败：${error.message}。请通过本地 HTTP server 打开页面。`,
+          "MANIFEST / ERROR"
+        );
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>
