@@ -16,6 +16,9 @@ SWEEP = (
 TRAIN = (
     ROOT / "scripts" / "cloud" / "octopus_zrave_standalone_train.sbatch"
 )
+EVALUATE = (
+    ROOT / "scripts" / "cloud" / "octopus_zrave_standalone_evaluate.sbatch"
+)
 
 
 def test_standalone_config_has_the_measured_codec_contract() -> None:
@@ -39,7 +42,7 @@ def test_standalone_config_has_the_measured_codec_contract() -> None:
 def test_standalone_cloud_jobs_ban_conditional_dependencies() -> None:
     scripts = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in (PREPARE, SWEEP, TRAIN)
+        for path in (PREPARE, SWEEP, TRAIN, EVALUATE)
     ).casefold()
 
     assert "predictive" not in scripts
@@ -48,6 +51,7 @@ def test_standalone_cloud_jobs_ban_conditional_dependencies() -> None:
     assert "/data:/data" not in scripts
     assert "octopus_standalone50.yaml" in scripts
     assert scripts.count("#sbatch --gres=gpu:8") == 3
+    assert "#sbatch --gres=gpu:1" in scripts
     assert "--benchmark-updates 100" in scripts
     for batch in (1024, 1536, 2048, 2560):
         assert str(batch) in scripts

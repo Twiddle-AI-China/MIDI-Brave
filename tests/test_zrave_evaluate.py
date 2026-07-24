@@ -50,26 +50,30 @@ def test_rollout_and_baselines_have_exact_contract() -> None:
 def test_acceptance_requires_both_baselines_and_stable_variance() -> None:
     report = {
         "finite": True,
+        "evaluation_contract": {
+            "gate_horizons": [16, 64],
+            "variance_horizon": 64,
+        },
         "rollout": {
-            "32": {
+            "16": {
                 "model": {"normalized_smooth_l1": 0.4},
                 "persistence": {"normalized_smooth_l1": 0.5},
                 "linear": {"normalized_smooth_l1": 0.6},
             },
-            "128": {
+            "64": {
                 "model": {"normalized_smooth_l1": 0.7},
                 "persistence": {"normalized_smooth_l1": 0.8},
                 "linear": {"normalized_smooth_l1": 0.9},
             },
         },
-        "prediction_variance_ratio_128": 1.1,
+        "prediction_variance_ratio": 1.1,
     }
 
     passed = acceptance_gate(report)
-    report["prediction_variance_ratio_128"] = 0.2
+    report["prediction_variance_ratio"] = 0.2
     failed = acceptance_gate(report)
 
     assert passed["passed"] is True
     assert all(passed["checks"].values())
     assert failed["passed"] is False
-    assert failed["checks"]["variance_ratio_128"] is False
+    assert failed["checks"]["variance_ratio_64"] is False

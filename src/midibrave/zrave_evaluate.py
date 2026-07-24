@@ -63,8 +63,12 @@ def rollout_prediction(
 
 def acceptance_gate(report: dict[str, Any]) -> dict[str, Any]:
     rollout = report["rollout"]
+    contract = report["evaluation_contract"]
+    gate_horizons = tuple(int(value) for value in contract["gate_horizons"])
+    variance_horizon = int(contract["variance_horizon"])
     checks: dict[str, bool] = {"finite": bool(report.get("finite"))}
-    for horizon in ("32", "128"):
+    for horizon_value in gate_horizons:
+        horizon = str(horizon_value)
         metrics = rollout[horizon]
         model_error = float(metrics["model"]["normalized_smooth_l1"])
         checks[f"beats_persistence_{horizon}"] = model_error < float(
@@ -73,8 +77,10 @@ def acceptance_gate(report: dict[str, Any]) -> dict[str, Any]:
         checks[f"beats_linear_{horizon}"] = model_error < float(
             metrics["linear"]["normalized_smooth_l1"]
         )
-    variance_ratio = float(report["prediction_variance_ratio_128"])
-    checks["variance_ratio_128"] = 0.5 <= variance_ratio <= 2.0
+    variance_ratio = float(report["prediction_variance_ratio"])
+    checks[
+        f"variance_ratio_{variance_horizon}"
+    ] = 0.5 <= variance_ratio <= 2.0
     return {"passed": all(checks.values()), "checks": checks}
 
 
@@ -189,6 +195,52 @@ def _all_finite(value: object) -> bool:
     return True
 
 
+def _evaluation_contract(
+    config: ZraveConfig,
+    index: dict[str, Any],
+    split: str,
+) -> dict[str, object]:
+    lengths = [
+        int(sequence["length"])
+        for sequence in index["sequences"]
+        if sequence["split"] == split
+    ]
+    if not lengths:
+        raise ValueError(f"packed dataset has no {split} sequence")
+    available_future = min(lengths) - config.model.context_frames
+    rollout_horizons = tuple(
+        horizon
+        for horizon in (8, 16, 32, 64, 128)
+        if horizon <= available_future
+    )
+    if len(rollout_horizons) < 2:
+        raise ValueError(
+            f"evaluation needs at least 16 future frames, "
+            f"found {available_future}"
+        )
+    teacher_horizons = tuple(
+        horizon
+        for horizon in (1, 2, 4, 8, 16)
+        if horizon <= config.model.horizon_frames
+    )
+    if not teacher_horizons:
+        raise ValueError("model horizon is too short for evaluation")
+    maximum = rollout_horizons[-1]
+    preferred_short = 32 if maximum >= 128 else 16
+    short = max(
+        horizon
+        for horizon in rollout_horizons
+        if horizon <= preferred_short
+    )
+    return {
+        "available_future_frames": available_future,
+        "teacher_horizons": list(teacher_horizons),
+        "rollout_horizons": list(rollout_horizons),
+        "gate_horizons": [short, maximum],
+        "variance_horizon": maximum,
+    }
+
+
 @torch.inference_mode()
 def evaluate_checkpoint(
     config: ZraveConfig,
@@ -233,6 +285,14 @@ def evaluate_checkpoint(
     model.load_state_dict(payload["model"])
     model.eval()
 
+    evaluation_contract = _evaluation_contract(config, index, split)
+    maximum_horizon = int(evaluation_contract["variance_horizon"])
+    teacher_horizons = tuple(
+        int(value) for value in evaluation_contract["teacher_horizons"]
+    )
+    rollout_horizons = tuple(
+        int(value) for value in evaluation_contract["rollout_horizons"]
+    )
     latents = torch.from_numpy(
         np.load(packed_root / "latents.npy", allow_pickle=False)
     ).to(device=device)
@@ -240,7 +300,7 @@ def evaluate_checkpoint(
         index,
         split=split,
         context_frames=config.model.context_frames,
-        future_frames=128,
+        future_frames=maximum_horizon,
         seed=config.seed,
     )
     latent_scale = statistics.latent_std.to(
@@ -251,8 +311,6 @@ def evaluate_checkpoint(
         device=device,
         dtype=torch.float32,
     )
-    teacher_horizons = (1, 4, 8, 16)
-    rollout_horizons = (16, 32, 64, 128)
     teacher_latent = {
         horizon: _ErrorAccumulator() for horizon in teacher_horizons
     }
@@ -271,7 +329,7 @@ def evaluate_checkpoint(
     reference_sum = 0.0
     reference_square_sum = 0.0
     variance_count = 0
-    total_frames = config.model.context_frames + 128
+    total_frames = config.model.context_frames + maximum_horizon
     offsets = torch.arange(total_frames, device=device)
 
     for offset in range(0, len(sequence_indices), batch_size):
@@ -307,11 +365,14 @@ def evaluate_checkpoint(
                 delta_scale,
             )
 
-        predicted = rollout_prediction(model, history, 128)
+        predicted = rollout_prediction(model, history, maximum_horizon)
         baselines = {
             "model": predicted,
-            "persistence": persistence_baseline(history, 128),
-            "linear": linear_baseline(history, 128),
+            "persistence": persistence_baseline(
+                history,
+                maximum_horizon,
+            ),
+            "linear": linear_baseline(history, maximum_horizon),
         }
         for horizon in rollout_horizons:
             for name, value in baselines.items():
@@ -320,17 +381,17 @@ def evaluate_checkpoint(
                     target[:, :horizon],
                     latent_scale,
                 )
-        prediction128 = predicted.float()
-        reference128 = target.float()
-        prediction_sum += float(prediction128.sum().item())
+        prediction_full = predicted.float()
+        reference_full = target.float()
+        prediction_sum += float(prediction_full.sum().item())
         prediction_square_sum += float(
-            torch.square(prediction128).sum().item()
+            torch.square(prediction_full).sum().item()
         )
-        reference_sum += float(reference128.sum().item())
+        reference_sum += float(reference_full.sum().item())
         reference_square_sum += float(
-            torch.square(reference128).sum().item()
+            torch.square(reference_full).sum().item()
         )
-        variance_count += reference128.numel()
+        variance_count += reference_full.numel()
 
     prediction_variance = max(
         0.0,
@@ -371,11 +432,12 @@ def evaluate_checkpoint(
         "statistics_sha256": _sha256_file(statistics_path),
         "evaluation_window_sha256": window_hash,
         "windows": len(sequence_indices),
+        "evaluation_contract": evaluation_contract,
         "teacher_forced": teacher_report,
         "rollout": rollout_report,
-        "prediction_variance_128": prediction_variance,
-        "reference_variance_128": reference_variance,
-        "prediction_variance_ratio_128": variance_ratio,
+        "prediction_variance": prediction_variance,
+        "reference_variance": reference_variance,
+        "prediction_variance_ratio": variance_ratio,
     }
     report["finite"] = _all_finite(report)
     report["acceptance"] = acceptance_gate(report)
