@@ -17,10 +17,10 @@ config=$container_repo/configs/zrave/octopus_standalone50.yaml
 image=midibrave:v0.9.0-five-model-fp16
 root=/srv/data-branches/nvme/midibrave-zrave
 container_root=/data/midibrave-zrave-standalone
-checkpoint=$root/runs/zrave_transformer_balanced50/checkpoints/best.pt
-container_checkpoint=$container_root/runs/zrave_transformer_balanced50/checkpoints/best.pt
-output=$root/audition/standalone-best-v2
-container_output=$container_root/audition/standalone-best-v2
+checkpoint=$root/runs/zrave_transformer_mean50_v2/checkpoints/best.pt
+container_checkpoint=$container_root/runs/zrave_transformer_mean50_v2/checkpoints/best.pt
+output=$root/audition/standalone-mean-v2-best
+container_output=$container_root/audition/standalone-mean-v2-best
 
 test -f "$checkpoint"
 if [[ -e "$output" ]]; then
@@ -46,7 +46,12 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores \
       --random-seed 20260724 \
       --device cuda
 
-cp "$repo/audition/zrave-sequence-comparison/index.html" "$output/index.html"
+docker run --rm \
+  -v "$repo:$container_repo:ro" \
+  -v "$root:$container_root" \
+  "$image" \
+  cp "$container_repo/audition/zrave-sequence-comparison/index.html" \
+    "$container_output/index.html"
 wav_count=$(find "$output/audio" -maxdepth 1 -type f -name '*.wav' | wc -l)
 if [[ "$wav_count" -ne 32 ]]; then
   echo "expected 32 audition WAV files, got $wav_count" >&2

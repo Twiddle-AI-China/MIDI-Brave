@@ -28,6 +28,9 @@ def test_standalone_config_has_the_measured_codec_contract() -> None:
     assert config.rave.expected_sha256 == (
         "3ec093e132ce75d7fee3b8b734c739ebf8711a57ee332a60bce4359e2e34073e"
     )
+    assert config.data.cache_root.endswith("serum-balanced50-mean-v2")
+    assert config.data.packed_root.endswith("serum-balanced50-mean-v2")
+    assert config.train.output_root.endswith("zrave_transformer_mean50_v2")
     assert config.data.latent_hop == 2048
     assert config.data.warmup_frames == 4
     assert config.model.latent_dim == 16
@@ -55,6 +58,9 @@ def test_standalone_cloud_jobs_ban_conditional_dependencies() -> None:
     assert scripts.count("#sbatch --gres=gpu:8") == 3
     assert "#sbatch --gres=gpu:1" in scripts
     assert "--benchmark-updates 100" in scripts
+    assert "serum-balanced50-mean-v2" in scripts
+    assert "zrave_transformer_mean50_v2" in scripts
+    assert "posterior_mean_temp0_reset_v1" in scripts
     for batch in (1024, 1536, 2048, 2560):
         assert str(batch) in scripts
     assert "--batches 1024 1536 2048 2560" in scripts

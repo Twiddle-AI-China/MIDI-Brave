@@ -16,6 +16,7 @@ from torch import Tensor
 from .data import load_audio
 from .zrave_config import ZraveConfig
 from .zrave_data import read_jsonl
+from .zrave_codec import decode_with_seed, encode_posterior_mean
 from .zrave_model import ZraveStatistics, ZraveTransformer
 
 
@@ -467,8 +468,8 @@ def _load_codec(
         probe_frames * config.data.latent_hop,
         device=device,
     )
-    probe_latent = codec.encode(probe_audio)
-    probe_decoded = codec.decode(probe_latent)
+    probe_latent = encode_posterior_mean(codec, probe_audio)
+    probe_decoded = decode_with_seed(codec, probe_latent, config.seed)
     if tuple(probe_latent.shape) != (
         1,
         config.model.latent_dim,
@@ -493,10 +494,13 @@ def _decode_latent(
     latent: Tensor,
     random_seed: int,
 ) -> np.ndarray:
-    torch.manual_seed(random_seed)
-    if latent.is_cuda:
-        torch.cuda.manual_seed_all(random_seed)
-    decoded = codec.decode(latent).detach().float().cpu().numpy()
+    decoded = (
+        decode_with_seed(codec, latent, random_seed)
+        .detach()
+        .float()
+        .cpu()
+        .numpy()
+    )
     if decoded.ndim != 3 or decoded.shape[:2] != (1, 1):
         raise ValueError(
             f"standalone RAVE returned invalid audio shape: "
@@ -575,6 +579,12 @@ def render_audition(
     codec_hash = _sha256_file(codec_path)
     if index.get("rave_codec") != _CODEC_KIND:
         raise ValueError("packed latents did not come from a standalone codec")
+    if index.get("rave_latent_encoding") != (
+        "posterior_mean_temp0_reset_v1"
+    ):
+        raise ValueError("packed latents are not deterministic posterior means")
+    if index.get("streaming_state_reset_per_clip") is not True:
+        raise ValueError("packed latents contain cross-clip streaming state")
     if index.get("rave_checkpoint_sha256") != codec_hash:
         raise ValueError("packed latents and standalone codec do not match")
     if int(index.get("latent_hop") or 0) != config.data.latent_hop:

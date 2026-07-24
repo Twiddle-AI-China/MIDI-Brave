@@ -12,6 +12,10 @@ from typing import Any, Iterable
 import numpy as np
 
 from .zrave_config import ZraveConfig
+from .zrave_codec import decode_with_seed, encode_posterior_mean
+
+
+_LATENT_ENCODING = "posterior_mean_temp0_reset_v1"
 
 
 def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -355,6 +359,8 @@ def pack_cached_latents(config: ZraveConfig) -> PackedDatasetMetadata:
         "rave_checkpoint": str(checkpoint_path.resolve()),
         "rave_checkpoint_sha256": checkpoint_hash,
         "rave_codec": "standalone_torchscript_rave",
+        "rave_latent_encoding": _LATENT_ENCODING,
+        "streaming_state_reset_per_clip": True,
         "rave_sample_rate": config.rave.sample_rate,
         "selected_manifest": str(
             Path(config.data.selected_manifest).resolve()
@@ -452,8 +458,12 @@ def cache_selected_latents(
         device=device,
     )
     with torch.inference_mode():
-        probe_latent = codec.encode(probe_audio)
-        probe_decoded = codec.decode(probe_latent)
+        probe_latent = encode_posterior_mean(codec, probe_audio)
+        probe_decoded = decode_with_seed(
+            codec,
+            probe_latent,
+            config.seed,
+        )
     expected_latent_shape = (
         1,
         config.model.latent_dim,
@@ -499,7 +509,7 @@ def cache_selected_latents(
             tensor = torch.from_numpy(audio[:usable]).view(1, 1, -1).to(
                 device
             )
-            latent_tensor = codec.encode(tensor)
+            latent_tensor = encode_posterior_mean(codec, tensor)
             if (
                 latent_tensor.ndim != 3
                 or latent_tensor.shape[0] != 1
@@ -540,6 +550,8 @@ def cache_selected_latents(
         "existing": existing,
         "checkpoint_hash": checkpoint_hash,
         "codec": "standalone_torchscript_rave",
+        "latent_encoding": _LATENT_ENCODING,
+        "streaming_state_reset_per_clip": True,
         "sample_rate": sample_rate,
         "latent_hop": config.data.latent_hop,
     }

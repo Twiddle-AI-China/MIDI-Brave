@@ -219,6 +219,11 @@ def test_pack_cached_latents_trims_warmup_and_uses_train_statistics(
     np.testing.assert_array_equal(splits, np.asarray([0, 1, 2]))
     assert np.all(lengths > 128 + 16)
     assert metadata.rave_checkpoint_sha256 == checkpoint_hash
+    index = json.loads(
+        (pack_root / "index.json").read_text(encoding="utf-8")
+    )
+    assert index["rave_latent_encoding"] == "posterior_mean_temp0_reset_v1"
+    assert index["streaming_state_reset_per_clip"] is True
     expected_train = np.arange(16 * 220, dtype=np.float32).reshape(16, 220)
     expected_train = expected_train[:, 64:].T
     np.testing.assert_allclose(
@@ -258,9 +263,13 @@ def test_cache_uses_one_standalone_torchscript_codec(
     )
     (tmp_path / "pad.wav").write_bytes(b"fixture")
 
-    class FakeStandaloneRave:
-        sr = torch.tensor([44100])
-        latent_size = 16
+    class FakeStandaloneRave(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sr = torch.tensor([44100])
+            self.latent_size = 16
+            self.register_buffer("pad", torch.ones(1))
+            self.temperatures: list[float] = []
 
         def to(self, device: str) -> "FakeStandaloneRave":
             assert device == "cpu"
@@ -269,9 +278,16 @@ def test_cache_uses_one_standalone_torchscript_codec(
         def eval(self) -> "FakeStandaloneRave":
             return self
 
-        def encode(self, audio: torch.Tensor) -> torch.Tensor:
+        def encode(
+            self,
+            audio: torch.Tensor,
+            temperature: float = 1.0,
+        ) -> torch.Tensor:
+            self.temperatures.append(float(temperature))
             frames = audio.shape[-1] // config.data.latent_hop
-            return torch.ones(1, 16, frames)
+            value = torch.ones(1, 16, frames) + self.pad
+            self.pad.fill_(7.0)
+            return value
 
         def decode(self, latent: torch.Tensor) -> torch.Tensor:
             return torch.zeros(
@@ -280,11 +296,12 @@ def test_cache_uses_one_standalone_torchscript_codec(
                 latent.shape[-1] * config.data.latent_hop,
             )
 
+    codec = FakeStandaloneRave()
     load_calls: list[tuple[str, object]] = []
 
     def fake_load(path: str, map_location: object) -> FakeStandaloneRave:
         load_calls.append((path, map_location))
-        return FakeStandaloneRave()
+        return codec
 
     monkeypatch.setattr(torch.jit, "load", fake_load)
     monkeypatch.setattr(
@@ -302,9 +319,12 @@ def test_cache_uses_one_standalone_torchscript_codec(
     assert len(load_calls) == 1
     cache = np.load(latent_cache_path(config, "pad-60-127"))
     assert cache["latent"].shape == (16, 4)
+    np.testing.assert_array_equal(cache["latent"], np.ones((16, 4)))
     assert cache["checkpoint_hash"].item() == hashlib.sha256(
         checkpoint.read_bytes()
     ).hexdigest()
+    assert codec.temperatures == [0.0, 0.0]
+    assert report["latent_encoding"] == "posterior_mean_temp0_reset_v1"
 
 
 def test_zrave_data_has_no_conditional_model_dependency() -> None:

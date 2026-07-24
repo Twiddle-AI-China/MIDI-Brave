@@ -5,8 +5,8 @@ data:
   audio_root: /data/datasets/latent-cosmos-synth/serum-dataset
   selected_manifest: /data/midibrave-zrave-standalone/manifests/serum-balanced50.jsonl
   metadata_output: /data/midibrave-zrave-standalone/manifests/serum-balanced50.meta.json
-  cache_root: /data/midibrave-zrave-standalone/cache/serum-balanced50
-  packed_root: /data/midibrave-zrave-standalone/packs/serum-balanced50
+  cache_root: /data/midibrave-zrave-standalone/cache/serum-balanced50-mean-v2
+  packed_root: /data/midibrave-zrave-standalone/packs/serum-balanced50-mean-v2
   categories: [Pad, Bass, Lead, Pluck, Keys]
   presets_per_category: 10
   conditions_per_preset: 72
@@ -38,7 +38,7 @@ optimizer:
   beta1: 0.9
   beta2: 0.95
 train:
-  output_root: /data/midibrave-zrave-standalone/runs/zrave_transformer_balanced50
+  output_root: /data/midibrave-zrave-standalone/runs/zrave_transformer_mean50_v2
   batch_per_gpu: 512
   max_updates: 3000
   warmup_updates: 200

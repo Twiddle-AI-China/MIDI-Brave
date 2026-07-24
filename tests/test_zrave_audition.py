@@ -139,18 +139,25 @@ def test_triplet_rejects_misaligned_or_invalid_audio() -> None:
 
 
 def test_codec_decode_seed_makes_stochastic_render_repeatable() -> None:
-    class StochasticCodec:
+    class StochasticCodec(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_buffer("pad", torch.ones(1))
+
         def decode(self, latent: torch.Tensor) -> torch.Tensor:
-            return torch.randn(
+            value = torch.randn(
                 latent.shape[0],
                 1,
                 latent.shape[-1] * 4,
-            )
+            ) + self.pad
+            self.pad.fill_(9.0)
+            return value
 
     latent = torch.zeros(1, 16, 8)
+    codec = StochasticCodec()
 
-    first = _decode_latent(StochasticCodec(), latent, 20260724)
-    second = _decode_latent(StochasticCodec(), latent, 20260724)
+    first = _decode_latent(codec, latent, 20260724)
+    second = _decode_latent(codec, latent, 20260724)
 
     np.testing.assert_array_equal(first, second)
 
@@ -300,8 +307,11 @@ def test_octopus_audition_uses_exactly_one_slurm_gpu() -> None:
     assert "#SBATCH --gres=gpu:2" not in script
     assert "scripts/render_zrave_audition.py" in script
     assert "checkpoints/best.pt" in script
-    assert "standalone-best-v2" in script
+    assert "zrave_transformer_mean50_v2" in script
+    assert "standalone-mean-v2-best" in script
     assert "zrave-sequence-comparison/index.html" in script
+    assert 'cp "$container_repo/audition/' in script
+    assert 'cp "$repo/audition/' not in script
     assert "/srv/data-branches/nvme/datasets" in script
     assert "-v /data:/data" not in script
     assert "clap" not in lowered
@@ -318,13 +328,21 @@ def test_renderer_has_no_conditional_model_dependency() -> None:
         / "midibrave"
         / "zrave_audition.py"
     ).read_text(encoding="utf-8").casefold()
+    codec_helpers = (
+        Path(__file__).parents[1]
+        / "src"
+        / "midibrave"
+        / "zrave_codec.py"
+    ).read_text(encoding="utf-8").casefold()
 
     assert "clap" not in module
     assert "predictivemidibrave" not in module
     assert "midi_control" not in module
     assert "harmonicexcitation" not in module
     assert "torch.jit.load" in module
-    assert ".encode(" in module
-    assert ".decode(" in module
-    assert "torch.manual_seed" in module
-    assert "torch.cuda.manual_seed_all" in module
+    assert "encode_posterior_mean" in module
+    assert "decode_with_seed" in module
+    assert ".encode(" in codec_helpers
+    assert ".decode(" in codec_helpers
+    assert "torch.manual_seed" in codec_helpers
+    assert "torch.cuda.manual_seed_all" in codec_helpers

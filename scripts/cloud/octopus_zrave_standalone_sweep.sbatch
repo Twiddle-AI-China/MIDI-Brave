@@ -17,10 +17,10 @@ config=$container_repo/configs/zrave/octopus_standalone50.yaml
 image=midibrave:v0.9.0-five-model-fp16
 root=/srv/data-branches/nvme/midibrave-zrave
 container_root=/data/midibrave-zrave-standalone
-sweep_root=$root/sweeps/${SLURM_JOB_ID}
-latest=$root/sweeps/latest-selection.json
+sweep_root=$root/sweeps/mean-v2/${SLURM_JOB_ID}
+latest=$root/sweeps/mean-v2/latest-selection.json
 
-test -f "$root/packs/serum-balanced50/index.json"
+test -f "$root/packs/serum-balanced50-mean-v2/index.json"
 mkdir -p "$sweep_root"
 
 for batch in 1024 1536 2048 2560; do
@@ -42,7 +42,7 @@ for batch in 1024 1536 2048 2560; do
         --batch-per-gpu "$batch" \
         --benchmark-warmup 20 \
         --benchmark-updates 100 \
-        --benchmark-output "$container_root/sweeps/${SLURM_JOB_ID}/batch-${batch}.json"
+        --benchmark-output "$container_root/sweeps/mean-v2/${SLURM_JOB_ID}/batch-${batch}.json"
   status=$?
   set -e
   if [[ $status -ne 0 || ! -f "$report" ]]; then

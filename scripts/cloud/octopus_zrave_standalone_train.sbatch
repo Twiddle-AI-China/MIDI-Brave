@@ -17,9 +17,9 @@ config=$container_repo/configs/zrave/octopus_standalone50.yaml
 image=midibrave:v0.9.0-five-model-fp16
 root=/srv/data-branches/nvme/midibrave-zrave
 container_root=/data/midibrave-zrave-standalone
-run_root=$root/runs/zrave_transformer_balanced50
-container_run=$container_root/runs/zrave_transformer_balanced50
-selection=${SWEEP_SELECTION:-$root/sweeps/latest-selection.json}
+run_root=$root/runs/zrave_transformer_mean50_v2
+container_run=$container_root/runs/zrave_transformer_mean50_v2
+selection=${SWEEP_SELECTION:-$root/sweeps/mean-v2/latest-selection.json}
 
 test -f "$selection"
 batch=$(python3 - "$selection" <<'PY'
