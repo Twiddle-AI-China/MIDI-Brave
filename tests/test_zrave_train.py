@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -11,6 +12,7 @@ from midibrave.zrave_config import (
     ZraveTrainConfig,
 )
 from midibrave.zrave_model import (
+    ZravePrediction,
     ZraveStatistics,
     ZraveTransformer,
     zrave_prediction_loss,
@@ -18,9 +20,13 @@ from midibrave.zrave_model import (
 from midibrave.zrave_train import (
     GpuWindowSampler,
     allowed_rollout_depth,
+    condition_rollout_history,
     load_zrave_checkpoint,
+    load_zrave_warm_start,
+    rollout_training_frames,
     sample_rollout_depth,
     save_zrave_checkpoint,
+    select_rollout_target,
     should_checkpoint,
     summarize_benchmark,
 )
@@ -229,3 +235,104 @@ def test_rollout_config_rejects_invalid_probability() -> None:
             output_root="run",
             rollout_teacher_probability=1.1,
         )
+
+
+class _IncrementModel:
+    config = SimpleNamespace(context_frames=4, horizon_frames=2)
+
+    def __call__(self, history: torch.Tensor) -> ZravePrediction:
+        latent = history[:, -1:] + torch.arange(
+            1,
+            3,
+            dtype=history.dtype,
+            device=history.device,
+        )[None, :, None]
+        delta = torch.diff(
+            torch.cat((history[:, -1:], latent), dim=1),
+            dim=1,
+        )
+        return ZravePrediction(delta=delta, latent=latent)
+
+
+def test_condition_rollout_history_detaches_generated_chunks() -> None:
+    history = torch.zeros(2, 4, 16, requires_grad=True)
+
+    conditioned = condition_rollout_history(
+        _IncrementModel(),
+        history,
+        depth=2,
+    )
+
+    assert conditioned.shape == history.shape
+    assert conditioned.requires_grad is False
+    torch.testing.assert_close(
+        conditioned[:, -1],
+        torch.full((2, 16), 4.0),
+    )
+
+
+def test_select_rollout_target_uses_matching_chunk() -> None:
+    target = torch.arange(2 * 64 * 16).reshape(2, 64, 16)
+
+    actual = select_rollout_target(
+        target,
+        depth=3,
+        horizon_frames=8,
+    )
+
+    torch.testing.assert_close(actual, target[:, 24:32])
+
+
+def test_rollout_training_window_covers_every_depth_target() -> None:
+    assert rollout_training_frames(
+        horizon_frames=8,
+        maximum_depth=7,
+    ) == 64
+    assert rollout_training_frames(
+        horizon_frames=16,
+        maximum_depth=0,
+    ) == 16
+
+
+def test_warm_start_loads_only_compatible_model_weights(
+    tmp_path: Path,
+) -> None:
+    torch.manual_seed(41)
+    source, _ = _model()
+    optimizer = torch.optim.AdamW(source.parameters(), lr=1.0e-4)
+    sampler = _sampler()
+    checkpoint = tmp_path / "source.pt"
+    contract = {
+        "packed_index_sha256": "index",
+        "statistics_sha256": "statistics",
+        "latent_dim": 16,
+        "context_frames": 128,
+        "horizon_frames": 16,
+    }
+    save_zrave_checkpoint(
+        checkpoint,
+        model=source,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        update=7,
+        contract=contract,
+        world_size=1,
+        batch_per_gpu=2,
+        best_validation_metric=1.0,
+        validations_without_improvement=0,
+    )
+    torch.manual_seed(43)
+    target, _ = _model()
+    fresh_optimizer = torch.optim.AdamW(target.parameters(), lr=2.0e-4)
+
+    report = load_zrave_warm_start(
+        checkpoint,
+        model=target,
+        expected_contract=contract,
+    )
+
+    assert report["source_update"] == 7
+    assert fresh_optimizer.state == {}
+    for name, expected in source.state_dict().items():
+        torch.testing.assert_close(target.state_dict()[name], expected)

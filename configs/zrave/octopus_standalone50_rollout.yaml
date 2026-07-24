@@ -1,0 +1,56 @@
+seed: 20260724
+data:
+  preset_metadata: /data/datasets/latent-cosmos-synth/serum-dataset/metadata/presets.jsonl
+  eligible_manifest: /data/midibrave/manifests/serum_strict_1822_eligible.jsonl
+  audio_root: /data/datasets/latent-cosmos-synth/serum-dataset
+  selected_manifest: /data/midibrave-zrave-standalone/manifests/serum-balanced50.jsonl
+  metadata_output: /data/midibrave-zrave-standalone/manifests/serum-balanced50.meta.json
+  cache_root: /data/midibrave-zrave-standalone/cache/serum-balanced50-mean-v2
+  packed_root: /data/midibrave-zrave-standalone/packs/serum-balanced50-mean-v2
+  categories: [Pad, Bass, Lead, Pluck, Keys]
+  presets_per_category: 10
+  conditions_per_preset: 72
+  warmup_frames: 4
+  latent_hop: 2048
+rave:
+  checkpoint: /data/midibrave-zrave-standalone/models/freesoundloop10k_raspi_b2048_r44100_z16.ts
+  sample_rate: 44100
+  expected_sha256: 3ec093e132ce75d7fee3b8b734c739ebf8711a57ee332a60bce4359e2e34073e
+model:
+  latent_dim: 16
+  context_frames: 32
+  horizon_frames: 8
+  d_model: 384
+  layers: 8
+  heads: 8
+  feedforward_dim: 1536
+  dropout: 0.0
+loss:
+  future: 1.0
+  delta: 0.5
+  acceleration: 0.05
+  horizon_discount: 0.95
+  statistic_floor: 0.0001
+optimizer:
+  learning_rate: 0.0001
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.95
+train:
+  output_root: /data/midibrave-zrave-standalone/runs/zrave_transformer_rollout_v3
+  batch_per_gpu: 512
+  max_updates: 3000
+  warmup_updates: 100
+  checkpoint_every: 250
+  validation_every: 250
+  validation_batches: 8
+  validation_rollout_frames: 64
+  early_stop_validations: 8
+  log_every: 20
+  gradient_clip: 1.0
+  precision: amp_fp16
+  seed: 20260724
+  rollout_max_depth: 7
+  rollout_curriculum_updates: 500
+  rollout_teacher_probability: 0.25

@@ -309,6 +309,34 @@ def load_zrave_checkpoint(
     }
 
 
+def load_zrave_warm_start(
+    path: str | Path,
+    *,
+    model: nn.Module,
+    expected_contract: dict[str, object],
+) -> dict[str, object]:
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        raise ValueError("Z-RAVE warm-start checkpoint must be a mapping")
+    if payload.get("format") != 1:
+        raise ValueError("unsupported Z-RAVE warm-start checkpoint format")
+    if payload.get("architecture") != "zrave_transformer_v1":
+        raise ValueError("Z-RAVE warm-start architecture mismatch")
+    actual_contract = payload.get("contract")
+    if not isinstance(actual_contract, dict):
+        raise ValueError("Z-RAVE warm-start checkpoint has no contract")
+    for name, expected in expected_contract.items():
+        if actual_contract.get(name) != expected:
+            raise ValueError(f"Z-RAVE warm-start {name} mismatch")
+    unwrapped = (
+        model.module
+        if isinstance(model, DistributedDataParallel)
+        else model
+    )
+    unwrapped.load_state_dict(payload["model"])
+    return {"source_update": int(payload["update"])}
+
+
 def summarize_benchmark(
     *,
     batch_per_gpu: int,
@@ -462,6 +490,55 @@ def sample_rollout_depth(
     )
 
 
+def rollout_training_frames(
+    *,
+    horizon_frames: int,
+    maximum_depth: int,
+) -> int:
+    if horizon_frames <= 0 or maximum_depth < 0:
+        raise ValueError("invalid rollout training window")
+    return horizon_frames * (maximum_depth + 1)
+
+
+@torch.no_grad()
+def condition_rollout_history(
+    model: Any,
+    history: Tensor,
+    depth: int,
+) -> Tensor:
+    if depth < 0:
+        raise ValueError("rollout depth must be non-negative")
+    context_frames = int(model.config.context_frames)
+    if history.ndim != 3 or history.shape[1] != context_frames:
+        raise ValueError(
+            f"history must contain exactly {context_frames} frames"
+        )
+    current = history.detach()
+    for _ in range(depth):
+        chunk = model(current).latent.detach()
+        current = torch.cat((current, chunk), dim=1)[
+            :, -context_frames:
+        ]
+    return current
+
+
+def select_rollout_target(
+    target: Tensor,
+    depth: int,
+    horizon_frames: int,
+) -> Tensor:
+    start = depth * horizon_frames
+    stop = start + horizon_frames
+    if (
+        target.ndim != 3
+        or depth < 0
+        or horizon_frames <= 0
+        or stop > target.shape[1]
+    ):
+        raise ValueError("rollout target is outside sampled future")
+    return target[:, start:stop]
+
+
 def _rollout(
     model: ZraveTransformer,
     history: Tensor,
@@ -598,7 +675,10 @@ def _train(args: argparse.Namespace) -> None:
         packed_root,
         device=device,
         context_frames=config.model.context_frames,
-        horizon_frames=config.model.horizon_frames,
+        horizon_frames=rollout_training_frames(
+            horizon_frames=config.model.horizon_frames,
+            maximum_depth=config.train.rollout_max_depth,
+        ),
         split_code=0,
         seed=config.seed + 1000 + rank,
     )
@@ -632,10 +712,18 @@ def _train(args: argparse.Namespace) -> None:
         "latent_dim": config.model.latent_dim,
         "context_frames": config.model.context_frames,
         "horizon_frames": config.model.horizon_frames,
+        "rollout_max_depth": config.train.rollout_max_depth,
+        "rollout_curriculum_updates": (
+            config.train.rollout_curriculum_updates
+        ),
+        "rollout_teacher_probability": (
+            config.train.rollout_teacher_probability
+        ),
     }
     update = 0
     best_validation_metric = math.inf
     validations_without_improvement = 0
+    warm_start_report: dict[str, object] | None = None
     if args.resume:
         restored = load_zrave_checkpoint(
             args.resume,
@@ -656,6 +744,20 @@ def _train(args: argparse.Namespace) -> None:
         validations_without_improvement = int(
             restored["validations_without_improvement"]
         )
+    elif args.warm_start:
+        warm_start_report = load_zrave_warm_start(
+            args.warm_start,
+            model=training_model,
+            expected_contract={
+                "packed_index_sha256": contract["packed_index_sha256"],
+                "statistics_sha256": contract["statistics_sha256"],
+                "latent_dim": contract["latent_dim"],
+                "context_frames": contract["context_frames"],
+                "horizon_frames": contract["horizon_frames"],
+            },
+        )
+        warm_start_report["path"] = str(Path(args.warm_start).resolve())
+        warm_start_report["sha256"] = _sha256_file(args.warm_start)
 
     writer = None
     run_root = Path(config.train.output_root)
@@ -680,15 +782,43 @@ def _train(args: argparse.Namespace) -> None:
     while update < target_update:
         for group in optimizer.param_groups:
             group["lr"] = _learning_rate(config, update, maximum_updates)
-        history, target = sampler.sample(batch_per_gpu)
+        history, sampled_future = sampler.sample(batch_per_gpu)
+        schedule_update = (
+            config.train.rollout_curriculum_updates
+            if benchmark
+            else update
+        )
+        rollout_allowed_depth = allowed_rollout_depth(
+            schedule_update,
+            config.train.rollout_max_depth,
+            config.train.rollout_curriculum_updates,
+        )
+        rollout_depth = sample_rollout_depth(
+            schedule_update,
+            config.train.rollout_max_depth,
+            config.train.rollout_curriculum_updates,
+            config.train.rollout_teacher_probability,
+            sampler.generator,
+            device,
+        )
         optimizer.zero_grad(set_to_none=True)
         torch.cuda.synchronize(device)
         started = time.perf_counter()
         with torch.autocast("cuda", dtype=torch.float16):
-            prediction = training_model(history)
+            conditioned_history = condition_rollout_history(
+                model,
+                history,
+                rollout_depth,
+            )
+            target = select_rollout_target(
+                sampled_future,
+                rollout_depth,
+                config.model.horizon_frames,
+            )
+            prediction = training_model(conditioned_history)
             loss = zrave_prediction_loss(
                 prediction,
-                history,
+                conditioned_history,
                 target,
                 statistics,
                 config.loss,
@@ -753,6 +883,16 @@ def _train(args: argparse.Namespace) -> None:
                 * world_size
                 * config.model.horizon_frames
                 / elapsed_tensor.item(),
+                update,
+            )
+            writer.add_scalar(
+                "train/rollout_depth",
+                rollout_depth,
+                update,
+            )
+            writer.add_scalar(
+                "train/rollout_allowed_depth",
+                rollout_allowed_depth,
                 update,
             )
             writer.add_scalar(
@@ -899,6 +1039,7 @@ def _train(args: argparse.Namespace) -> None:
                 "batch_per_gpu": batch_per_gpu,
                 "nonfinite_updates": nonfinite_updates,
                 "contract": contract,
+                "warm_start": warm_start_report,
             },
         )
     if writer is not None:
@@ -915,7 +1056,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", required=True)
     parser.add_argument("--batch-per-gpu", type=int)
     parser.add_argument("--max-updates", type=int)
-    parser.add_argument("--resume")
+    start = parser.add_mutually_exclusive_group()
+    start.add_argument("--resume")
+    start.add_argument("--warm-start")
     parser.add_argument("--benchmark-warmup", type=int, default=0)
     parser.add_argument("--benchmark-updates", type=int)
     parser.add_argument("--benchmark-output")
