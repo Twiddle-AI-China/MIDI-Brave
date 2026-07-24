@@ -34,6 +34,9 @@ ROLLOUT_EVALUATE = (
 ROLLOUT_AUDITION = (
     ROOT / "scripts" / "cloud" / "octopus_zrave_rollout_audition.sbatch"
 )
+LONG_ROLLOUT_AUDITION = (
+    ROOT / "scripts" / "cloud" / "octopus_zrave_long_rollout.sbatch"
+)
 
 
 def test_standalone_config_has_the_measured_codec_contract() -> None:
@@ -143,3 +146,23 @@ def test_rollout_evaluation_jobs_emit_latent_and_audio_reports() -> None:
     assert "render_zrave_audition.py" in audition
     assert "-m midibrave.zrave_audio_quality" in audition
     assert "audio-quality.json" in audition
+
+
+def test_long_rollout_job_uses_exact_octopus_stress_contract() -> None:
+    script = LONG_ROLLOUT_AUDITION.read_text(encoding="utf-8")
+    lowered = script.casefold()
+
+    assert "#SBATCH --partition=gpu1" in script
+    assert "#SBATCH --gres=gpu:1" in script
+    assert "srun --kill-on-bad-exit=1" in script
+    assert "render_zrave_long_rollout.py" in script
+    assert "update-00002250.pt" in script
+    assert "--seed-frames 32" in script
+    assert "--predicted-frames 320" in script
+    assert "long-rollout-manifest.json" in script
+    assert "zrave-long-rollout/index.html" in script
+    assert "wav_count" in script
+    assert '-ne 5' in script
+    assert "zhongwei" not in lowered
+    assert "clap" not in lowered
+    assert "midi_control" not in lowered

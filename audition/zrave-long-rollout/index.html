@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Z-RAVE 32 → 320 长程压力试听</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --oxide: #11162a;
+      --deck: #1b223a;
+      --raised: #252e4a;
+      --steel: #6f7895;
+      --paper: #eef1f7;
+      --muted: #aeb6ca;
+      --seed: #9cc7ff;
+      --future: #f2a65a;
+      --signal: #93e3c0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      color: var(--paper);
+      background:
+        linear-gradient(115deg, transparent 0 72%, rgba(156, 199, 255, 0.04) 72% 73%, transparent 73%),
+        radial-gradient(circle at 12% -10%, #33436b 0, transparent 35rem),
+        var(--oxide);
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      color: inherit;
+    }
+
+    button:focus-visible,
+    input:focus-visible {
+      outline: 3px solid var(--paper);
+      outline-offset: 3px;
+    }
+
+    .shell {
+      width: min(1220px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 38px 0 72px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
+      gap: 40px;
+      align-items: end;
+      padding-bottom: 30px;
+      border-bottom: 4px solid var(--future);
+    }
+
+    .eyebrow,
+    .utility {
+      font-family: "Cascadia Code", "SFMono-Regular", monospace;
+      font-size: 11px;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow {
+      margin: 0 0 12px;
+      color: var(--seed);
+    }
+
+    h1 {
+      margin: 0;
+      font-family: "Bahnschrift SemiCondensed", "Arial Narrow", sans-serif;
+      font-size: clamp(62px, 13vw, 156px);
+      font-stretch: condensed;
+      font-weight: 800;
+      letter-spacing: -0.075em;
+      line-height: 0.76;
+    }
+
+    .seed-number {
+      color: var(--seed);
+    }
+
+    .future-number {
+      color: var(--future);
+    }
+
+    .hero-copy {
+      margin: 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.8;
+    }
+
+    .hero-copy strong {
+      color: var(--paper);
+    }
+
+    .status {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      margin: 24px 0 18px;
+      padding: 14px 16px;
+      border: 1px solid var(--steel);
+      color: var(--muted);
+      background: rgba(27, 34, 58, 0.82);
+    }
+
+    .status[data-state="ready"] {
+      color: var(--signal);
+      border-color: #447c68;
+    }
+
+    .status[data-state="error"] {
+      color: var(--future);
+      border-color: #8c5a38;
+    }
+
+    .contract {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      margin-bottom: 42px;
+      border: 1px solid var(--steel);
+      background: var(--steel);
+    }
+
+    .contract-item {
+      min-height: 102px;
+      padding: 16px;
+      background: var(--deck);
+    }
+
+    .contract-item span {
+      display: block;
+      margin-bottom: 12px;
+      color: var(--muted);
+    }
+
+    .contract-item strong {
+      font-family: "Bahnschrift SemiCondensed", "Arial Narrow", sans-serif;
+      font-size: 25px;
+      letter-spacing: -0.035em;
+    }
+
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 24px;
+      margin-bottom: 14px;
+    }
+
+    .section-head h2 {
+      margin: 0;
+      font-family: "Bahnschrift SemiCondensed", "Arial Narrow", sans-serif;
+      font-size: 34px;
+      letter-spacing: -0.04em;
+    }
+
+    .section-head p {
+      max-width: 580px;
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .rollout-grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .rollout-card {
+      display: grid;
+      grid-template-columns: 156px minmax(0, 1fr);
+      border: 1px solid var(--steel);
+      background: var(--deck);
+    }
+
+    .rollout-card[data-active="true"] {
+      border-color: var(--future);
+      box-shadow: 0 0 0 1px var(--future);
+    }
+
+    .card-label {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 238px;
+      padding: 20px;
+      border-right: 1px solid var(--steel);
+      background: var(--raised);
+    }
+
+    .card-label strong {
+      font-family: "Bahnschrift SemiCondensed", "Arial Narrow", sans-serif;
+      font-size: 31px;
+      letter-spacing: -0.045em;
+    }
+
+    .card-label span {
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+
+    .card-main {
+      padding: 18px 20px 20px;
+    }
+
+    .transport {
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr) 118px;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .play {
+      width: 58px;
+      height: 48px;
+      border: 1px solid var(--future);
+      color: var(--future);
+      background: transparent;
+      cursor: pointer;
+      font-size: 19px;
+    }
+
+    .play:hover {
+      color: var(--oxide);
+      background: var(--future);
+    }
+
+    .seek {
+      width: 100%;
+      accent-color: var(--future);
+    }
+
+    .time {
+      color: var(--muted);
+      font-family: "Cascadia Code", monospace;
+      font-size: 10px;
+      text-align: right;
+    }
+
+    .tape {
+      position: relative;
+      display: flex;
+      height: 38px;
+      margin: 20px 0 8px;
+      overflow: hidden;
+      border: 1px solid var(--steel);
+      background: #0e1324;
+    }
+
+    .seed-region {
+      position: relative;
+      flex: 4 0 0;
+      background:
+        repeating-linear-gradient(90deg, rgba(17, 22, 42, 0.22) 0 9px, transparent 9px 18px),
+        var(--seed);
+    }
+
+    .prediction-regions {
+      display: grid;
+      flex: 40 0 0;
+      grid-template-columns: repeat(40, 1fr);
+    }
+
+    .prediction-region {
+      border-left: 1px solid rgba(17, 22, 42, 0.42);
+      background: var(--future);
+    }
+
+    .prediction-region:nth-child(8n) {
+      border-right: 2px solid var(--paper);
+    }
+
+    .tape-progress {
+      position: absolute;
+      inset: 0 auto 0 0;
+      z-index: 3;
+      width: 0;
+      pointer-events: none;
+      background: rgba(17, 22, 42, 0.63);
+      border-right: 2px solid var(--paper);
+    }
+
+    .tape-labels {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      color: var(--muted);
+    }
+
+    .tape-labels .real {
+      color: var(--seed);
+    }
+
+    .tape-labels .predicted {
+      color: var(--future);
+    }
+
+    .jumps {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .jump {
+      min-height: 42px;
+      padding: 8px 10px;
+      border: 1px solid var(--steel);
+      color: var(--muted);
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .jump:hover {
+      color: var(--paper);
+      border-color: var(--future);
+      background: #242b42;
+    }
+
+    .footnote {
+      margin: 28px 0 0;
+      padding: 16px 18px;
+      border-left: 5px solid var(--seed);
+      color: var(--muted);
+      background: rgba(27, 34, 58, 0.76);
+      line-height: 1.7;
+    }
+
+    @media (max-width: 760px) {
+      .hero,
+      .contract,
+      .rollout-card {
+        grid-template-columns: 1fr;
+      }
+
+      .card-label {
+        min-height: 76px;
+        flex-direction: row;
+        align-items: end;
+        border-right: 0;
+        border-bottom: 1px solid var(--steel);
+      }
+
+      .section-head {
+        align-items: start;
+        flex-direction: column;
+      }
+    }
+
+    @media (max-width: 520px) {
+      .shell {
+        width: min(100% - 18px, 1220px);
+        padding-top: 18px;
+      }
+
+      .transport,
+      .jumps {
+        grid-template-columns: 1fr;
+      }
+
+      .play {
+        width: 100%;
+      }
+
+      .time {
+        text-align: left;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition: none !important;
+      }
+    }
+  </style>
+</head>
+<body data-version="1">
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Autoregressive endurance test / update 2250</p>
+        <h1><span class="seed-number">32</span> → <span class="future-number">320</span></h1>
+      </div>
+      <p class="hero-copy">
+        <strong>只给模型约 1.49 秒真实 latent，随后让它独自生成约 14.86 秒。</strong>
+        前段蓝色是 32 帧真实 seed；橙色区域由 Transformer 连续调用 40 次产生。
+        整段只做一次统一增益，不隐藏后程响度漂移或塌缩。
+      </p>
+    </header>
+
+    <div class="status utility" id="status" data-state="loading"
+      role="status" aria-live="polite">
+      <span id="statusText">正在装载长程试听…</span>
+      <span id="statusMeta">MANIFEST / WAIT</span>
+    </div>
+
+    <section class="contract" aria-label="长程预测契约">
+      <div class="contract-item">
+        <span class="utility">Real seed</span>
+        <strong id="seedDuration">32 frames</strong>
+      </div>
+      <div class="contract-item">
+        <span class="utility">Predicted</span>
+        <strong id="predictedDuration">320 frames</strong>
+      </div>
+      <div class="contract-item">
+        <span class="utility">Model calls</span>
+        <strong id="rolloutCalls">40 × 8</strong>
+      </div>
+      <div class="contract-item">
+        <span class="utility">Total audio</span>
+        <strong id="totalDuration">16.35 s</strong>
+      </div>
+    </section>
+
+    <section aria-labelledby="rolloutTitle">
+      <div class="section-head">
+        <h2 id="rolloutTitle">Five-class long roll</h2>
+        <p>
+          Pad、Bass、Lead、Pluck、Keys 各一条 held-out test。建议先从头听，
+          再使用跳转按钮快速比较完全洗掉 seed 后的中后段。
+        </p>
+      </div>
+      <div class="rollout-grid" id="rolloutGrid"></div>
+    </section>
+
+    <p class="footnote">
+      <strong>如何判断：</strong>第 4 次调用后，真实 seed 已完全滑出 32 帧窗口。
+      此后如果持续保留音色结构、谐波丰富度和合理动态，说明自回归状态稳定；
+      如果变成单一周期、静音、噪声或固定循环，就是长程分布漂移。
+      键盘空格播放/暂停，数字 0/1/2/3 跳到预测起点及 25%/50%/75%。
+    </p>
+  </main>
+
+  <script>
+    const CATEGORY_ORDER = ["Pad", "Bass", "Lead", "Pluck", "Keys"];
+    const manifestURL = new URL("long-rollout-manifest.json", window.location.href);
+    const players = new Set();
+    let manifest = null;
+    let activeCard = null;
+
+    function assetURL(relative) {
+      return new URL(relative, manifestURL).href;
+    }
+
+    function formatTime(value) {
+      if (!Number.isFinite(value)) return "0:00.000";
+      const minutes = Math.floor(value / 60);
+      const seconds = (value - minutes * 60).toFixed(3).padStart(6, "0");
+      return `${minutes}:${seconds}`;
+    }
+
+    function pauseOtherPlayers(exception) {
+      players.forEach((player) => {
+        if (player !== exception && !player.paused) player.pause();
+      });
+    }
+
+    function setActiveCard(card) {
+      document.querySelectorAll(".rollout-card").forEach((item) => {
+        item.dataset.active = String(item === card);
+      });
+      activeCard = card;
+    }
+
+    function jumpToFraction(card, fraction) {
+      const player = card.querySelector("audio");
+      const target = card._row.seed_boundary_seconds
+        + fraction * manifest.predicted_duration_seconds;
+      player.currentTime = Math.min(target, player.duration || target);
+      setActiveCard(card);
+    }
+
+    function createTapeRail(root) {
+      const seed = document.createElement("span");
+      seed.className = "seed-region";
+      const predictions = document.createElement("span");
+      predictions.className = "prediction-regions";
+      for (let index = 0; index < manifest.rollout_calls; index += 1) {
+        const chunk = document.createElement("span");
+        chunk.className = "prediction-region";
+        chunk.title = `prediction call ${index + 1}`;
+        predictions.appendChild(chunk);
+      }
+      const progress = document.createElement("span");
+      progress.className = "tape-progress";
+      root.append(seed, predictions, progress);
+      return progress;
+    }
+
+    function buildCard(row, index) {
+      const card = document.createElement("article");
+      card.className = "rollout-card";
+      card.dataset.active = "false";
+      card._row = row;
+      card.innerHTML = `
+        <header class="card-label">
+          <strong>${String(index + 1).padStart(2, "0")} · ${row.category}</strong>
+          <span class="utility">${row.sample_id}</span>
+        </header>
+        <div class="card-main">
+          <div class="transport">
+            <button class="play" type="button" aria-label="播放或暂停">▶</button>
+            <input class="seek" type="range" min="0" max="1" step="0.001"
+              value="0" aria-label="播放位置">
+            <span class="time">0:00.000 / 0:00.000</span>
+          </div>
+          <div class="tape" aria-label="32 帧真实 seed 与 320 帧预测时间线"></div>
+          <div class="tape-labels utility">
+            <span class="real">32 REAL FRAMES</span>
+            <span class="predicted">320 PREDICTED FRAMES · 40 CALLS</span>
+          </div>
+          <div class="jumps">
+            <button class="jump" type="button" data-fraction="0">0 · 预测起点</button>
+            <button class="jump" type="button" data-fraction="0.25">1 · 预测 25%</button>
+            <button class="jump" type="button" data-fraction="0.5">2 · 预测 50%</button>
+            <button class="jump" type="button" data-fraction="0.75">3 · 预测 75%</button>
+          </div>
+          <audio preload="metadata"></audio>
+        </div>
+      `;
+
+      const player = card.querySelector("audio");
+      const play = card.querySelector(".play");
+      const seek = card.querySelector(".seek");
+      const time = card.querySelector(".time");
+      const progress = createTapeRail(card.querySelector(".tape"));
+      player.src = assetURL(row.file);
+      players.add(player);
+
+      play.addEventListener("click", () => {
+        setActiveCard(card);
+        if (player.paused) {
+          pauseOtherPlayers(player);
+          player.play().catch(() => {});
+        } else {
+          player.pause();
+        }
+      });
+      player.addEventListener("play", () => {
+        play.textContent = "Ⅱ";
+        pauseOtherPlayers(player);
+        setActiveCard(card);
+      });
+      player.addEventListener("pause", () => {
+        play.textContent = "▶";
+      });
+      player.addEventListener("timeupdate", () => {
+        const duration = Number.isFinite(player.duration) ? player.duration : 0;
+        const fraction = duration ? player.currentTime / duration : 0;
+        seek.value = String(fraction);
+        progress.style.width = `${fraction * 100}%`;
+        time.textContent = `${formatTime(player.currentTime)} / ${formatTime(duration)}`;
+      });
+      seek.addEventListener("input", () => {
+        if (Number.isFinite(player.duration)) {
+          player.currentTime = Number(seek.value) * player.duration;
+        }
+      });
+      card.querySelectorAll(".jump").forEach((button) => {
+        button.addEventListener("click", () => {
+          jumpToFraction(card, Number(button.dataset.fraction));
+        });
+      });
+      card.addEventListener("pointerdown", () => setActiveCard(card));
+      return card;
+    }
+
+    document.addEventListener("keydown", (event) => {
+      if (!activeCard || event.repeat) return;
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) {
+        return;
+      }
+      if (["0", "1", "2", "3"].includes(event.key)) {
+        event.preventDefault();
+        const fractions = { "0": 0, "1": 0.25, "2": 0.5, "3": 0.75 };
+        jumpToFraction(activeCard, fractions[event.key]);
+      } else if (event.code === "Space") {
+        event.preventDefault();
+        activeCard.querySelector(".play").click();
+      }
+    });
+
+    async function boot() {
+      const status = document.getElementById("status");
+      try {
+        const response = await fetch(manifestURL, { cache: "no-store" });
+        if (!response.ok) throw new Error(`manifest HTTP ${response.status}`);
+        manifest = await response.json();
+        if (
+          manifest.schema !== 1
+          || manifest.seed_frames !== 32
+          || manifest.predicted_frames !== 320
+          || manifest.conditioning.length !== 0
+        ) {
+          throw new Error("长程试听契约不匹配");
+        }
+        document.getElementById("seedDuration").textContent =
+          `${manifest.seed_frames}f · ${manifest.seed_duration_seconds.toFixed(3)}s`;
+        document.getElementById("predictedDuration").textContent =
+          `${manifest.predicted_frames}f · ${manifest.predicted_duration_seconds.toFixed(3)}s`;
+        document.getElementById("rolloutCalls").textContent =
+          `${manifest.rollout_calls} × ${manifest.horizon_frames}f`;
+        document.getElementById("totalDuration").textContent =
+          `${manifest.total_duration_seconds.toFixed(3)} s`;
+
+        const root = document.getElementById("rolloutGrid");
+        CATEGORY_ORDER.forEach((category, index) => {
+          const row = manifest.rows.find((item) => item.category === category);
+          if (!row) throw new Error(`缺少 ${category} 样本`);
+          root.appendChild(buildCard(row, index));
+        });
+        activeCard = root.querySelector(".rollout-card");
+        if (activeCard) setActiveCard(activeCard);
+        document.getElementById("statusText").textContent =
+          `已装载 ${manifest.rows.length} 条长程预测`;
+        document.getElementById("statusMeta").textContent =
+          `UPDATE ${manifest.transformer.update} / READY`;
+        status.dataset.state = "ready";
+      } catch (error) {
+        document.getElementById("statusText").textContent =
+          `加载失败：${error.message}`;
+        document.getElementById("statusMeta").textContent =
+          "MANIFEST / ERROR";
+        status.dataset.state = "error";
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>
