@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import math
+
+import torch
+from torch import nn
+
+from midibrave.zrave_flow_loss import (
+    PitchWeightController,
+    distributed_gradient_l2_norm,
+    make_flow_training_pair,
+    zrave_flow_loss,
+)
+from midibrave.zrave_flow_model import FlowStatistics
+from midibrave.zrave_pitch_probe import PitchProbeOutput
+
+
+def _statistics(
+    mean: float = 0.0,
+    latent_std: float = 1.0,
+) -> FlowStatistics:
+    return FlowStatistics(
+        mean=torch.full((16,), mean),
+        latent_std=torch.full((16,), latent_std),
+        delta_std=torch.ones(16),
+        latent_norm_p01=torch.tensor(0.1),
+        latent_norm_p99=torch.tensor(100.0),
+    )
+
+
+class _RecordingPitchProbe(nn.Module):
+    note_min = 21
+    note_max = 109
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_windows = torch.empty(0)
+
+    def forward(self, latents: torch.Tensor) -> PitchProbeOutput:
+        self.seen_windows = latents
+        signal = latents.mean(dim=(1, 2), keepdim=False)
+        offsets = torch.linspace(
+            -1.0,
+            1.0,
+            89,
+            device=latents.device,
+        )
+        logits = signal.unsqueeze(1) * offsets.unsqueeze(0)
+        probabilities = logits.float().softmax(dim=-1)
+        notes = torch.arange(
+            21,
+            110,
+            device=latents.device,
+            dtype=torch.float32,
+        )
+        return PitchProbeOutput(
+            logits=logits,
+            expected_midi=(probabilities * notes).sum(dim=-1),
+        )
+
+
+def _loss_fixture(
+    *,
+    clean_future: torch.Tensor | None = None,
+    valid_frames: int = 64,
+    generator_seed: int = 7,
+    statistics: FlowStatistics | None = None,
+    pitch_probe: nn.Module | None = None,
+    perfect_velocity: bool = False,
+) -> dict[str, object]:
+    raw_future = (
+        torch.randn(2, 64, 16)
+        if clean_future is None
+        else clean_future
+    )
+    resolved_statistics = statistics or _statistics()
+    mask = torch.arange(64).unsqueeze(0).expand(2, -1) < valid_frames
+    generator = torch.Generator().manual_seed(generator_seed)
+    pair = make_flow_training_pair(
+        raw_future,
+        mask,
+        temperature=torch.ones(2),
+        wander_delay_frames=torch.tensor([16, 48]),
+        statistics=resolved_statistics,
+        generator=generator,
+    )
+    predicted_velocity = (
+        pair.target_velocity.clone()
+        if perfect_velocity
+        else torch.zeros_like(pair.target_velocity)
+    )
+    return {
+        "predicted_velocity": predicted_velocity,
+        "pair": pair,
+        "history": torch.randn(2, 32, 16),
+        "future_mask": mask,
+        "midi_note": torch.tensor([60, 72]),
+        "pitch_probe": pitch_probe or _RecordingPitchProbe(),
+        "statistics": resolved_statistics,
+        "pitch_weight": 0.3,
+    }
+
+
+def test_flow_loss_ignores_masked_release_tail() -> None:
+    clean = torch.randn(2, 64, 16)
+    changed_clean = clean.clone()
+    changed_clean[:, 20:] = 10000.0
+
+    base = zrave_flow_loss(
+        **_loss_fixture(
+            clean_future=clean,
+            valid_frames=20,
+            generator_seed=19,
+        )
+    )
+    changed = zrave_flow_loss(
+        **_loss_fixture(
+            clean_future=changed_clean,
+            valid_frames=20,
+            generator_seed=19,
+        )
+    )
+
+    torch.testing.assert_close(base.total, changed.total)
+    for name in base.components:
+        torch.testing.assert_close(
+            base.components[name],
+            changed.components[name],
+        )
+
+
+def test_loss_has_only_approved_components() -> None:
+    report = zrave_flow_loss(**_loss_fixture())
+
+    assert set(report.components) == {
+        "flow",
+        "pitch",
+        "boundary",
+        "statistics",
+    }
+    assert "future" not in report.components
+    assert "delta" not in report.components
+    assert "acceleration" not in report.components
+    assert torch.isfinite(report.total)
+
+
+def test_auxiliary_losses_receive_raw_codec_coordinates() -> None:
+    statistics = _statistics(mean=10.0, latent_std=2.0)
+    probe = _RecordingPitchProbe()
+
+    zrave_flow_loss(
+        **_loss_fixture(
+            clean_future=torch.full((2, 64, 16), 12.0),
+            statistics=statistics,
+            pitch_probe=probe,
+            perfect_velocity=True,
+        )
+    )
+
+    assert torch.allclose(
+        probe.seen_windows,
+        torch.full_like(probe.seen_windows, 12.0),
+    )
+
+
+def test_pitch_weight_controller_respects_ratio_and_bounds() -> None:
+    controller = PitchWeightController(
+        initial=0.30,
+        minimum=0.10,
+        maximum=1.00,
+        target_minimum=0.20,
+        target_maximum=0.35,
+        ema_decay=0.90,
+    )
+
+    assert controller.update(1.0, 10.0, update=100) < 0.30
+    for update in range(200, 5000, 100):
+        controller.update(1.0, 0.001, update=update)
+
+    assert controller.value == 1.00
+    restored = PitchWeightController()
+    restored.load_state_dict(controller.state_dict())
+    assert restored.state_dict() == controller.state_dict()
+
+
+def test_distributed_gradient_norm_uses_unscaled_l2_norm() -> None:
+    parameter = nn.Parameter(torch.tensor([3.0, 4.0]))
+    loss = (parameter.square()).sum()
+
+    norm = distributed_gradient_l2_norm(loss, [parameter])
+
+    assert math.isclose(norm, 10.0)
