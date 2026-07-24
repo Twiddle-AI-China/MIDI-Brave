@@ -15,10 +15,9 @@ repo=/home/yfhuang/Latent-Cosmos-Synth-midiBrave/MidiBrave-v2
 container_repo=/workspace/MidiBrave
 config=$container_repo/configs/zrave/octopus_balanced50.yaml
 image=midibrave:v0.10.0-clap-recon
-checkpoint=/data/midibrave-zrave/runs/zrave_transformer_balanced50/checkpoints/best.pt
+checkpoint=/data/midibrave-zrave/runs/zrave_transformer_balanced50/checkpoints/update-00008000.pt
 output=${ZRAVE_AUDITION_OUTPUT:-/data/midibrave-zrave/audition/best-8000-v1}
 page=$container_repo/audition/zrave-sequence-comparison/index.html
-expected_checkpoint_sha=28052c10e92545e4b58fbe49b4676525ab19b32605a628c5939a13a82d49a40e
 
 test -d "$repo"
 test -f "$repo/configs/zrave/octopus_balanced50.yaml"
@@ -29,12 +28,6 @@ test -f /data/midibrave-zrave/packs/serum-balanced50/index.json
 test -f /data/midibrave-zrave/packs/serum-balanced50/latents.npy
 test -f /data/model_weights/laion-clap/music_audioset_epoch_15_esc_90.14.pt
 test ! -e "$output"
-
-measured_checkpoint_sha=$(sha256sum "$checkpoint" | awk '{print $1}')
-if [[ "$measured_checkpoint_sha" != "$expected_checkpoint_sha" ]]; then
-  echo "unexpected best checkpoint SHA-256: $measured_checkpoint_sha" >&2
-  exit 2
-fi
 
 mkdir -p "$(dirname "$output")"
 

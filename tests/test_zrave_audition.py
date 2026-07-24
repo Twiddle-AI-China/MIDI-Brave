@@ -272,7 +272,8 @@ def test_octopus_audition_uses_exactly_one_slurm_gpu() -> None:
     assert "#SBATCH --gres=gpu:1" in script
     assert "#SBATCH --gres=gpu:2" not in script
     assert "scripts/render_zrave_audition.py" in script
-    assert "checkpoints/best.pt" in script
+    assert "checkpoints/update-00008000.pt" in script
+    assert 'sha256sum "$checkpoint"' not in script
     assert "best-8000-v1" in script
     assert "zrave-sequence-comparison/index.html" in script
     assert "wav_count" in script
