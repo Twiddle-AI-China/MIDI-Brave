@@ -28,6 +28,7 @@ from midibrave.zrave_train import (
     save_zrave_checkpoint,
     select_rollout_target,
     should_checkpoint,
+    synchronize_rollout_depth,
     summarize_benchmark,
 )
 
@@ -227,6 +228,26 @@ def test_rollout_depth_sampling_is_reproducible() -> None:
     assert set(actual) <= set(range(8))
     assert 0 in actual
     assert any(depth > 0 for depth in actual)
+
+
+def test_rollout_depth_is_broadcast_before_rank_specific_compute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "midibrave.zrave_train.dist.is_initialized",
+        lambda: True,
+    )
+
+    def fake_broadcast(value: torch.Tensor, src: int) -> None:
+        assert src == 0
+        value.fill_(5)
+
+    monkeypatch.setattr(
+        "midibrave.zrave_train.dist.broadcast",
+        fake_broadcast,
+    )
+
+    assert synchronize_rollout_depth(1, torch.device("cpu")) == 5
 
 
 def test_rollout_config_rejects_invalid_probability() -> None:

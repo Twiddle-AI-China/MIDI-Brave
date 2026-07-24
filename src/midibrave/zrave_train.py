@@ -490,6 +490,18 @@ def sample_rollout_depth(
     )
 
 
+def synchronize_rollout_depth(
+    depth: int,
+    device: torch.device | str,
+) -> int:
+    if depth < 0:
+        raise ValueError("rollout depth must be non-negative")
+    value = torch.tensor(depth, device=device, dtype=torch.int64)
+    if dist.is_initialized():
+        dist.broadcast(value, src=0)
+    return int(value.item())
+
+
 def rollout_training_frames(
     *,
     horizon_frames: int,
@@ -799,6 +811,10 @@ def _train(args: argparse.Namespace) -> None:
             config.train.rollout_curriculum_updates,
             config.train.rollout_teacher_probability,
             sampler.generator,
+            device,
+        )
+        rollout_depth = synchronize_rollout_depth(
+            rollout_depth,
             device,
         )
         optimizer.zero_grad(set_to_none=True)
