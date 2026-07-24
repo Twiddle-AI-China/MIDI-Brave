@@ -11,18 +11,16 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 import torch
-from scipy.signal import resample_poly
 from torch import Tensor
 
-from .config import Config
 from .data import load_audio
-from .predictive_model import PredictiveMidiBrave
 from .zrave_config import ZraveConfig
 from .zrave_data import read_jsonl
 from .zrave_model import ZraveStatistics, ZraveTransformer
 
 
 _CATEGORIES = ("Pad", "Bass", "Lead", "Pluck", "Keys")
+_CODEC_KIND = "standalone_torchscript_rave"
 
 
 def _rows_by_sample_id(
@@ -69,7 +67,8 @@ def select_audition_rows(
                 )
             preset_id = min(str(row["preset_id"]) for row in matching)
             conditions: dict[
-                tuple[int, int], list[dict[str, object]]
+                tuple[int, int],
+                list[dict[str, object]],
             ] = {}
             for sequence in matching:
                 if str(sequence["preset_id"]) != preset_id:
@@ -106,7 +105,7 @@ def select_audition_rows(
     for group in groups[1:]:
         common.intersection_update(group)
     if not common:
-        raise ValueError("held-out presets have no shared MIDI condition")
+        raise ValueError("held-out presets have no shared note condition")
     chosen_condition = min(
         common,
         key=lambda value: (
@@ -122,10 +121,7 @@ def select_audition_rows(
             group[chosen_condition],
             key=lambda row: str(row["sample_id"]),
         )
-        row = dict(candidates[0])
-        row["category"] = category
-        row["split"] = split
-        selected.append(row)
+        selected.append(dict(candidates[0]))
     return selected
 
 
@@ -245,8 +241,6 @@ def crop_source_future(
     latent_hop: int,
 ) -> np.ndarray:
     clip = _mono_float32(source, "source")
-    if min(context_frames, future_frames, latent_hop) <= 0:
-        raise ValueError("source crop dimensions must be positive")
     if warmup_frames < 0 or window_start < 0:
         raise ValueError("source crop offsets must be non-negative")
     start = (
@@ -266,11 +260,11 @@ def duration_to_frames(
     sample_rate: int,
     latent_hop: int,
 ) -> int:
-    if duration_seconds <= 0.0:
-        raise ValueError("duration must be positive")
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0.0:
+        raise ValueError("duration_seconds must be finite and positive")
     if sample_rate <= 0 or latent_hop <= 0:
         raise ValueError("sample rate and latent hop must be positive")
-    return math.ceil(duration_seconds * sample_rate / latent_hop)
+    return int(math.ceil(duration_seconds * sample_rate / latent_hop))
 
 
 def select_random_seed_rows(
@@ -282,44 +276,46 @@ def select_random_seed_rows(
     seed: int,
 ) -> list[dict[str, object]]:
     if count <= 0:
-        raise ValueError("random seed count must be positive")
+        raise ValueError("random seed row count must be positive")
     sequences = index.get("sequences")
     if not isinstance(sequences, list):
         raise ValueError("packed index must contain a sequences list")
     manifest_by_id = _rows_by_sample_id(manifest_rows)
-    eligible: list[dict[str, object]] = []
+    candidates: list[dict[str, object]] = []
     for sequence in sequences:
-        if not isinstance(sequence, dict):
-            continue
-        if sequence.get("split") not in {"validation", "test"}:
-            continue
-        if int(sequence.get("length") or 0) < required_frames:
+        if (
+            not isinstance(sequence, dict)
+            or sequence.get("split") not in {"validation", "test"}
+            or int(sequence.get("length") or 0) < required_frames
+        ):
             continue
         sample_id = str(sequence.get("sample_id") or "")
-        manifest_row = manifest_by_id.get(sample_id)
-        if manifest_row is None:
+        source = manifest_by_id.get(sample_id)
+        if source is None:
             raise ValueError(
                 f"packed sample is absent from manifest: {sample_id}"
             )
-        row = dict(manifest_row)
-        row.update(
+        joined = dict(source)
+        joined.update(
             {
-                "category": str(sequence.get("category") or ""),
-                "split": str(sequence["split"]),
-                "preset_id": str(sequence["preset_id"]),
+                "category": sequence.get("category"),
+                "split": sequence.get("split"),
+                "preset_id": sequence.get("preset_id"),
                 "sequence_index": int(sequence["index"]),
                 "length": int(sequence["length"]),
             }
         )
-        eligible.append(row)
-    eligible.sort(key=lambda row: str(row["sample_id"]))
-    if len(eligible) < count:
+        candidates.append(joined)
+    candidates.sort(
+        key=lambda row: hashlib.sha256(
+            f"{seed}:random-zrave-head:{row['sample_id']}".encode("utf-8")
+        ).digest()
+    )
+    if len(candidates) < count:
         raise ValueError(
-            f"need {count} eligible random seed rows, found {len(eligible)}"
+            f"need {count} held-out random seed rows, found {len(candidates)}"
         )
-    rng = np.random.default_rng(seed)
-    indices = rng.choice(len(eligible), size=count, replace=False)
-    return [dict(eligible[int(index)]) for index in indices]
+    return candidates[:count]
 
 
 def validate_audition_manifest(
@@ -328,31 +324,34 @@ def validate_audition_manifest(
 ) -> None:
     if manifest.get("schema") != 1:
         raise ValueError("unsupported audition manifest schema")
+    if manifest.get("conditioning") != []:
+        raise ValueError("audition conditioning must be empty")
+    codec = manifest.get("codec")
+    if (
+        not isinstance(codec, dict)
+        or codec.get("kind") != _CODEC_KIND
+    ):
+        raise ValueError("audition must use one standalone RAVE codec")
     sample_rate = int(manifest.get("sample_rate") or 0)
+    latent_hop = int(manifest.get("latent_hop") or 0)
     context_frames = int(manifest.get("context_frames") or 0)
-    if sample_rate <= 0 or context_frames <= 0:
-        raise ValueError("manifest timing metadata is invalid")
+    if min(sample_rate, latent_hop, context_frames) <= 0:
+        raise ValueError("audition timing contract is invalid")
+
     comparisons = manifest.get("comparisons")
     if not isinstance(comparisons, list):
-        raise ValueError("manifest comparisons must be a list")
+        raise ValueError("audition comparisons must be a list")
     expected = Counter(
         (category, split)
         for category in categories
         for split in ("validation", "test")
     )
-    actual: Counter[tuple[str, str]] = Counter()
-    for comparison in comparisons:
-        if not isinstance(comparison, dict):
-            raise ValueError("manifest comparison must be an object")
-        actual[
-            (
-                str(comparison.get("category") or ""),
-                str(comparison.get("split") or ""),
-            )
-        ] += 1
-        if int(comparison.get("sample_count") or 0) <= 0:
-            raise ValueError("comparison sample count must be positive")
-        audio = comparison.get("audio")
+    actual: Counter[tuple[object, object]] = Counter()
+    for row in comparisons:
+        if not isinstance(row, dict):
+            raise ValueError("audition comparison must be an object")
+        actual[(row.get("category"), row.get("split"))] += 1
+        audio = row.get("audio")
         if not isinstance(audio, dict) or set(audio) != {
             "original",
             "direct",
@@ -437,187 +436,161 @@ def _load_transformer(
     return model, payload
 
 
-def _load_decoder(
+def _load_codec(
     config: ZraveConfig,
     device: torch.device,
-) -> tuple[PredictiveMidiBrave, Config, dict[str, object]]:
-    source_config = Config.load(config.rave.source_config)
-    if source_config.predictive is None:
-        raise ValueError("audition decoder config must be predictive")
-    if source_config.data.sample_rate <= 0:
-        raise ValueError("audition decoder sample rate is invalid")
-    payload = torch.load(
-        config.rave.checkpoint,
-        map_location="cpu",
-        weights_only=False,
-    )
-    if not isinstance(payload, dict) or int(payload.get("format", 0)) != 5:
-        raise ValueError("audition decoder requires a format-5 checkpoint")
-    contract = payload.get("predictive_contract")
-    if not isinstance(contract, dict) or contract.get("stage") not in {
-        "predictor",
-        "rollout",
-        "gan",
-    }:
-        raise ValueError("audition decoder checkpoint stage is unsupported")
-    model = PredictiveMidiBrave(
-        source_config.model,
-        source_config.predictive,
-        source_config.data.window_samples,
-        source_config.data.sample_rate,
-    )
-    model.load_state_dict(payload["model"])
-    model.to(device).eval()
-    return model, source_config, payload
-
-
-def _load_clap_model(
-    checkpoint_path: str | Path,
-    device: torch.device,
 ) -> Any:
-    import laion_clap
+    checkpoint = Path(config.rave.checkpoint)
+    actual_hash = _sha256_file(checkpoint)
+    expected_hash = config.rave.expected_sha256
+    if expected_hash is not None and actual_hash != expected_hash:
+        raise ValueError(
+            f"standalone RAVE SHA-256 mismatch: "
+            f"{actual_hash} != {expected_hash}"
+        )
+    codec = torch.jit.load(
+        str(checkpoint),
+        map_location=device,
+    ).to(device).eval()
+    sample_rate_value = codec.sr
+    if hasattr(sample_rate_value, "__len__"):
+        sample_rate_value = sample_rate_value[0]
+    if int(sample_rate_value) != config.rave.sample_rate:
+        raise ValueError("standalone RAVE sample rate mismatch")
+    if int(codec.latent_size) != config.model.latent_dim:
+        raise ValueError("standalone RAVE latent dimension mismatch")
 
-    checkpoint = Path(checkpoint_path)
-    if not checkpoint.is_file():
-        raise FileNotFoundError(f"missing CLAP checkpoint: {checkpoint}")
-    model = laion_clap.CLAP_Module(
-        enable_fusion=False,
-        amodel="HTSAT-base",
-        device=str(device),
-    )
-    model.load_ckpt(str(checkpoint))
-    model.eval()
-    return model
-
-
-def _clap_embedding(
-    model: Any,
-    audio: np.ndarray,
-    sample_rate: int,
-    device: torch.device,
-) -> np.ndarray:
-    if sample_rate != 48000:
-        common = math.gcd(sample_rate, 48000)
-        audio = resample_poly(
-            audio,
-            48000 // common,
-            sample_rate // common,
-        ).astype(np.float32)
-    tensor = torch.from_numpy(audio).unsqueeze(0).to(device)
-    embedding = model.get_audio_embedding_from_data(
-        tensor,
-        use_tensor=True,
-    )
-    embedding = torch.nn.functional.normalize(
-        embedding.float(),
-        dim=-1,
-    )
-    result = embedding[0].detach().cpu().numpy().astype(np.float32)
-    if result.shape != (512,) or not np.isfinite(result).all():
-        raise ValueError("CLAP embedding must be finite and 512-dimensional")
-    return result
-
-
-def _audio_path(config: ZraveConfig, row: dict[str, object]) -> Path:
-    relative = Path(str(row["audio_path"]))
-    path = (
-        relative
-        if relative.is_absolute()
-        else Path(config.data.audio_root) / relative
-    )
-    if not path.is_file():
-        raise FileNotFoundError(f"missing source audio: {path}")
-    return path
-
-
-def _decode_latents(
-    decoder: PredictiveMidiBrave,
-    latent: Tensor,
-    clap: np.ndarray,
-    note: int,
-    velocity: int,
-    excitation_seed: int,
-    device: torch.device,
-) -> np.ndarray:
-    clap_tensor = torch.from_numpy(clap).unsqueeze(0).to(device)
-    note_tensor = torch.tensor([note], device=device, dtype=torch.long)
-    velocity_tensor = torch.tensor(
-        [float(velocity)],
+    probe_frames = 4
+    probe_audio = torch.zeros(
+        1,
+        1,
+        probe_frames * config.data.latent_hop,
         device=device,
-        dtype=torch.float32,
     )
-    seed_tensor = torch.tensor(
-        [excitation_seed],
-        device=device,
-        dtype=torch.long,
-    )
-    decoded = decoder.decode_latents(
-        latent,
-        clap_tensor,
-        note_tensor,
-        velocity_tensor,
-        seed_tensor,
-    )
-    result = decoded[0].detach().float().cpu().numpy().reshape(-1)
-    return _mono_float32(result, "decoded")
+    probe_latent = codec.encode(probe_audio)
+    probe_decoded = codec.decode(probe_latent)
+    if tuple(probe_latent.shape) != (
+        1,
+        config.model.latent_dim,
+        probe_frames,
+    ):
+        raise ValueError("standalone RAVE encode layout/hop mismatch")
+    if tuple(probe_decoded.shape) != (
+        1,
+        1,
+        probe_frames * config.data.latent_hop,
+    ):
+        raise ValueError("standalone RAVE decode layout/hop mismatch")
+    if not torch.isfinite(probe_latent).all() or not torch.isfinite(
+        probe_decoded
+    ).all():
+        raise ValueError("standalone RAVE codec probe is non-finite")
+    return codec
 
 
-def _write_wav(
-    path: Path,
+def _encode_audio(
+    codec: Any,
     audio: np.ndarray,
-    sample_rate: int,
-) -> None:
-    clip = _mono_float32(audio, path.name)
-    if float(np.max(np.abs(clip))) > 1.0:
-        raise ValueError(f"audio exceeds [-1, 1]: {path}")
+    latent_hop: int,
+    device: torch.device,
+) -> Tensor:
+    usable = audio.shape[0] - audio.shape[0] % latent_hop
+    if usable < latent_hop:
+        raise ValueError("source audio is too short for standalone RAVE")
+    tensor = torch.from_numpy(
+        np.asarray(audio[:usable], dtype=np.float32)
+    ).view(1, 1, -1).to(device)
+    latent = codec.encode(tensor).float()
+    if (
+        latent.ndim != 3
+        or latent.shape[0] != 1
+        or latent.shape[-1] != usable // latent_hop
+    ):
+        raise ValueError(
+            f"standalone RAVE returned invalid latent shape: "
+            f"{tuple(latent.shape)}"
+        )
+    if not torch.isfinite(latent).all():
+        raise ValueError("standalone RAVE encoder returned non-finite data")
+    return latent
+
+
+def _decode_latent(codec: Any, latent: Tensor) -> np.ndarray:
+    decoded = codec.decode(latent).detach().float().cpu().numpy()
+    if decoded.ndim != 3 or decoded.shape[:2] != (1, 1):
+        raise ValueError(
+            f"standalone RAVE returned invalid audio shape: "
+            f"{tuple(decoded.shape)}"
+        )
+    return _mono_float32(decoded[0, 0], "decoded")
+
+
+def _audio_path(
+    config: ZraveConfig,
+    row: dict[str, object],
+) -> Path:
+    return (
+        Path(config.data.audio_root) / str(row["audio_path"])
+    ).resolve()
+
+
+def _write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(path, clip, sample_rate, subtype="FLOAT")
+    sf.write(
+        path,
+        np.clip(audio, -1.0, 1.0),
+        sample_rate,
+        subtype="PCM_16",
+    )
 
 
 def _atomic_json(path: Path, value: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
-        + "\n",
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     temporary.replace(path)
 
 
-def _source_audio_and_clap(
-    config: ZraveConfig,
-    rows: Iterable[dict[str, object]],
-    source_sample_rate: int,
-    clap_checkpoint: str | Path,
-    device: torch.device,
-) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    unique = {
-        str(row["sample_id"]): row
-        for row in rows
-    }
-    clap_model = _load_clap_model(clap_checkpoint, device)
-    audio_by_id: dict[str, np.ndarray] = {}
-    clap_by_id: dict[str, np.ndarray] = {}
-    for sample_id, row in unique.items():
-        sample_rate = int(row.get("sample_rate") or source_sample_rate)
-        if sample_rate != source_sample_rate:
-            raise ValueError(
-                f"source sample rate mismatch for {sample_id}: "
-                f"{sample_rate} != {source_sample_rate}"
-            )
-        audio = load_audio(_audio_path(config, row), sample_rate)
-        audio_by_id[sample_id] = audio
-        clap_by_id[sample_id] = _clap_embedding(
-            clap_model,
-            audio,
-            sample_rate,
-            device,
+def _assert_cache_matches_encoding(
+    packed: np.ndarray,
+    sequence_index: int,
+    sequence_length: int,
+    encoded: Tensor,
+    warmup_frames: int,
+) -> float:
+    fresh = (
+        encoded[
+            0,
+            :,
+            warmup_frames : warmup_frames + sequence_length,
+        ]
+        .transpose(0, 1)
+        .detach()
+        .cpu()
+        .numpy()
+    )
+    cached = np.asarray(
+        packed[sequence_index, :sequence_length],
+        dtype=np.float32,
+    )
+    if fresh.shape != cached.shape:
+        raise ValueError(
+            f"fresh/cache latent shape mismatch: "
+            f"{fresh.shape} != {cached.shape}"
         )
-    del clap_model
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    return audio_by_id, clap_by_id
+    maximum_error = float(np.max(np.abs(fresh - cached)))
+    tolerance = max(
+        5.0e-3,
+        float(np.max(np.abs(fresh))) * 5.0e-3,
+    )
+    if maximum_error > tolerance:
+        raise ValueError(
+            f"fresh standalone RAVE encoding does not match packed cache: "
+            f"{maximum_error} > {tolerance}"
+        )
+    return maximum_error
 
 
 @torch.inference_mode()
@@ -637,12 +610,13 @@ def render_audition(
     statistics_path = packed_root / "statistics.npz"
     latents_path = packed_root / "latents.npy"
     checkpoint = Path(checkpoint_path)
+    codec_path = Path(config.rave.checkpoint)
     for required in (
         index_path,
         statistics_path,
         latents_path,
         checkpoint,
-        Path(config.rave.checkpoint),
+        codec_path,
     ):
         if not required.is_file():
             raise FileNotFoundError(f"missing audition artifact: {required}")
@@ -653,30 +627,30 @@ def render_audition(
             f"audition output directory is not empty: {destination}"
         )
     destination.mkdir(parents=True, exist_ok=True)
-    audio_root = destination / "audio"
-    audio_root.mkdir(parents=True, exist_ok=True)
+    (destination / "audio").mkdir(parents=True, exist_ok=True)
 
     index = json.loads(index_path.read_text(encoding="utf-8"))
     if index.get("schema") != 1:
         raise ValueError("unsupported packed index schema")
-    if index.get("rave_checkpoint_sha256") != _sha256_file(
-        config.rave.checkpoint
-    ):
-        raise ValueError("packed latents and decoder checkpoint do not match")
+    codec_hash = _sha256_file(codec_path)
+    if index.get("rave_codec") != _CODEC_KIND:
+        raise ValueError("packed latents did not come from a standalone codec")
+    if index.get("rave_checkpoint_sha256") != codec_hash:
+        raise ValueError("packed latents and standalone codec do not match")
+    if int(index.get("latent_hop") or 0) != config.data.latent_hop:
+        raise ValueError("packed latent hop does not match config")
+
     manifest_rows = read_jsonl(config.data.selected_manifest)
-    selected = select_audition_rows(
-        index,
-        manifest_rows,
-        _CATEGORIES,
-    )
-    sample_rate = 44100
+    selected = select_audition_rows(index, manifest_rows, _CATEGORIES)
+    sample_rate = config.rave.sample_rate
     latent_hop = config.data.latent_hop
     future_frames = duration_to_frames(
         duration_seconds,
         sample_rate,
         latent_hop,
     )
-    required_frames = config.model.context_frames + future_frames
+    context_frames = config.model.context_frames
+    required_frames = context_frames + future_frames
     random_rows = select_random_seed_rows(
         index,
         manifest_rows,
@@ -692,29 +666,29 @@ def render_audition(
         statistics_path,
         device,
     )
-    decoder, source_config, decoder_payload = _load_decoder(config, device)
-    if source_config.predictive is None:
-        raise AssertionError("predictive decoder config disappeared")
-    sample_rate = source_config.data.sample_rate
-    if sample_rate != 44100:
-        raise ValueError("audition decoder must use the 44.1 kHz project rate")
-    if source_config.predictive.samples_per_latent != latent_hop:
-        raise ValueError("decoder and packed latent hops do not match")
-    if source_config.predictive.rave_latent_dim != config.model.latent_dim:
-        raise ValueError("decoder and Transformer latent dimensions differ")
-    if not source_config.data.clap_checkpoint:
-        raise ValueError("decoder source config has no CLAP checkpoint")
+    codec = _load_codec(config, device)
+    packed = np.load(latents_path, mmap_mode="r", allow_pickle=False)
 
-    audio_by_id, clap_by_id = _source_audio_and_clap(
-        config,
-        [*selected, *random_rows],
-        sample_rate,
-        source_config.data.clap_checkpoint,
-        device,
-    )
-    latents = np.load(latents_path, mmap_mode="r", allow_pickle=False)
+    encoded_by_id: dict[str, Tensor] = {}
+    audio_by_id: dict[str, np.ndarray] = {}
+    cache_errors: dict[str, float] = {}
+    for row in [*selected, *random_rows]:
+        sample_id = str(row["sample_id"])
+        if sample_id in encoded_by_id:
+            continue
+        audio = load_audio(_audio_path(config, row), sample_rate)
+        encoded = _encode_audio(codec, audio, latent_hop, device)
+        cache_errors[sample_id] = _assert_cache_matches_encoding(
+            packed,
+            int(row["sequence_index"]),
+            int(row["length"]),
+            encoded,
+            config.data.warmup_frames,
+        )
+        audio_by_id[sample_id] = audio
+        encoded_by_id[sample_id] = encoded
+
     comparisons: list[dict[str, object]] = []
-    context_frames = config.model.context_frames
     for row_index, row in enumerate(selected, 1):
         sample_id = str(row["sample_id"])
         start = deterministic_start(
@@ -723,71 +697,41 @@ def render_audition(
             required_frames,
             random_seed,
         )
-        sequence_index = int(row["sequence_index"])
-        true_sequence = torch.from_numpy(
-            np.asarray(
-                latents[
-                    sequence_index,
-                    start : start + required_frames,
-                ],
-                dtype=np.float32,
-            ).copy()
-        ).to(device)
-        history = true_sequence[:context_frames].unsqueeze(0)
+        encoded = encoded_by_id[sample_id]
+        latent_start = config.data.warmup_frames + start
+        future_start = latent_start + context_frames
+        future_end = future_start + future_frames
+        history = encoded[
+            :,
+            :,
+            latent_start:future_start,
+        ].transpose(1, 2)
         predicted_future = rollout_latents(
             transformer,
             history,
             future_frames,
-        )[0]
-        direct_latent = true_sequence.transpose(0, 1).unsqueeze(0)
+        )
+        direct_latent = encoded[:, :, :future_end]
         predicted_latent = torch.cat(
-            (history[0], predicted_future),
-            dim=0,
-        ).transpose(0, 1).unsqueeze(0)
-        excitation_seed = random_seed + row_index
-        direct_full = _decode_latents(
-            decoder,
-            direct_latent,
-            clap_by_id[sample_id],
-            int(row["midi_note"]),
-            int(row["velocity"]),
-            excitation_seed,
-            device,
+            (
+                encoded[:, :, :future_start],
+                predicted_future.transpose(1, 2),
+            ),
+            dim=2,
         )
-        predicted_full = _decode_latents(
-            decoder,
-            predicted_latent,
-            clap_by_id[sample_id],
-            int(row["midi_note"]),
-            int(row["velocity"]),
-            excitation_seed,
-            device,
-        )
-        direct = crop_decoded_future(
-            direct_full,
-            context_frames=context_frames,
-            future_frames=future_frames,
-            latent_hop=latent_hop,
-        )
-        predicted = crop_decoded_future(
-            predicted_full,
-            context_frames=context_frames,
-            future_frames=future_frames,
-            latent_hop=latent_hop,
-        )
-        original = crop_source_future(
-            audio_by_id[sample_id],
-            warmup_frames=config.data.warmup_frames,
-            window_start=start,
-            context_frames=context_frames,
-            future_frames=future_frames,
-            latent_hop=latent_hop,
-        )
+        direct_full = _decode_latent(codec, direct_latent)
+        predicted_full = _decode_latent(codec, predicted_latent)
+        sample_start = future_start * latent_hop
+        sample_end = future_end * latent_hop
+        direct = direct_full[sample_start:sample_end]
+        predicted = predicted_full[sample_start:sample_end]
+        original = audio_by_id[sample_id][sample_start:sample_end]
         original, direct, predicted, gain = prepare_triplet(
             original,
             direct,
             predicted,
         )
+
         stem = (
             f"{row_index:02d}-"
             f"{str(row['category']).casefold()}-{row['split']}"
@@ -810,15 +754,12 @@ def render_audition(
                 "split": row["split"],
                 "preset_id": row["preset_id"],
                 "sample_id": sample_id,
-                "midi_note": int(row["midi_note"]),
-                "velocity": int(row["velocity"]),
-                "sequence_index": sequence_index,
+                "sequence_index": int(row["sequence_index"]),
                 "window_start": start,
-                "source_sample_start": (
-                    config.data.warmup_frames + start + context_frames
-                ) * latent_hop,
+                "source_sample_start": sample_start,
                 "sample_count": int(original.shape[0]),
                 "shared_gain": gain,
+                "cache_max_abs_error": cache_errors[sample_id],
                 "audio": files,
             }
         )
@@ -832,34 +773,24 @@ def render_audition(
             required_frames,
             random_seed + 1000 + continuation_index,
         )
-        sequence_index = int(row["sequence_index"])
-        true_history = torch.from_numpy(
-            np.asarray(
-                latents[
-                    sequence_index,
-                    start : start + context_frames,
-                ],
-                dtype=np.float32,
-            ).copy()
-        ).to(device).unsqueeze(0)
+        encoded = encoded_by_id[sample_id]
+        latent_start = config.data.warmup_frames + start
+        future_start = latent_start + context_frames
+        history = encoded[
+            :,
+            :,
+            latent_start:future_start,
+        ].transpose(1, 2)
         prediction = rollout_latents(
             transformer,
-            true_history,
+            history,
             future_frames,
-        )[0]
-        latent = torch.cat(
-            (true_history[0], prediction),
-            dim=0,
-        ).transpose(0, 1).unsqueeze(0)
-        decoded = _decode_latents(
-            decoder,
-            latent,
-            clap_by_id[sample_id],
-            int(row["midi_note"]),
-            int(row["velocity"]),
-            random_seed + 100 + continuation_index,
-            device,
         )
+        latent = torch.cat(
+            (history, prediction),
+            dim=1,
+        ).transpose(1, 2)
+        decoded = _decode_latent(codec, latent)
         expected_samples = required_frames * latent_hop
         if decoded.shape[0] < expected_samples:
             raise ValueError("random continuation decode is too short")
@@ -879,9 +810,7 @@ def render_audition(
                 "split": row["split"],
                 "preset_id": row["preset_id"],
                 "sample_id": sample_id,
-                "midi_note": int(row["midi_note"]),
-                "velocity": int(row["velocity"]),
-                "sequence_index": sequence_index,
+                "sequence_index": int(row["sequence_index"]),
                 "window_start": start,
                 "seed_frames": context_frames,
                 "predicted_frames": future_frames,
@@ -890,48 +819,39 @@ def render_audition(
                 ),
                 "sample_count": int(decoded.shape[0]),
                 "gain": gain,
+                "cache_max_abs_error": cache_errors[sample_id],
                 "file": relative_path,
             }
         )
 
     manifest: dict[str, object] = {
         "schema": 1,
-        "title": "Z-RAVE Sequence Transformer Audition",
+        "title": "Standalone RAVE Sequence Transformer Audition",
         "categories": list(_CATEGORIES),
         "sample_rate": sample_rate,
         "latent_hop": latent_hop,
+        "latent_dim": config.model.latent_dim,
         "context_frames": context_frames,
+        "horizon_frames": config.model.horizon_frames,
         "future_frames": future_frames,
         "audible_duration_seconds": (
             future_frames * latent_hop / sample_rate
         ),
         "random_seed": random_seed,
-        "models": {
-            "transformer": {
-                "path": str(checkpoint.resolve()),
-                "sha256": _sha256_file(checkpoint),
-                "update": int(transformer_payload["update"]),
-                "architecture": transformer_payload["architecture"],
-            },
-            "decoder": {
-                "path": str(Path(config.rave.checkpoint).resolve()),
-                "sha256": _sha256_file(config.rave.checkpoint),
-                "update": int(
-                    decoder_payload.get(
-                        "stage_update",
-                        decoder_payload.get("update", 0),
-                    )
-                ),
-                "pad_focused": True,
-            },
-            "clap": {
-                "path": str(
-                    Path(source_config.data.clap_checkpoint).resolve()
-                ),
-                "sha256": _sha256_file(
-                    source_config.data.clap_checkpoint
-                ),
-            },
+        "conditioning": [],
+        "codec": {
+            "kind": _CODEC_KIND,
+            "path": str(codec_path.resolve()),
+            "sha256": codec_hash,
+            "sample_rate": sample_rate,
+            "latent_dim": config.model.latent_dim,
+            "latent_hop": latent_hop,
+        },
+        "transformer": {
+            "path": str(checkpoint.resolve()),
+            "sha256": _sha256_file(checkpoint),
+            "update": int(transformer_payload["update"]),
+            "architecture": transformer_payload["architecture"],
         },
         "packed_index_sha256": _sha256_file(index_path),
         "comparisons": comparisons,
@@ -939,18 +859,4 @@ def render_audition(
     }
     validate_audition_manifest(manifest, _CATEGORIES)
     _atomic_json(destination / "audition-manifest.json", manifest)
-    print(
-        json.dumps(
-            {
-                "output": str(destination.resolve()),
-                "comparisons": len(comparisons),
-                "random_continuations": len(continuations),
-                "wav_files": len(comparisons) * 3 + len(continuations),
-                "future_frames": future_frames,
-                "finite": True,
-            },
-            sort_keys=True,
-        ),
-        flush=True,
-    )
     return manifest

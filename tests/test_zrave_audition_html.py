@@ -32,14 +32,23 @@ def test_page_has_synchronized_switching_contract() -> None:
     assert "pauseOtherPlayers" in html
 
 
-def test_page_explains_decoder_ceiling_and_seed_boundary() -> None:
+def test_page_explains_standalone_codec_and_seed_boundary() -> None:
     html = PAGE.read_text(encoding="utf-8")
 
-    assert "Pad-focused decoder" in html
+    assert "Standalone RAVE" in html
+    assert "0 CLAP · 0 MIDI" in html
     assert "Direct vs Predicted" in html
     assert "seed-marker" in html
     assert "transition_seconds" in html
     assert 'role="status"' in html
+
+
+def test_page_does_not_describe_conditional_decoding() -> None:
+    html = PAGE.read_text(encoding="utf-8").casefold()
+
+    assert "pad-focused decoder" not in html
+    assert "clap embedding" not in html
+    assert "midi conditioning" not in html
 
 
 def test_page_resolves_generated_assets_without_external_dependencies() -> None:

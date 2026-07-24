@@ -28,19 +28,26 @@ SBATCH_SCRIPT = (
     Path(__file__).parents[1]
     / "scripts"
     / "cloud"
-    / "octopus_zrave_audition.sbatch"
+    / "octopus_zrave_standalone_audition.sbatch"
 )
 
 
 class _CountingModel:
     def __init__(self) -> None:
-        self.config = SimpleNamespace(context_frames=128)
+        self.config = SimpleNamespace(
+            context_frames=32,
+            horizon_frames=8,
+        )
         self.calls = 0
 
     def __call__(self, history: torch.Tensor) -> SimpleNamespace:
         self.calls += 1
         value = torch.full(
-            (history.shape[0], 16, history.shape[2]),
+            (
+                history.shape[0],
+                self.config.horizon_frames,
+                history.shape[2],
+            ),
             float(self.calls),
             device=history.device,
         )
@@ -64,7 +71,7 @@ def _audition_fixtures() -> tuple[dict[str, object], list[dict[str, object]]]:
                         "preset_id": preset_id,
                         "category": category,
                         "split": split,
-                        "length": 1658,
+                        "length": 103,
                     }
                 )
                 manifest.append(
@@ -98,12 +105,12 @@ def test_selection_returns_validation_and_test_for_every_class() -> None:
 
 
 def test_deterministic_start_stays_inside_sequence() -> None:
-    first = deterministic_start("sample-a", 1658, 990, 20260724)
+    first = deterministic_start("sample-a", 103, 86, 20260724)
 
-    assert first == deterministic_start("sample-a", 1658, 990, 20260724)
-    assert 0 <= first <= 1658 - 990
+    assert first == deterministic_start("sample-a", 103, 86, 20260724)
+    assert 0 <= first <= 103 - 86
     with pytest.raises(ValueError, match="shorter"):
-        deterministic_start("sample-a", 989, 990, 20260724)
+        deterministic_start("sample-a", 85, 86, 20260724)
 
 
 def test_triplet_uses_one_gain_and_preserves_relative_levels() -> None:
@@ -130,62 +137,60 @@ def test_triplet_rejects_misaligned_or_invalid_audio() -> None:
         prepare_triplet(np.zeros(16), np.zeros(16), np.zeros(16))
 
 
-def test_rollout_consumes_all_sixteen_frame_chunks() -> None:
-    history = torch.zeros(1, 128, 16)
+def test_rollout_consumes_all_eight_frame_chunks() -> None:
+    history = torch.zeros(1, 32, 16)
     model = _CountingModel()
 
-    predicted = rollout_latents(model, history, 35)
+    predicted = rollout_latents(model, history, 19)
 
-    assert predicted.shape == (1, 35, 16)
+    assert predicted.shape == (1, 19, 16)
     assert model.calls == 3
-    torch.testing.assert_close(predicted[:, :16], torch.ones(1, 16, 16))
+    torch.testing.assert_close(predicted[:, :8], torch.ones(1, 8, 16))
     torch.testing.assert_close(
-        predicted[:, 16:32],
-        torch.full((1, 16, 16), 2.0),
+        predicted[:, 8:16],
+        torch.full((1, 8, 16), 2.0),
     )
     torch.testing.assert_close(
-        predicted[:, 32:],
+        predicted[:, 16:],
         torch.full((1, 3, 16), 3.0),
     )
 
 
 def test_future_crop_removes_exact_context() -> None:
-    decoded = np.arange((128 + 32) * 128, dtype=np.float32)
+    decoded = np.arange((32 + 54) * 2048, dtype=np.float32)
 
     cropped = crop_decoded_future(
         decoded,
-        context_frames=128,
-        future_frames=32,
-        latent_hop=128,
+        context_frames=32,
+        future_frames=54,
+        latent_hop=2048,
     )
 
     np.testing.assert_array_equal(
         cropped,
-        decoded[128 * 128 : 160 * 128],
+        decoded[32 * 2048 : 86 * 2048],
     )
 
 
 def test_source_crop_includes_pack_warmup_and_window_start() -> None:
-    audio = np.arange(400 * 128, dtype=np.float32)
+    audio = np.arange(120 * 2048, dtype=np.float32)
 
     cropped = crop_source_future(
         audio,
-        warmup_frames=64,
+        warmup_frames=4,
         window_start=5,
-        context_frames=128,
-        future_frames=32,
-        latent_hop=128,
+        context_frames=32,
+        future_frames=54,
+        latent_hop=2048,
     )
 
-    expected_start = (64 + 5 + 128) * 128
-    np.testing.assert_array_equal(
-        cropped,
-        audio[expected_start : expected_start + 32 * 128],
-    )
+    expected_start = (4 + 5 + 32) * 2048
+    expected_end = expected_start + 54 * 2048
+    np.testing.assert_array_equal(cropped, audio[expected_start:expected_end])
 
 
 def test_duration_rounds_up_to_complete_latent_frames() -> None:
-    assert duration_to_frames(2.5, 44100, 128) == 862
+    assert duration_to_frames(2.5, 44100, 2048) == 54
 
 
 def test_random_seed_rows_are_distinct_and_reproducible() -> None:
@@ -195,14 +200,14 @@ def test_random_seed_rows_are_distinct_and_reproducible() -> None:
         index,
         manifest,
         count=2,
-        required_frames=990,
+        required_frames=86,
         seed=20260724,
     )
     second = select_random_seed_rows(
         index,
         manifest,
         count=2,
-        required_frames=990,
+        required_frames=86,
         seed=20260724,
     )
 
@@ -218,7 +223,7 @@ def test_manifest_contract_requires_all_five_classes_and_two_seeds() -> None:
         {
             "category": category,
             "split": split,
-            "sample_count": 110336,
+            "sample_count": 110592,
             "audio": {
                 "original": "audio/original.wav",
                 "direct": "audio/direct.wav",
@@ -231,13 +236,16 @@ def test_manifest_contract_requires_all_five_classes_and_two_seeds() -> None:
     manifest = {
         "schema": 1,
         "sample_rate": 44100,
-        "context_frames": 128,
+        "latent_hop": 2048,
+        "context_frames": 32,
+        "conditioning": [],
+        "codec": {"kind": "standalone_torchscript_rave"},
         "comparisons": comparisons,
         "random_continuations": [
             {
                 "file": f"audio/random-{index}.wav",
-                "seed_frames": 128,
-                "transition_seconds": 128 * 128 / 44100,
+                "seed_frames": 32,
+                "transition_seconds": 32 * 2048 / 44100,
             }
             for index in range(2)
         ],
@@ -267,23 +275,36 @@ def test_render_script_exposes_reproducible_cli_contract() -> None:
 
 def test_octopus_audition_uses_exactly_one_slurm_gpu() -> None:
     script = SBATCH_SCRIPT.read_text(encoding="utf-8")
+    lowered = script.casefold()
 
     assert "#SBATCH --partition=gpu1" in script
     assert "#SBATCH --gres=gpu:1" in script
     assert "#SBATCH --gres=gpu:2" not in script
     assert "scripts/render_zrave_audition.py" in script
-    assert "checkpoints/update-00008000.pt" in script
-    assert 'sha256sum "$checkpoint"' not in script
-    assert "best-8000-v1" in script
+    assert "checkpoints/best.pt" in script
+    assert "standalone-best-v1" in script
     assert "zrave-sequence-comparison/index.html" in script
-    assert "/srv/data-branches/hdd-b/data/midibrave-zrave" in script
-    assert "/srv/data-branches/hdd-a/data/midibrave-v3" in script
-    assert (
-        "/srv/data-branches/hdd-a/data/midibrave-zrave/"
-        "packs/serum-balanced50/latents.npy"
-    ) in script
-    assert "/srv/data-branches/nvme/model_weights" in script
     assert "/srv/data-branches/nvme/datasets" in script
     assert "-v /data:/data" not in script
+    assert "clap" not in lowered
+    assert "midi_control" not in lowered
+    assert "predictivemidibrave" not in lowered
     assert "wav_count" in script
     assert "-ne 32" in script
+
+
+def test_renderer_has_no_conditional_model_dependency() -> None:
+    module = (
+        Path(__file__).parents[1]
+        / "src"
+        / "midibrave"
+        / "zrave_audition.py"
+    ).read_text(encoding="utf-8").casefold()
+
+    assert "clap" not in module
+    assert "predictivemidibrave" not in module
+    assert "midi_control" not in module
+    assert "harmonicexcitation" not in module
+    assert "torch.jit.load" in module
+    assert ".encode(" in module
+    assert ".decode(" in module

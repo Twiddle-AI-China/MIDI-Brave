@@ -3,24 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Z-RAVE 序列预测试听台</title>
+  <title>Standalone RAVE · Sequence Audition</title>
   <style>
     :root {
-      color-scheme: light;
-      --ink: #151713;
-      --muted: #66695f;
-      --paper: #f1ede3;
-      --panel: #fffdf7;
-      --line: #252821;
-      --soft-line: #c9c5b9;
-      --signal: #f14d2f;
-      --signal-dark: #9e250f;
-      --acid: #c8ef63;
-      --blue: #7cc7e8;
-      --shadow: 5px 5px 0 var(--line);
-      font-family: "Arial Narrow", "Roboto Condensed", "Helvetica Neue",
-        Arial, sans-serif;
-      font-synthesis: none;
+      color-scheme: dark;
+      --ink: #f5f0df;
+      --muted: #a9aa9e;
+      --panel: #151816;
+      --panel-2: #1c211d;
+      --line: #343b34;
+      --acid: #c8ff45;
+      --orange: #ff7548;
+      --cyan: #62e7dc;
+      --black: #090b0a;
+      font-family: "IBM Plex Mono", "Cascadia Mono", "PingFang SC",
+        "Microsoft YaHei", monospace;
     }
 
     * {
@@ -28,10 +25,15 @@
     }
 
     body {
-      min-width: 320px;
       margin: 0;
       color: var(--ink);
-      background: var(--paper);
+      background:
+        linear-gradient(rgba(200, 255, 69, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(200, 255, 69, 0.035) 1px, transparent 1px),
+        radial-gradient(circle at 86% 2%, #25311f 0, transparent 32%),
+        var(--black);
+      background-size: 32px 32px, 32px 32px, auto, auto;
+      min-height: 100vh;
     }
 
     button,
@@ -46,32 +48,27 @@
     .shell {
       width: min(1420px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 28px 0 80px;
+      padding: 32px 0 72px;
     }
 
     .masthead {
       display: grid;
-      grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.75fr);
+      grid-template-columns: minmax(0, 1.65fr) minmax(280px, 0.8fr);
       gap: 24px;
-      align-items: end;
-      padding: 26px;
-      border: 2px solid var(--line);
-      background: var(--panel);
-      box-shadow: var(--shadow);
+      padding: 30px;
+      border: 1px solid var(--line);
+      background: rgba(9, 11, 10, 0.92);
+      box-shadow: 12px 12px 0 #111a11;
     }
 
     .eyebrow,
-    .mono {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    .eyebrow {
-      margin: 0 0 14px;
-      color: var(--signal-dark);
+    .section-kicker {
+      margin: 0 0 12px;
+      color: var(--acid);
       font-size: 12px;
       font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
     }
 
     h1,
@@ -82,508 +79,409 @@
     }
 
     h1 {
-      max-width: 860px;
-      margin-bottom: 12px;
-      font-size: clamp(38px, 6vw, 82px);
-      line-height: 0.88;
-      letter-spacing: -0.055em;
+      max-width: 950px;
+      margin-bottom: 18px;
+      font-size: clamp(38px, 7vw, 88px);
+      line-height: 0.92;
+      letter-spacing: -0.075em;
       text-transform: uppercase;
     }
 
     .lede {
-      max-width: 760px;
+      max-width: 850px;
       margin-bottom: 0;
-      color: var(--muted);
-      font-size: clamp(16px, 2vw, 21px);
-      line-height: 1.45;
+      color: #ced0c6;
+      font-size: 15px;
+      line-height: 1.75;
     }
 
     .contract {
-      padding: 18px;
-      border: 2px solid var(--line);
-      background: var(--acid);
-      transform: rotate(0.7deg);
+      align-self: stretch;
+      padding: 20px;
+      border: 1px solid var(--acid);
+      background: linear-gradient(140deg, #1c2417, #10130f);
     }
 
     .contract strong {
       display: block;
-      margin-bottom: 9px;
-      font-size: 18px;
-      text-transform: uppercase;
+      margin-bottom: 14px;
+      color: var(--acid);
+      font-size: 16px;
     }
 
     .contract p {
-      margin-bottom: 0;
-      font-size: 14px;
-      line-height: 1.45;
+      margin: 0;
+      color: #d6dbc8;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .zero-badge {
+      display: inline-block;
+      margin-top: 18px;
+      padding: 8px 10px;
+      color: var(--black);
+      background: var(--acid);
+      font-weight: 900;
+      letter-spacing: 0.06em;
     }
 
     .status-line {
       display: flex;
       justify-content: space-between;
       gap: 16px;
-      align-items: center;
-      margin: 28px 0 20px;
-      padding: 12px 14px;
-      border-top: 2px solid var(--line);
-      border-bottom: 2px solid var(--line);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      margin: 26px 0;
+      padding: 13px 16px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--muted);
       font-size: 12px;
     }
 
+    .status-line[data-state="ready"] {
+      border-color: #49672f;
+      color: var(--acid);
+    }
+
     .status-line[data-state="error"] {
-      color: #fff;
-      background: var(--signal-dark);
+      border-color: #773c2f;
+      color: var(--orange);
     }
 
     .status-dot {
       display: inline-block;
-      width: 9px;
-      height: 9px;
-      margin-right: 9px;
-      border: 1px solid var(--line);
+      width: 8px;
+      height: 8px;
+      margin-right: 10px;
       border-radius: 50%;
-      background: var(--acid);
+      background: currentColor;
+      box-shadow: 0 0 12px currentColor;
     }
 
     .legend {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      margin-bottom: 36px;
-      border: 2px solid var(--line);
-      background: var(--panel);
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      margin-bottom: 48px;
+      border: 1px solid var(--line);
+      background: var(--line);
     }
 
     .legend-item {
-      min-height: 92px;
-      padding: 16px;
-      border-right: 2px solid var(--line);
-    }
-
-    .legend-item:last-child {
-      border-right: 0;
+      min-height: 132px;
+      padding: 18px;
+      background: var(--panel);
     }
 
     .legend-key {
-      display: block;
-      margin-bottom: 7px;
-      font: 800 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
+      display: inline-block;
+      margin-bottom: 18px;
+      padding: 4px 7px;
+      border: 1px solid currentColor;
+      color: var(--acid);
+      font-size: 11px;
     }
 
     .legend-title {
       display: block;
-      margin-bottom: 4px;
-      font-size: 18px;
+      margin-bottom: 8px;
       font-weight: 900;
       text-transform: uppercase;
     }
 
     .legend-copy {
       color: var(--muted);
-      font-size: 13px;
-      line-height: 1.35;
+      font-size: 12px;
+      line-height: 1.55;
     }
 
     .section-heading {
       display: flex;
+      align-items: end;
       justify-content: space-between;
-      gap: 20px;
-      align-items: baseline;
-      margin: 48px 0 18px;
+      gap: 24px;
+      margin: 52px 0 18px;
     }
 
     .section-heading h2 {
       margin-bottom: 0;
-      font-size: clamp(27px, 4vw, 48px);
-      letter-spacing: -0.035em;
-      text-transform: uppercase;
+      font-size: clamp(28px, 4vw, 52px);
+      letter-spacing: -0.05em;
     }
 
     .section-heading p {
-      max-width: 650px;
-      margin-bottom: 0;
+      max-width: 630px;
+      margin-bottom: 4px;
       color: var(--muted);
-      line-height: 1.4;
-      text-align: right;
+      font-size: 12px;
+      line-height: 1.6;
     }
 
-    .category {
-      margin: 0 0 26px;
+    .category-block {
+      margin-bottom: 22px;
+      border: 1px solid var(--line);
+      background: rgba(21, 24, 22, 0.82);
     }
 
     .category-head {
-      display: grid;
-      grid-template-columns: 66px 1fr auto;
-      gap: 14px;
+      display: flex;
       align-items: center;
-      padding: 10px 0;
-      border-bottom: 3px solid var(--line);
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
     }
 
-    .category-index {
-      padding: 7px 8px;
-      color: var(--panel);
-      background: var(--line);
-      font: 800 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
-      text-align: center;
-    }
-
-    .category h3 {
+    .category-head h3 {
       margin: 0;
-      font-size: 30px;
-      letter-spacing: -0.025em;
+      color: var(--acid);
+      font-size: 17px;
       text-transform: uppercase;
     }
 
-    .category-count {
+    .category-head span {
       color: var(--muted);
-      font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
-      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.12em;
     }
 
     .comparison-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 18px;
-      padding-top: 18px;
-    }
-
-    .comparison-card,
-    .random-card {
-      position: relative;
-      border: 2px solid var(--line);
-      background: var(--panel);
-      transition: transform 120ms ease, box-shadow 120ms ease;
+      gap: 1px;
+      background: var(--line);
     }
 
     .comparison-card {
       padding: 18px;
+      background: var(--panel);
+      outline: 0 solid var(--acid);
+      transition: outline-width 120ms ease;
     }
 
-    .comparison-card.is-active {
-      box-shadow: var(--shadow);
-      transform: translate(-2px, -2px);
+    .comparison-card[data-active="true"] {
+      outline-width: 1px;
+      outline-offset: -1px;
     }
 
-    .comparison-card:focus-visible {
-      outline: 4px solid var(--blue);
-      outline-offset: 2px;
-    }
-
-    .card-top {
+    .card-top,
+    .transport,
+    .card-foot {
       display: flex;
+      align-items: center;
       justify-content: space-between;
-      gap: 14px;
-      align-items: flex-start;
-      margin-bottom: 18px;
+      gap: 12px;
     }
 
-    .split-label {
-      display: inline-block;
-      margin-bottom: 7px;
-      color: var(--signal-dark);
-      font: 800 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
-      letter-spacing: 0.08em;
+    .card-id {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .split-chip {
+      padding: 4px 7px;
+      border: 1px solid var(--cyan);
+      color: var(--cyan);
+      font-size: 10px;
       text-transform: uppercase;
     }
 
-    .preset {
-      margin-bottom: 0;
-      font: 700 14px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
-      overflow-wrap: anywhere;
-    }
-
-    .midi-stamp {
-      min-width: 98px;
-      padding: 8px;
-      border: 1px solid var(--line);
-      background: var(--paper);
-      font: 700 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
-      text-align: right;
-    }
-
-    .variant-switcher {
+    .variant-switch {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      border: 2px solid var(--line);
+      grid-template-columns: repeat(3, 1fr);
+      gap: 5px;
+      margin: 16px 0;
     }
 
     .variant-button {
-      min-height: 54px;
-      padding: 8px 6px;
-      border: 0;
-      border-right: 2px solid var(--line);
-      background: transparent;
+      min-height: 58px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      background: #101310;
       cursor: pointer;
-      font-weight: 900;
-      text-transform: uppercase;
-    }
-
-    .variant-button:last-child {
-      border-right: 0;
+      font-size: 11px;
+      line-height: 1.3;
+      text-align: left;
     }
 
     .variant-button:hover {
-      background: var(--paper);
+      border-color: #77826f;
     }
 
     .variant-button[aria-pressed="true"] {
-      color: #fff;
-      background: var(--signal);
-    }
-
-    .variant-button small {
-      display: block;
-      margin-top: 4px;
-      font: 600 9px/1.15 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
-      opacity: 0.82;
+      border-color: var(--acid);
+      color: var(--black);
+      background: var(--acid);
+      font-weight: 900;
     }
 
     .transport {
       display: grid;
-      grid-template-columns: 46px minmax(0, 1fr) auto;
-      gap: 12px;
-      align-items: center;
-      padding: 15px 0 4px;
+      grid-template-columns: 48px minmax(0, 1fr) auto;
+      margin-bottom: 12px;
     }
 
     .play-button {
-      width: 46px;
-      height: 46px;
-      border: 2px solid var(--line);
-      background: var(--acid);
+      width: 48px;
+      height: 42px;
+      border: 1px solid var(--orange);
+      color: var(--orange);
+      background: transparent;
       cursor: pointer;
-      font-weight: 900;
+      font-size: 16px;
     }
 
     .play-button:hover {
-      color: #fff;
-      background: var(--line);
+      color: var(--black);
+      background: var(--orange);
     }
 
-    .scrubber {
+    .seek {
       width: 100%;
-      height: 22px;
-      margin: 0;
-      accent-color: var(--signal);
-      cursor: pointer;
+      accent-color: var(--acid);
     }
 
     .time-readout {
-      min-width: 86px;
-      font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
+      min-width: 90px;
+      color: var(--muted);
+      font-size: 10px;
       text-align: right;
     }
 
     .card-foot {
-      display: flex;
-      justify-content: space-between;
-      gap: 14px;
-      align-items: center;
-      margin-top: 9px;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 10px;
     }
 
-    .loop-control {
-      display: inline-flex;
-      gap: 7px;
-      align-items: center;
-      cursor: pointer;
+    .active-variant {
+      color: var(--acid);
+      font-weight: 800;
     }
 
-    .keyboard-hint {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-
-    .random-grid {
+    .random-grid,
+    .technical {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 18px;
+      gap: 12px;
     }
 
-    .random-card {
+    .random-card,
+    .technical-item {
       padding: 20px;
-      border-top: 8px solid var(--blue);
+      border: 1px solid var(--line);
+      background: var(--panel);
     }
 
     .random-card h3 {
-      margin-bottom: 6px;
-      font-size: 24px;
-      text-transform: uppercase;
+      margin-bottom: 8px;
+      color: var(--cyan);
+      font-size: 15px;
     }
 
     .random-meta {
-      margin-bottom: 18px;
       color: var(--muted);
-      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
-      overflow-wrap: anywhere;
+      font-size: 11px;
     }
 
-    .seed-timeline {
+    .timeline {
       position: relative;
-      height: 44px;
-      margin-bottom: 14px;
-      border: 2px solid var(--line);
-      background: var(--paper);
+      height: 8px;
+      margin: 20px 0 14px;
+      background: #394036;
     }
 
-    .seed-region {
+    .seed-zone {
       position: absolute;
       inset: 0 auto 0 0;
-      background: var(--acid);
+      background: var(--cyan);
     }
 
     .seed-marker {
       position: absolute;
-      top: -8px;
-      bottom: -8px;
-      width: 3px;
-      background: var(--signal);
+      top: -7px;
+      width: 2px;
+      height: 22px;
+      background: var(--orange);
     }
 
     .seed-marker::after {
+      content: "SEED → PREDICTED";
       position: absolute;
       top: -18px;
-      left: 6px;
+      left: 7px;
       width: max-content;
-      content: "SEED → PREDICT";
-      color: var(--signal-dark);
-      font: 800 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
-    }
-
-    .timeline-labels {
-      display: flex;
-      justify-content: space-between;
-      padding: 14px 10px 0;
-      font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas,
-        monospace;
+      color: var(--orange);
+      font-size: 9px;
     }
 
     .random-card audio {
       width: 100%;
+      height: 38px;
     }
 
     .technical {
-      display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      margin-top: 46px;
-      border: 2px solid var(--line);
-      background: var(--line);
-      gap: 2px;
-    }
-
-    .technical-item {
-      min-height: 126px;
-      padding: 16px;
-      background: var(--panel);
+      margin-top: 44px;
     }
 
     .technical-item strong {
       display: block;
       margin-bottom: 12px;
-      font-size: 13px;
-      text-transform: uppercase;
+      color: var(--acid);
+      font-size: 12px;
     }
 
     .technical-item code {
       color: var(--muted);
-      font-size: 11px;
+      font-family: inherit;
+      font-size: 10px;
+      line-height: 1.6;
       overflow-wrap: anywhere;
     }
 
     .footer-note {
-      max-width: 920px;
-      margin: 34px 0 0;
+      margin-top: 20px;
+      padding: 16px;
+      border-left: 3px solid var(--acid);
       color: var(--muted);
-      font-size: 13px;
-      line-height: 1.55;
-    }
-
-    .visually-hidden {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      padding: 0;
-      margin: -1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-      border: 0;
+      background: #111410;
+      font-size: 11px;
+      line-height: 1.65;
     }
 
     @media (max-width: 860px) {
       .masthead,
       .comparison-grid,
-      .random-grid {
+      .random-grid,
+      .technical {
         grid-template-columns: 1fr;
-      }
-
-      .contract {
-        transform: none;
-      }
-
-      .section-heading {
-        display: block;
-      }
-
-      .section-heading p {
-        margin-top: 8px;
-        text-align: left;
       }
 
       .legend {
         grid-template-columns: 1fr;
       }
 
-      .legend-item {
-        border-right: 0;
-        border-bottom: 2px solid var(--line);
-      }
-
-      .legend-item:last-child {
-        border-bottom: 0;
-      }
-
-      .technical {
-        grid-template-columns: 1fr;
+      .section-heading {
+        align-items: flex-start;
+        flex-direction: column;
       }
     }
 
-    @media (max-width: 540px) {
+    @media (max-width: 560px) {
       .shell {
         width: min(100% - 18px, 1420px);
-        padding-top: 9px;
+        padding-top: 10px;
       }
 
       .masthead {
-        padding: 18px;
+        padding: 20px;
+        box-shadow: none;
       }
 
-      .variant-button {
-        min-height: 60px;
-        font-size: 11px;
+      .variant-switch {
+        grid-template-columns: 1fr;
       }
 
-      .transport {
-        grid-template-columns: 44px minmax(0, 1fr);
-      }
-
-      .time-readout {
-        grid-column: 2;
-      }
-
-      .card-foot {
+      .status-line {
         align-items: flex-start;
         flex-direction: column;
       }
@@ -597,22 +495,23 @@
         <p class="eyebrow">Latent sequence lab · held-out 5 × 2</p>
         <h1>Z-RAVE 序列预测试听台</h1>
         <p class="lede">
-          在同一时间位置快速切换原始音频、真实 latent 直接重建与
-          Transformer 自回归重建。三路共享控制条件与增益，专门听预测误差。
+          同一时间片快速切换原始音频、真实 latent 直接重建和 Transformer
+          自回归预测重建。三路共享增益，只比较 standalone codec 上的序列预测误差。
         </p>
       </div>
       <aside class="contract">
-        <strong>比较原则 / Listening contract</strong>
+        <strong>严格推理契约</strong>
         <p>
-          128 帧真实 seed 只用于预热，A/B/C 中不会播放。按 1、2、3
-          切换版本，空格播放。先听 Direct vs Predicted，再判断 Transformer；
-          原音频与 Direct 的差距属于 decoder ceiling。
+          音频由同一个 Standalone RAVE 编码和解码。Transformer
+          只接收历史 z_rave，并预测未来 z_rave；没有任何额外条件输入。
+          先听 Direct vs Predicted，Original vs Direct 表示 codec 本身的上限。
         </p>
+        <span class="zero-badge">0 CLAP · 0 MIDI</span>
       </aside>
     </header>
 
-    <div class="status-line" id="statusLine" data-state="loading" role="status"
-      aria-live="polite">
+    <div class="status-line" id="statusLine" data-state="loading"
+      role="status" aria-live="polite">
       <span><span class="status-dot"></span><span id="statusText">正在读取试听清单…</span></span>
       <span id="statusMeta">MANIFEST / WAIT</span>
     </div>
@@ -620,27 +519,30 @@
     <section class="legend" aria-label="试听版本说明">
       <div class="legend-item">
         <span class="legend-key">KEY 1 / A</span>
-        <span class="legend-title">原始音频</span>
-        <span class="legend-copy">Original · 数据集里的同一未来时间片段。</span>
+        <span class="legend-title">Original</span>
+        <span class="legend-copy">数据集中的原始未来音频片段。</span>
       </div>
       <div class="legend-item">
         <span class="legend-key">KEY 2 / B</span>
-        <span class="legend-title">直接重建</span>
-        <span class="legend-copy">Direct reconstruction · 真实 Z-RAVE future。</span>
+        <span class="legend-title">Direct reconstruction</span>
+        <span class="legend-copy">真实 z_rave sequence 经同一个 codec 直接解码。</span>
       </div>
       <div class="legend-item">
         <span class="legend-key">KEY 3 / C</span>
-        <span class="legend-title">预测重建</span>
-        <span class="legend-copy">Predicted sequence · 只用 seed 自回归生成 future。</span>
+        <span class="legend-title">Predicted sequence</span>
+        <span class="legend-copy">只给 seed，未来 z_rave 由 Transformer 自回归产生。</span>
       </div>
     </section>
 
     <section aria-labelledby="comparisonTitle">
       <div class="section-heading">
-        <h2 id="comparisonTitle">五类乐器 · A/B/C</h2>
+        <div>
+          <p class="section-kicker">Controlled comparison</p>
+          <h2 id="comparisonTitle">五类乐器 · A/B/C</h2>
+        </div>
         <p>
-          每类包含 validation 与 test 各一个未见过的 preset。
-          每张卡的时间轴会在切换版本时保持当前位置。
+          Pad、Bass、Lead、Pluck、Keys 各有 validation 与 test 两条。
+          切换版本会保留当前播放时间；键盘 1/2/3 切换，空格播放或暂停。
         </p>
       </div>
       <div id="comparisonGroups"></div>
@@ -648,10 +550,13 @@
 
     <section aria-labelledby="randomTitle">
       <div class="section-heading">
-        <h2 id="randomTitle">随机 seed 续写</h2>
+        <div>
+          <p class="section-kicker">Free rollout</p>
+          <h2 id="randomTitle">随机 z_rave 头续写</h2>
+        </div>
         <p>
-          两组从 held-out 数据随机抽取的真实 Z-RAVE 开头。这里会播放
-          seed 与预测 future，并明确标出二者分界。
+          两组真实 held-out latent head 加自回归预测。橙色标记是
+          seed 与完全预测区间的分界。
         </p>
       </div>
       <div class="random-grid" id="randomContinuations"></div>
@@ -661,20 +566,18 @@
       aria-label="模型与渲染技术信息"></section>
 
     <p class="footer-note">
-      <strong>Pad-focused decoder warning：</strong>
-      当前 frozen decoder 主要由 Pad 数据训练。Bass、Lead、Pluck、Keys
-      的 Original → Direct 可能已经损失明显；这不应算在 Transformer
-      头上。判断序列预测器时，请以 <strong>Direct vs Predicted</strong>
-      为主。页面完全静态，不上传音频，也不依赖网络服务。
+      <strong>判断顺序：</strong>先听 Original → Direct，确认 Standalone RAVE
+      的直接重建质量；再听 Direct → Predicted，把剩余差异归因于序列预测器。
+      页面完全静态，不上传音频，也不依赖外部网络服务。
     </p>
   </main>
 
   <script>
     const CATEGORY_ORDER = ["Pad", "Bass", "Lead", "Pluck", "Keys"];
     const VARIANTS = [
-      { key: "original", short: "1 原始", english: "Original" },
-      { key: "direct", short: "2 直解", english: "Direct reconstruction" },
-      { key: "predicted", short: "3 预测", english: "Predicted sequence" }
+      { key: "original", keyLabel: "1", label: "Original" },
+      { key: "direct", keyLabel: "2", label: "Direct reconstruction" },
+      { key: "predicted", keyLabel: "3", label: "Predicted sequence" }
     ];
     const manifestURL = new URL("audition-manifest.json", window.location.href);
     const allPlayers = new Set();
@@ -703,224 +606,180 @@
       document.getElementById("statusMeta").textContent = meta;
     }
 
-    function pauseOtherPlayers(current) {
+    function pauseOtherPlayers(exception) {
       allPlayers.forEach((player) => {
-        if (player !== current && !player.paused) player.pause();
+        if (player !== exception && !player.paused) player.pause();
       });
     }
 
     function setActiveCard(card) {
-      if (activeCard === card) return;
-      document.querySelectorAll(".comparison-card.is-active").forEach((item) => {
-        item.classList.remove("is-active");
+      document.querySelectorAll(".comparison-card").forEach((item) => {
+        item.dataset.active = String(item === card);
       });
       activeCard = card;
-      if (activeCard) activeCard.classList.add("is-active");
     }
 
-    function bindAudioState(card, audio) {
-      const playButton = card.querySelector(".play-button");
-      const scrubber = card.querySelector(".scrubber");
-      const readout = card.querySelector(".time-readout");
-
-      audio.addEventListener("play", () => {
-        pauseOtherPlayers(audio);
-        setActiveCard(card);
-        playButton.textContent = "Ⅱ";
-        playButton.setAttribute("aria-label", "暂停");
-      });
-      audio.addEventListener("pause", () => {
-        playButton.textContent = "▶";
-        playButton.setAttribute("aria-label", "播放");
-      });
-      audio.addEventListener("loadedmetadata", () => {
-        readout.textContent = `${formatTime(audio.currentTime)} / ${formatTime(audio.duration)}`;
-      });
-      audio.addEventListener("timeupdate", () => {
-        const ratio = audio.duration ? audio.currentTime / audio.duration : 0;
-        scrubber.value = String(Math.round(ratio * 1000));
-        readout.textContent = `${formatTime(audio.currentTime)} / ${formatTime(audio.duration)}`;
-      });
-      playButton.addEventListener("click", () => {
-        if (audio.paused) {
-          audio.play().catch((error) => {
-            setStatus("error", `浏览器拒绝播放：${error.message}`, "AUDIO / ERROR");
-          });
-        } else {
-          audio.pause();
-        }
-      });
-      scrubber.addEventListener("input", () => {
-        if (audio.duration) {
-          audio.currentTime = (Number(scrubber.value) / 1000) * audio.duration;
-        }
-      });
-    }
-
-    async function switchVariant(card, variant) {
-      const audio = card.querySelector("audio");
-      if (card.dataset.variant === variant) return;
-      const paths = JSON.parse(card.dataset.variants);
-      const previousTime = audio.currentTime;
-      const wasPlaying = !audio.paused;
-      audio.pause();
-      card.dataset.variant = variant;
+    function switchVariant(card, key) {
+      const player = card.querySelector("audio");
+      const row = card._row;
+      const time = player.currentTime || 0;
+      const shouldResume = !player.paused;
+      player.pause();
+      player.src = assetURL(row.audio[key]);
+      card.dataset.variant = key;
       card.querySelectorAll(".variant-button").forEach((button) => {
-        const selected = button.dataset.variant === variant;
-        button.setAttribute("aria-pressed", String(selected));
+        button.setAttribute("aria-pressed", String(button.dataset.variant === key));
       });
-      await new Promise((resolve) => {
-        const done = () => resolve();
-        audio.addEventListener("loadedmetadata", done, { once: true });
-        audio.addEventListener("error", done, { once: true });
-        audio.src = assetURL(paths[variant]);
-        audio.load();
-      });
-      if (Number.isFinite(audio.duration)) {
-        audio.currentTime = Math.min(previousTime, Math.max(0, audio.duration - 0.01));
-      }
-      if (wasPlaying) {
-        await audio.play().catch(() => {});
-      }
+      const definition = VARIANTS.find((item) => item.key === key);
+      card.querySelector(".active-variant").textContent = definition.label;
+      player.addEventListener("loadedmetadata", () => {
+        player.currentTime = Math.min(time, Math.max(0, player.duration - 0.01));
+        if (shouldResume) {
+          pauseOtherPlayers(player);
+          player.play().catch(() => {});
+        }
+      }, { once: true });
+      player.load();
+      setActiveCard(card);
     }
 
-    function createComparisonCard(row) {
+    function buildComparisonCard(row) {
       const card = document.createElement("article");
       card.className = "comparison-card";
-      card.tabIndex = 0;
-      card.dataset.variant = "original";
-      card.dataset.variants = JSON.stringify(row.audio);
+      card.dataset.active = "false";
+      card.dataset.variant = "direct";
+      card._row = row;
       card.innerHTML = `
         <div class="card-top">
-          <div>
-            <span class="split-label">${row.split}</span>
-            <p class="preset">${row.preset_id}</p>
-          </div>
-          <div class="midi-stamp">NOTE ${row.midi_note}<br>VEL ${row.velocity}</div>
+          <span class="card-id">${row.sample_id}</span>
+          <span class="split-chip">${row.split}</span>
         </div>
-        <div class="variant-switcher" role="group" aria-label="选择试听版本"></div>
+        <div class="variant-switch" role="group" aria-label="试听版本"></div>
         <div class="transport">
-          <button class="play-button" type="button" aria-label="播放">▶</button>
-          <input class="scrubber" type="range" min="0" max="1000" value="0"
+          <button class="play-button" type="button" aria-label="播放或暂停">▶</button>
+          <input class="seek" type="range" min="0" max="1" step="0.001" value="0"
             aria-label="播放位置">
           <span class="time-readout">0:00.000 / 0:00.000</span>
         </div>
         <div class="card-foot">
-          <label class="loop-control">
-            <input class="loop-toggle" type="checkbox" checked> 循环
-          </label>
-          <span class="keyboard-hint">FOCUS · 1 / 2 / 3 · SPACE</span>
+          <span class="active-variant">Direct reconstruction</span>
+          <span>${row.sample_count.toLocaleString()} samples</span>
         </div>
         <audio preload="metadata"></audio>
       `;
 
-      const switcher = card.querySelector(".variant-switcher");
+      const switcher = card.querySelector(".variant-switch");
       VARIANTS.forEach((variant) => {
         const button = document.createElement("button");
-        button.type = "button";
         button.className = "variant-button";
+        button.type = "button";
         button.dataset.variant = variant.key;
-        button.setAttribute("aria-pressed", String(variant.key === "original"));
-        button.innerHTML = `${variant.short}<small>${variant.english}</small>`;
-        button.addEventListener("click", () => {
-          setActiveCard(card);
-          switchVariant(card, variant.key);
-        });
+        button.setAttribute("aria-pressed", String(variant.key === "direct"));
+        button.innerHTML = `<strong>${variant.keyLabel}</strong><br>${variant.label}`;
+        button.addEventListener("click", () => switchVariant(card, variant.key));
         switcher.appendChild(button);
       });
 
-      const audio = card.querySelector("audio");
-      audio.src = assetURL(row.audio.original);
-      audio.loop = true;
-      allPlayers.add(audio);
-      bindAudioState(card, audio);
-      card.querySelector(".loop-toggle").addEventListener("change", (event) => {
-        audio.loop = event.target.checked;
+      const player = card.querySelector("audio");
+      const play = card.querySelector(".play-button");
+      const seek = card.querySelector(".seek");
+      const readout = card.querySelector(".time-readout");
+      player.src = assetURL(row.audio.direct);
+      allPlayers.add(player);
+
+      play.addEventListener("click", () => {
+        setActiveCard(card);
+        if (player.paused) {
+          pauseOtherPlayers(player);
+          player.play().catch(() => {});
+        } else {
+          player.pause();
+        }
+      });
+      player.addEventListener("play", () => {
+        play.textContent = "Ⅱ";
+        pauseOtherPlayers(player);
+        setActiveCard(card);
+      });
+      player.addEventListener("pause", () => {
+        play.textContent = "▶";
+      });
+      player.addEventListener("timeupdate", () => {
+        const duration = Number.isFinite(player.duration) ? player.duration : 0;
+        seek.value = duration ? String(player.currentTime / duration) : "0";
+        readout.textContent = `${formatTime(player.currentTime)} / ${formatTime(duration)}`;
+      });
+      seek.addEventListener("input", () => {
+        if (Number.isFinite(player.duration)) {
+          player.currentTime = Number(seek.value) * player.duration;
+        }
       });
       card.addEventListener("pointerdown", () => setActiveCard(card));
-      card.addEventListener("focus", () => setActiveCard(card));
       return card;
     }
 
     function renderComparisons(rows) {
       const root = document.getElementById("comparisonGroups");
-      root.replaceChildren();
-      CATEGORY_ORDER.forEach((category, categoryIndex) => {
+      CATEGORY_ORDER.forEach((category) => {
         const categoryRows = rows.filter((row) => row.category === category);
-        const section = document.createElement("section");
-        section.className = "category";
-        section.innerHTML = `
+        const block = document.createElement("section");
+        block.className = "category-block";
+        block.innerHTML = `
           <div class="category-head">
-            <span class="category-index">${String(categoryIndex + 1).padStart(2, "0")}</span>
             <h3>${category}</h3>
-            <span class="category-count">${categoryRows.length} held-out rows</span>
+            <span>HELD-OUT / ${categoryRows.length} RECORDS</span>
           </div>
           <div class="comparison-grid"></div>
         `;
-        const grid = section.querySelector(".comparison-grid");
-        categoryRows.forEach((row) => grid.appendChild(createComparisonCard(row)));
-        root.appendChild(section);
+        const grid = block.querySelector(".comparison-grid");
+        categoryRows.forEach((row) => grid.appendChild(buildComparisonCard(row)));
+        root.appendChild(block);
       });
-      setActiveCard(root.querySelector(".comparison-card"));
-    }
-
-    function createRandomCard(row, index) {
-      const card = document.createElement("article");
-      card.className = "random-card";
-      const totalFrames = row.seed_frames + row.predicted_frames;
-      const seedPercent = (row.seed_frames / totalFrames) * 100;
-      card.innerHTML = `
-        <span class="split-label">RANDOM ${String(index + 1).padStart(2, "0")}</span>
-        <h3>${row.category} · ${row.split}</h3>
-        <p class="random-meta">
-          ${row.preset_id}<br>
-          NOTE ${row.midi_note} / VEL ${row.velocity} /
-          boundary ${row.transition_seconds.toFixed(3)}s
-        </p>
-        <div class="seed-timeline" aria-label="真实 seed 与预测序列分界">
-          <span class="seed-region" style="width:${seedPercent}%"></span>
-          <span class="seed-marker" style="left:${seedPercent}%"></span>
-          <span class="timeline-labels">
-            <span>REAL Z-RAVE HEAD</span><span>AUTOREGRESSIVE FUTURE</span>
-          </span>
-        </div>
-        <audio controls preload="metadata" src="${assetURL(row.file)}"></audio>
-      `;
-      const audio = card.querySelector("audio");
-      allPlayers.add(audio);
-      audio.addEventListener("play", () => pauseOtherPlayers(audio));
-      return card;
+      activeCard = root.querySelector(".comparison-card");
+      if (activeCard) setActiveCard(activeCard);
     }
 
     function renderRandomContinuations(rows) {
       const root = document.getElementById("randomContinuations");
-      root.replaceChildren();
-      rows.forEach((row, index) => root.appendChild(createRandomCard(row, index)));
+      rows.forEach((row, index) => {
+        const duration = row.sample_count / manifest.sample_rate;
+        const ratio = Math.min(100, 100 * row.transition_seconds / duration);
+        const card = document.createElement("article");
+        card.className = "random-card";
+        card.innerHTML = `
+          <h3>RANDOM HEAD ${String(index + 1).padStart(2, "0")} · ${row.category}</h3>
+          <p class="random-meta">${row.split} · ${row.sample_id}</p>
+          <div class="timeline" aria-label="seed 与预测区间">
+            <span class="seed-zone" style="width:${ratio}%"></span>
+            <span class="seed-marker" style="left:${ratio}%"></span>
+          </div>
+          <audio controls preload="metadata" src="${assetURL(row.file)}"></audio>
+        `;
+        const player = card.querySelector("audio");
+        allPlayers.add(player);
+        player.addEventListener("play", () => pauseOtherPlayers(player));
+        root.appendChild(card);
+      });
     }
 
     function renderTechnicalContract(data) {
-      const transformer = data.models.transformer;
-      const decoder = data.models.decoder;
-      const clap = data.models.clap;
       const root = document.getElementById("technicalContract");
       root.innerHTML = `
         <div class="technical-item">
-          <strong>Transformer / update ${transformer.update}</strong>
-          <code>${transformer.architecture}<br>${shortHash(transformer.sha256)}</code>
+          <strong>Transformer / update ${data.transformer.update}</strong>
+          <code>${data.transformer.architecture}<br>${shortHash(data.transformer.sha256)}</code>
         </div>
         <div class="technical-item">
-          <strong>Pad-focused decoder / update ${decoder.update}</strong>
-          <code>format-5 frozen decoder<br>${shortHash(decoder.sha256)}</code>
+          <strong>Standalone RAVE</strong>
+          <code>${data.codec.latent_dim}D · hop ${data.codec.latent_hop}<br>${shortHash(data.codec.sha256)}</code>
         </div>
         <div class="technical-item">
           <strong>Render contract</strong>
           <code>
-            seed ${data.context_frames}f · future ${data.future_frames}f<br>
-            hop ${data.latent_hop} · ${data.sample_rate} Hz ·
-            ${data.audible_duration_seconds.toFixed(3)} s
+            seed ${data.context_frames}f · horizon ${data.horizon_frames}f · future ${data.future_frames}f<br>
+            ${data.sample_rate} Hz · ${data.audible_duration_seconds.toFixed(3)} s · conditioning [ ]
           </code>
         </div>
-        <span class="visually-hidden">CLAP ${shortHash(clap.sha256)}</span>
       `;
     }
 
@@ -945,13 +804,14 @@
         if (!response.ok) throw new Error(`manifest HTTP ${response.status}`);
         manifest = await response.json();
         if (manifest.schema !== 1) throw new Error("unsupported manifest schema");
+        if (manifest.conditioning.length !== 0) throw new Error("conditioning is not empty");
         renderComparisons(manifest.comparisons);
         renderRandomContinuations(manifest.random_continuations);
         renderTechnicalContract(manifest);
         setStatus(
           "ready",
           `已载入 ${manifest.comparisons.length} 组三路对比 + ${manifest.random_continuations.length} 组随机续写`,
-          `UPDATE ${manifest.models.transformer.update} / READY`
+          `UPDATE ${manifest.transformer.update} / READY`
         );
       } catch (error) {
         setStatus(
