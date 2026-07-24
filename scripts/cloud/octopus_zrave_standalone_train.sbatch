@@ -58,5 +58,5 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores \
       -m midibrave.zrave_train \
       --config "$config" \
       --batch-per-gpu "$batch" \
-      --max-updates 30000 \
+      --max-updates 3000 \
       "${resume_args[@]}"

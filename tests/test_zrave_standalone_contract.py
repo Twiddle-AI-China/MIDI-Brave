@@ -30,6 +30,10 @@ def test_standalone_config_has_the_measured_codec_contract() -> None:
     assert config.model.latent_dim == 16
     assert config.model.context_frames == 32
     assert config.model.horizon_frames == 8
+    assert config.train.max_updates == 3000
+    assert config.train.warmup_updates == 200
+    assert config.train.checkpoint_every == 500
+    assert config.train.validation_every == 250
 
 
 def test_standalone_cloud_jobs_ban_conditional_dependencies() -> None:

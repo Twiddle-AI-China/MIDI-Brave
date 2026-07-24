@@ -40,12 +40,12 @@ optimizer:
 train:
   output_root: /data/midibrave-zrave-standalone/runs/zrave_transformer_balanced50
   batch_per_gpu: 512
-  max_updates: 30000
-  warmup_updates: 1000
-  checkpoint_every: 2000
-  validation_every: 1000
+  max_updates: 3000
+  warmup_updates: 200
+  checkpoint_every: 500
+  validation_every: 250
   validation_batches: 64
-  early_stop_validations: 5
+  early_stop_validations: 6
   log_every: 20
   gradient_clip: 1.0
   precision: amp_fp16
