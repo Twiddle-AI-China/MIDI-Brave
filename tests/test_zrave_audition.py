@@ -278,6 +278,10 @@ def test_octopus_audition_uses_exactly_one_slurm_gpu() -> None:
     assert "zrave-sequence-comparison/index.html" in script
     assert "/srv/data-branches/hdd-b/data/midibrave-zrave" in script
     assert "/srv/data-branches/hdd-a/data/midibrave-v3" in script
+    assert (
+        "/srv/data-branches/hdd-a/data/midibrave-zrave/"
+        "packs/serum-balanced50/latents.npy"
+    ) in script
     assert "/srv/data-branches/nvme/model_weights" in script
     assert "/srv/data-branches/nvme/datasets" in script
     assert "-v /data:/data" not in script

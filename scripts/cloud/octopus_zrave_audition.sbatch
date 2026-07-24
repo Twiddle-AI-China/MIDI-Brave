@@ -17,6 +17,7 @@ config=$container_repo/configs/zrave/octopus_balanced50.yaml
 image=midibrave:v0.10.0-clap-recon
 checkpoint=/data/midibrave-zrave/runs/zrave_transformer_balanced50/checkpoints/update-00008000.pt
 zrave_branch=/srv/data-branches/hdd-b/data/midibrave-zrave
+zrave_latents=/srv/data-branches/hdd-a/data/midibrave-zrave/packs/serum-balanced50/latents.npy
 v3_branch=/srv/data-branches/hdd-a/data/midibrave-v3
 model_branch=/srv/data-branches/nvme/model_weights
 dataset_branch=/srv/data-branches/nvme/datasets
@@ -30,7 +31,7 @@ test -f "$repo/scripts/render_zrave_audition.py"
 test -f "$repo/audition/zrave-sequence-comparison/index.html"
 test -f "$zrave_branch/runs/zrave_transformer_balanced50/checkpoints/update-00008000.pt"
 test -f "$zrave_branch/packs/serum-balanced50/index.json"
-test -f "$zrave_branch/packs/serum-balanced50/latents.npy"
+test -f "$zrave_latents"
 test -f "$v3_branch/runs/pad50_scratch_control_rescue_window_clap_v1/rollout/update-00000500.pt"
 test -f "$model_branch/laion-clap/music_audioset_epoch_15_esc_90.14.pt"
 test -d "$dataset_branch/latent-cosmos-synth/serum-dataset"
@@ -43,23 +44,43 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores \
     --gpus "device=${CUDA_VISIBLE_DEVICES}" \
     --shm-size=16g \
     -v "$repo:$container_repo:ro" \
-    -v "$zrave_branch:/data/midibrave-zrave:ro" \
-    -v "$v3_branch:/data/midibrave-v3:ro" \
-    -v "$model_branch:/data/model_weights:ro" \
-    -v "$dataset_branch:/data/datasets:ro" \
+    -v "$zrave_branch:/inputs/zrave-b:ro" \
+    -v "$(dirname "$(dirname "$(dirname "$zrave_latents")")"):/inputs/zrave-a:ro" \
+    -v "$v3_branch:/inputs/midibrave-v3:ro" \
+    -v "$model_branch:/inputs/model-weights:ro" \
+    -v "$dataset_branch:/inputs/datasets:ro" \
     -v "$host_output:$output" \
     -e "PYTHONPATH=$container_repo/src" \
     -e HF_HUB_OFFLINE=1 \
     -e TRANSFORMERS_OFFLINE=1 \
     -w "$container_repo" \
     "$image" \
-    python scripts/render_zrave_audition.py \
-      --config "$config" \
-      --checkpoint "$checkpoint" \
-      --output "$output" \
-      --duration 2.5 \
-      --random-seed 20260724 \
-      --device cuda
+    bash -lc '
+      set -euo pipefail
+      mkdir -p /data/midibrave-zrave/packs/serum-balanced50
+      ln -s /inputs/zrave-b/runs /data/midibrave-zrave/runs
+      ln -s /inputs/zrave-b/manifests /data/midibrave-zrave/manifests
+      ln -s /inputs/zrave-b/packs/serum-balanced50/index.json \
+        /data/midibrave-zrave/packs/serum-balanced50/index.json
+      ln -s /inputs/zrave-b/packs/serum-balanced50/statistics.npz \
+        /data/midibrave-zrave/packs/serum-balanced50/statistics.npz
+      ln -s /inputs/zrave-b/packs/serum-balanced50/lengths.npy \
+        /data/midibrave-zrave/packs/serum-balanced50/lengths.npy
+      ln -s /inputs/zrave-b/packs/serum-balanced50/splits.npy \
+        /data/midibrave-zrave/packs/serum-balanced50/splits.npy
+      ln -s /inputs/zrave-a/packs/serum-balanced50/latents.npy \
+        /data/midibrave-zrave/packs/serum-balanced50/latents.npy
+      ln -s /inputs/midibrave-v3 /data/midibrave-v3
+      ln -s /inputs/model-weights /data/model_weights
+      ln -s /inputs/datasets /data/datasets
+      python scripts/render_zrave_audition.py \
+        --config configs/zrave/octopus_balanced50.yaml \
+        --checkpoint /data/midibrave-zrave/runs/zrave_transformer_balanced50/checkpoints/update-00008000.pt \
+        --output /output \
+        --duration 2.5 \
+        --random-seed 20260724 \
+        --device cuda
+    '
 
 srun --kill-on-bad-exit=1 \
   docker run --rm \
