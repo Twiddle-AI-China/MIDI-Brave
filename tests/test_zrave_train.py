@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 
 from midibrave.zrave_config import (
     ZraveLossConfig,
     ZraveModelConfig,
+    ZraveTrainConfig,
 )
 from midibrave.zrave_model import (
     ZraveStatistics,
@@ -15,7 +17,9 @@ from midibrave.zrave_model import (
 )
 from midibrave.zrave_train import (
     GpuWindowSampler,
+    allowed_rollout_depth,
     load_zrave_checkpoint,
+    sample_rollout_depth,
     save_zrave_checkpoint,
     should_checkpoint,
     summarize_benchmark,
@@ -190,3 +194,38 @@ def test_validation_improvement_always_triggers_checkpoint() -> None:
         stopped_early=False,
         validation_improved=False,
     )
+
+
+def test_rollout_depth_curriculum_is_bounded() -> None:
+    assert allowed_rollout_depth(0, 7, 500) == 2
+    assert allowed_rollout_depth(250, 7, 500) == 4
+    assert allowed_rollout_depth(500, 7, 500) == 7
+    assert allowed_rollout_depth(900, 7, 500) == 7
+    assert allowed_rollout_depth(0, 0, 500) == 0
+
+
+def test_rollout_depth_sampling_is_reproducible() -> None:
+    first = torch.Generator().manual_seed(31)
+    second = torch.Generator().manual_seed(31)
+
+    actual = [
+        sample_rollout_depth(500, 7, 500, 0.25, first, "cpu")
+        for _ in range(20)
+    ]
+    expected = [
+        sample_rollout_depth(500, 7, 500, 0.25, second, "cpu")
+        for _ in range(20)
+    ]
+
+    assert actual == expected
+    assert set(actual) <= set(range(8))
+    assert 0 in actual
+    assert any(depth > 0 for depth in actual)
+
+
+def test_rollout_config_rejects_invalid_probability() -> None:
+    with pytest.raises(ValueError, match="rollout_teacher_probability"):
+        ZraveTrainConfig(
+            output_root="run",
+            rollout_teacher_probability=1.1,
+        )

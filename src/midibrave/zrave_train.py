@@ -415,6 +415,53 @@ def _learning_rate(config: ZraveConfig, update: int, maximum: int) -> float:
     )
 
 
+def allowed_rollout_depth(
+    update: int,
+    maximum_depth: int,
+    curriculum_updates: int,
+) -> int:
+    if update < 0 or maximum_depth < 0 or curriculum_updates <= 0:
+        raise ValueError("invalid rollout curriculum")
+    if maximum_depth == 0:
+        return 0
+    progress = min(1.0, update / curriculum_updates)
+    return min(
+        maximum_depth,
+        max(2, math.ceil(maximum_depth * progress)),
+    )
+
+
+def sample_rollout_depth(
+    update: int,
+    maximum_depth: int,
+    curriculum_updates: int,
+    teacher_probability: float,
+    generator: torch.Generator,
+    device: torch.device | str,
+) -> int:
+    if not 0.0 <= teacher_probability <= 1.0:
+        raise ValueError("teacher_probability must be in [0, 1]")
+    allowed = allowed_rollout_depth(
+        update,
+        maximum_depth,
+        curriculum_updates,
+    )
+    if allowed == 0:
+        return 0
+    teacher = torch.rand((), generator=generator, device=device)
+    if float(teacher.item()) < teacher_probability:
+        return 0
+    return int(
+        torch.randint(
+            1,
+            allowed + 1,
+            (),
+            generator=generator,
+            device=device,
+        ).item()
+    )
+
+
 def _rollout(
     model: ZraveTransformer,
     history: Tensor,

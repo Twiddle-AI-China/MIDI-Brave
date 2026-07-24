@@ -178,6 +178,9 @@ class ZraveTrainConfig:
     gradient_clip: float = 1.0
     precision: str = "amp_fp16"
     seed: int = 20260723
+    rollout_max_depth: int = 0
+    rollout_curriculum_updates: int = 1
+    rollout_teacher_probability: float = 1.0
 
     def __post_init__(self) -> None:
         if not self.output_root:
@@ -192,8 +195,15 @@ class ZraveTrainConfig:
             "validation_rollout_frames",
             "early_stop_validations",
             "log_every",
+            "rollout_curriculum_updates",
         ):
             _positive(f"train.{name}", getattr(self, name))
+        if self.rollout_max_depth < 0:
+            raise ValueError("train.rollout_max_depth must be non-negative")
+        if not 0.0 <= self.rollout_teacher_probability <= 1.0:
+            raise ValueError(
+                "train.rollout_teacher_probability must be in [0, 1]"
+            )
         _positive("train.gradient_clip", self.gradient_clip)
         if self.precision != "amp_fp16":
             raise ValueError("train.precision must be amp_fp16")
