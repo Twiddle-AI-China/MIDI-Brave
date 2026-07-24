@@ -107,8 +107,7 @@ class FlowDataConfig:
         ):
             if not getattr(self, name):
                 raise ValueError(f"data.{name} must not be empty")
-        if self.shard_records != 4096:
-            raise ValueError("data.shard_records must be 4096")
+        _positive("data.shard_records", self.shard_records)
         total = sum(source.weight for source in self.sources)
         if not isclose(total, 1.0, rel_tol=0.0, abs_tol=1.0e-9):
             raise ValueError("source weights must sum to 1")
