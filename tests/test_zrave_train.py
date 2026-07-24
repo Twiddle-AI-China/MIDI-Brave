@@ -17,6 +17,7 @@ from midibrave.zrave_train import (
     GpuWindowSampler,
     load_zrave_checkpoint,
     save_zrave_checkpoint,
+    should_checkpoint,
     summarize_benchmark,
 )
 
@@ -172,3 +173,20 @@ def test_benchmark_summary_contains_selection_evidence() -> None:
     assert report["p10_windows_per_second"] > 0.0
     assert report["peak_memory_mib"] == 12345.0
     assert report["status"] == "ok"
+
+
+def test_validation_improvement_always_triggers_checkpoint() -> None:
+    assert should_checkpoint(
+        update=2750,
+        checkpoint_every=500,
+        final_due=False,
+        stopped_early=False,
+        validation_improved=True,
+    )
+    assert not should_checkpoint(
+        update=2750,
+        checkpoint_every=500,
+        final_due=False,
+        stopped_early=False,
+        validation_improved=False,
+    )

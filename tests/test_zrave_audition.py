@@ -308,7 +308,7 @@ def test_octopus_audition_uses_exactly_one_slurm_gpu() -> None:
     assert "scripts/render_zrave_audition.py" in script
     assert "checkpoints/best.pt" in script
     assert "zrave_transformer_mean50_v2" in script
-    assert "standalone-mean-v2-best" in script
+    assert "standalone-mean-v2-best-2750" in script
     assert "zrave-sequence-comparison/index.html" in script
     assert 'cp "$container_repo/audition/' in script
     assert 'cp "$repo/audition/' not in script

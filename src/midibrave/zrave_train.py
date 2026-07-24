@@ -475,6 +475,22 @@ def _write_json(path: Path, payload: object) -> None:
     temporary.replace(path)
 
 
+def should_checkpoint(
+    *,
+    update: int,
+    checkpoint_every: int,
+    final_due: bool,
+    stopped_early: bool,
+    validation_improved: bool,
+) -> bool:
+    return (
+        update % checkpoint_every == 0
+        or final_due
+        or stopped_early
+        or validation_improved
+    )
+
+
 def _gather_checkpoint_payload(
     *,
     model: nn.Module,
@@ -754,13 +770,12 @@ def _train(args: argparse.Namespace) -> None:
                 >= config.train.early_stop_validations
             )
 
-        checkpoint_due = (
-            not benchmark
-            and (
-                update % config.train.checkpoint_every == 0
-                or final_due
-                or stopped_early
-            )
+        checkpoint_due = not benchmark and should_checkpoint(
+            update=update,
+            checkpoint_every=config.train.checkpoint_every,
+            final_due=final_due,
+            stopped_early=stopped_early,
+            validation_improved=improved,
         )
         if checkpoint_due:
             payload = _gather_checkpoint_payload(
