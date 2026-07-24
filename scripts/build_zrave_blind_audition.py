@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import math
 import random
-import shutil
 from pathlib import Path
 from typing import Any
+
+import numpy as np
+import soundfile as sf
 
 
 _PAGE = """<!doctype html>
@@ -716,12 +718,38 @@ def _resolve_asset(manifest_path: Path, relative: object) -> Path:
     return path
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _read_audio(path: Path, sample_rate: int) -> np.ndarray:
+    audio, actual_rate = sf.read(path, dtype="float32", always_2d=True)
+    if actual_rate != sample_rate:
+        raise ValueError(
+            f"audition audio sample rate differs: {actual_rate}"
+        )
+    if audio.shape[1] != 1:
+        raise ValueError(f"audition audio must be mono: {path}")
+    mono = np.ascontiguousarray(audio[:, 0])
+    if mono.size == 0 or not np.isfinite(mono).all():
+        raise ValueError(f"audition audio is empty or non-finite: {path}")
+    return mono
+
+
+def _render_gain(row: dict[str, Any], identifier: str) -> float:
+    gain = float(row.get("shared_gain", 1.0))
+    if not math.isfinite(gain) or gain <= 0.0:
+        raise ValueError(f"comparison {identifier} has invalid shared gain")
+    return gain
+
+
+def _write_audio(
+    path: Path,
+    audio: np.ndarray,
+    sample_rate: int,
+) -> None:
+    sf.write(
+        path,
+        np.clip(audio, -1.0, 1.0),
+        sample_rate,
+        subtype="PCM_16",
+    )
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -745,6 +773,7 @@ def build_blind_audition(
     for field in ("sample_rate", "latent_hop", "future_frames"):
         if baseline.get(field) != candidate.get(field):
             raise ValueError(f"audition {field} contracts do not match")
+    sample_rate = int(baseline["sample_rate"])
 
     baseline_rows = _comparison_map(baseline)
     candidate_rows = _comparison_map(candidate)
@@ -780,8 +809,25 @@ def build_blind_audition(
             candidate_path,
             candidate_row["audio"]["direct"],
         )
-        if _sha256(base_direct) != _sha256(candidate_direct):
+        base_gain = _render_gain(base_row, identifier)
+        candidate_gain = _render_gain(candidate_row, identifier)
+        base_direct_audio = _read_audio(base_direct, sample_rate) / base_gain
+        candidate_direct_audio = (
+            _read_audio(candidate_direct, sample_rate) / candidate_gain
+        )
+        if (
+            base_direct_audio.shape != candidate_direct_audio.shape
+            or not np.allclose(
+                base_direct_audio,
+                candidate_direct_audio,
+                rtol=2.0e-4,
+                atol=1.0e-4,
+            )
+        ):
             raise ValueError(f"comparison {identifier} direct audio differs")
+        direct_audio = 0.5 * (
+            base_direct_audio + candidate_direct_audio
+        )
 
         base_prediction = _resolve_asset(
             baseline_path,
@@ -791,29 +837,58 @@ def build_blind_audition(
             candidate_path,
             candidate_row["audio"]["predicted"],
         )
+        prediction_by_role = {
+            "baseline": _read_audio(
+                base_prediction,
+                sample_rate,
+            ) / base_gain,
+            "candidate": _read_audio(
+                candidate_prediction,
+                sample_rate,
+            ) / candidate_gain,
+        }
+        if any(
+            prediction.shape != direct_audio.shape
+            for prediction in prediction_by_role.values()
+        ):
+            raise ValueError(
+                f"comparison {identifier} audio lengths do not match"
+            )
         assignment = (
             {"A": "baseline", "B": "candidate"}
             if index in baseline_on_a
             else {"A": "candidate", "B": "baseline"}
         )
-        source_by_role = {
-            "baseline": base_prediction,
-            "candidate": candidate_prediction,
-        }
+        peak = max(
+            float(np.max(np.abs(direct_audio))),
+            *(
+                float(np.max(np.abs(prediction)))
+                for prediction in prediction_by_role.values()
+            ),
+        )
+        if not math.isfinite(peak) or peak <= 0.0:
+            raise ValueError(f"comparison {identifier} audio is silent")
+        shared_gain = 0.95 / peak
         public_id = f"trial-{index + 1:02d}"
         relative_audio = {
             "direct": f"audio/{public_id}-direct.wav",
             "A": f"audio/{public_id}-A.wav",
             "B": f"audio/{public_id}-B.wav",
         }
-        shutil.copyfile(base_direct, destination / relative_audio["direct"])
-        shutil.copyfile(
-            source_by_role[assignment["A"]],
+        _write_audio(
             destination / relative_audio["A"],
+            prediction_by_role[assignment["A"]] * shared_gain,
+            sample_rate,
         )
-        shutil.copyfile(
-            source_by_role[assignment["B"]],
+        _write_audio(
             destination / relative_audio["B"],
+            prediction_by_role[assignment["B"]] * shared_gain,
+            sample_rate,
+        )
+        _write_audio(
+            destination / relative_audio["direct"],
+            direct_audio * shared_gain,
+            sample_rate,
         )
         public_rows.append(
             {
@@ -821,6 +896,7 @@ def build_blind_audition(
                 "category": base_row.get("category"),
                 "split": base_row.get("split"),
                 "sample_count": base_row.get("sample_count"),
+                "shared_gain": shared_gain,
                 "audio": relative_audio,
             }
         )

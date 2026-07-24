@@ -45,6 +45,7 @@ def _write_matching_auditions(root: Path) -> tuple[Path, Path]:
                     "category": "Pad",
                     "split": "test",
                     "sample_count": direct_audio.size,
+                    "shared_gain": 1.0,
                     "audio": {
                         "direct": f"audio/{direct.name}",
                         "predicted": f"audio/{predicted.name}",
@@ -127,6 +128,52 @@ def test_blind_page_reveals_answer_only_after_explicit_click(
     assert "currentTime" in html
     assert "<script src=" not in html
     assert "<link rel=" not in html
+
+
+def test_blind_builder_rebalances_model_dependent_render_gains(
+    tmp_path: Path,
+) -> None:
+    baseline, candidate = _write_matching_auditions(tmp_path)
+    candidate_payload = json.loads(candidate.read_text(encoding="utf-8"))
+    candidate_row = candidate_payload["comparisons"][0]
+    candidate_row["shared_gain"] = 0.5
+    for variant in ("direct", "predicted"):
+        path = candidate.parent / candidate_row["audio"][variant]
+        audio, sample_rate = sf.read(path, dtype="float32")
+        sf.write(path, audio * 0.5, sample_rate, subtype="PCM_16")
+    candidate.write_text(
+        json.dumps(candidate_payload),
+        encoding="utf-8",
+    )
+
+    result = build_blind_audition(
+        baseline,
+        candidate,
+        tmp_path / "output",
+        seed=20260724,
+    )
+
+    public_row = result["public_manifest"]["rows"][0]
+    private_row = result["answer_key"]["rows"][0]
+    output_gain = public_row["shared_gain"]
+    for label in ("A", "B"):
+        role = private_row["assignment"][label]
+        source_manifest = baseline if role == "baseline" else candidate
+        source_payload = json.loads(source_manifest.read_text(encoding="utf-8"))
+        source_row = source_payload["comparisons"][0]
+        source_audio, _ = sf.read(
+            source_manifest.parent / source_row["audio"]["predicted"],
+            dtype="float32",
+        )
+        output_audio, _ = sf.read(
+            tmp_path / "output" / public_row["audio"][label],
+            dtype="float32",
+        )
+        np.testing.assert_allclose(
+            output_audio / output_gain,
+            source_audio / source_row["shared_gain"],
+            atol=1.5e-4,
+        )
 
 
 def test_blind_builder_rejects_mismatched_comparisons(
