@@ -715,7 +715,9 @@ def _train(args: argparse.Namespace) -> None:
                 sampler.lengths,
                 sampler.splits,
                 context_frames=config.model.context_frames,
-                horizon_frames=128,
+                horizon_frames=(
+                    config.train.validation_rollout_frames
+                ),
                 split_code=1,
                 seed=config.seed + 2000 + rank,
             )
@@ -734,12 +736,16 @@ def _train(args: argparse.Namespace) -> None:
                 validations_without_improvement += 1
             if writer is not None:
                 writer.add_scalar(
-                    "validation/rollout_128_smooth_l1",
+                    "validation/"
+                    f"rollout_{config.train.validation_rollout_frames}"
+                    "_smooth_l1",
                     validation_metric,
                     update,
                 )
                 writer.add_scalar(
-                    "validation/best_rollout_128_smooth_l1",
+                    "validation/"
+                    f"best_rollout_{config.train.validation_rollout_frames}"
+                    "_smooth_l1",
                     best_validation_metric,
                     update,
                 )

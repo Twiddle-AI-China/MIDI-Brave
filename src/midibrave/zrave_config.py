@@ -172,6 +172,7 @@ class ZraveTrainConfig:
     checkpoint_every: int = 2000
     validation_every: int = 2000
     validation_batches: int = 64
+    validation_rollout_frames: int = 128
     early_stop_validations: int = 5
     log_every: int = 20
     gradient_clip: float = 1.0
@@ -188,6 +189,7 @@ class ZraveTrainConfig:
             "checkpoint_every",
             "validation_every",
             "validation_batches",
+            "validation_rollout_frames",
             "early_stop_validations",
             "log_every",
         ):

@@ -37,6 +37,7 @@ def test_standalone_config_has_the_measured_codec_contract() -> None:
     assert config.train.warmup_updates == 200
     assert config.train.checkpoint_every == 500
     assert config.train.validation_every == 250
+    assert config.train.validation_rollout_frames == 64
 
 
 def test_standalone_cloud_jobs_ban_conditional_dependencies() -> None:
@@ -56,3 +57,12 @@ def test_standalone_cloud_jobs_ban_conditional_dependencies() -> None:
     for batch in (1024, 1536, 2048, 2560):
         assert str(batch) in scripts
     assert "--batches 1024 1536 2048 2560" in scripts
+
+
+def test_training_validation_horizon_is_config_driven() -> None:
+    source = (
+        ROOT / "src" / "midibrave" / "zrave_train.py"
+    ).read_text(encoding="utf-8")
+
+    assert "horizon_frames=128" not in source
+    assert "config.train.validation_rollout_frames" in source
