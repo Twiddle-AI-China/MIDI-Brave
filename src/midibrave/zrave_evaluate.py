@@ -104,26 +104,48 @@ def _load_statistics(root: Path) -> ZraveStatistics:
         )
 
 
+def summarize_distribution(
+    values: np.ndarray | list[float],
+) -> dict[str, float]:
+    array = np.asarray(values, dtype=np.float64).reshape(-1)
+    if not array.size:
+        raise ValueError("cannot summarize an empty distribution")
+    if not np.isfinite(array).all():
+        raise ValueError("distribution contains non-finite values")
+    worst_count = max(1, math.ceil(array.size * 0.1))
+    ordered = np.sort(array)
+    return {
+        "median": float(np.median(array)),
+        "p10": float(np.percentile(array, 10)),
+        "p90": float(np.percentile(array, 90)),
+        "worst_decile_mean": float(ordered[-worst_count:].mean()),
+        "maximum": float(ordered[-1]),
+    }
+
+
 class _ErrorAccumulator:
     def __init__(self) -> None:
         self.smooth_l1 = 0.0
         self.square = 0.0
         self.count = 0
+        self.window_smooth_l1: list[float] = []
 
     def update(self, prediction: Tensor, target: Tensor, scale: Tensor) -> None:
         normalized_prediction = prediction.float() / scale
         normalized_target = target.float() / scale
-        self.smooth_l1 += float(
-            functional.smooth_l1_loss(
-                normalized_prediction,
-                normalized_target,
-                reduction="sum",
-            ).item()
+        element_smooth_l1 = functional.smooth_l1_loss(
+            normalized_prediction,
+            normalized_target,
+            reduction="none",
         )
+        self.smooth_l1 += float(element_smooth_l1.sum().item())
         self.square += float(
             torch.square(normalized_prediction - normalized_target).sum().item()
         )
         self.count += target.numel()
+        self.window_smooth_l1.extend(
+            element_smooth_l1.mean(dim=(1, 2)).detach().cpu().tolist()
+        )
 
     def result(self) -> dict[str, float]:
         if not self.count:
@@ -131,6 +153,9 @@ class _ErrorAccumulator:
         return {
             "normalized_smooth_l1": self.smooth_l1 / self.count,
             "normalized_rmse": math.sqrt(self.square / self.count),
+            "window_normalized_smooth_l1": summarize_distribution(
+                self.window_smooth_l1
+            ),
         }
 
 

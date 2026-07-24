@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 from midibrave.zrave_config import ZraveModelConfig
 from midibrave.zrave_evaluate import (
+    _ErrorAccumulator,
     acceptance_gate,
     linear_baseline,
     persistence_baseline,
     rollout_prediction,
+    summarize_distribution,
 )
 from midibrave.zrave_model import ZraveStatistics, ZraveTransformer
 
@@ -77,3 +80,39 @@ def test_acceptance_requires_both_baselines_and_stable_variance() -> None:
     assert all(passed["checks"].values())
     assert failed["passed"] is False
     assert failed["checks"]["variance_ratio_64"] is False
+
+
+def test_distribution_summary_exposes_tail() -> None:
+    report = summarize_distribution(np.arange(10, dtype=np.float64))
+
+    assert report == {
+        "median": 4.5,
+        "p10": 0.9,
+        "p90": 8.1,
+        "worst_decile_mean": 9.0,
+        "maximum": 9.0,
+    }
+
+
+def test_error_accumulator_reports_per_window_distribution() -> None:
+    accumulator = _ErrorAccumulator()
+    prediction = torch.zeros(3, 2, 2)
+    target = torch.tensor(
+        [
+            [[0.0, 0.0], [0.0, 0.0]],
+            [[1.0, 1.0], [1.0, 1.0]],
+            [[2.0, 2.0], [2.0, 2.0]],
+        ]
+    )
+
+    accumulator.update(prediction, target, torch.ones(2))
+    report = accumulator.result()
+
+    assert set(report["window_normalized_smooth_l1"]) == {
+        "median",
+        "p10",
+        "p90",
+        "worst_decile_mean",
+        "maximum",
+    }
+    assert report["window_normalized_smooth_l1"]["maximum"] == 1.5
