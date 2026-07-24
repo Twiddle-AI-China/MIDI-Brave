@@ -38,9 +38,17 @@ esac
 
 mkdir -p "$run_root/checkpoints" "$run_root/tensorboard"
 resume_args=()
-resume=$(find "$run_root/checkpoints" -maxdepth 1 -type f \
-  -name 'update-*.pt' -printf '%f\n' | sort | tail -n 1 || true)
+resume=${ZRAVE_RESUME:-}
+if [[ -n "$resume" && "$resume" != "$(basename "$resume")" ]]; then
+  echo "ZRAVE_RESUME must be a checkpoint filename, got: $resume" >&2
+  exit 3
+fi
+if [[ -z "$resume" ]]; then
+  resume=$(find "$run_root/checkpoints" -maxdepth 1 -type f \
+    -name 'update-*.pt' -printf '%f\n' | sort | tail -n 1 || true)
+fi
 if [[ -n "$resume" ]]; then
+  test -f "$run_root/checkpoints/$resume"
   resume_args=(--resume "$container_run/checkpoints/$resume")
 fi
 

@@ -61,6 +61,7 @@ def test_standalone_cloud_jobs_ban_conditional_dependencies() -> None:
     assert "serum-balanced50-mean-v2" in scripts
     assert "zrave_transformer_mean50_v2" in scripts
     assert "posterior_mean_temp0_reset_v1" in scripts
+    assert "zrave_resume" in scripts
     for batch in (1024, 1536, 2048, 2560):
         assert str(batch) in scripts
     assert "--batches 1024 1536 2048 2560" in scripts
