@@ -1,0 +1,638 @@
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+
+import torch
+from torch import Tensor, nn
+
+from .zrave_flow_config import FlowModelConfig
+
+
+@dataclass(frozen=True)
+class FlowStatistics:
+    mean: Tensor
+    latent_std: Tensor
+    delta_std: Tensor
+    latent_norm_p01: Tensor
+    latent_norm_p99: Tensor
+
+    def validate(self, latent_dim: int) -> None:
+        for name in ("mean", "latent_std", "delta_std"):
+            value = getattr(self, name)
+            if value.shape != (latent_dim,):
+                raise ValueError(
+                    f"statistics.{name} must have shape ({latent_dim},), "
+                    f"got {tuple(value.shape)}"
+                )
+            if not torch.isfinite(value).all():
+                raise ValueError(f"statistics.{name} is not finite")
+        if not torch.all(self.latent_std > 0):
+            raise ValueError("statistics.latent_std must be positive")
+        if not torch.all(self.delta_std > 0):
+            raise ValueError("statistics.delta_std must be positive")
+        for name in ("latent_norm_p01", "latent_norm_p99"):
+            value = getattr(self, name)
+            if value.numel() != 1 or not torch.isfinite(value).all():
+                raise ValueError(
+                    f"statistics.{name} must be one finite value"
+                )
+        if self.latent_norm_p01.item() < 0:
+            raise ValueError(
+                "statistics.latent_norm_p01 must be non-negative"
+            )
+        if self.latent_norm_p99.item() <= self.latent_norm_p01.item():
+            raise ValueError(
+                "statistics latent norm percentiles are not ordered"
+            )
+
+
+class AdaLayerNorm(nn.Module):
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.normalization = nn.LayerNorm(width, elementwise_affine=False)
+        self.modulation = nn.Linear(width, 2 * width)
+        nn.init.zeros_(self.modulation.weight)
+        nn.init.zeros_(self.modulation.bias)
+
+    def forward(self, value: Tensor, condition: Tensor) -> Tensor:
+        scale, shift = self.modulation(condition).chunk(2, dim=-1)
+        return (
+            self.normalization(value) * (1.0 + scale.unsqueeze(1))
+            + shift.unsqueeze(1)
+        )
+
+
+class _FutureFlowLayer(nn.Module):
+    def __init__(
+        self,
+        width: int,
+        heads: int,
+        feedforward_dim: int,
+        dropout: float,
+    ) -> None:
+        super().__init__()
+        self.adaln_self = AdaLayerNorm(width)
+        self.self_attention = nn.MultiheadAttention(
+            width,
+            heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.adaln_cross = AdaLayerNorm(width)
+        self.cross_attention = nn.MultiheadAttention(
+            width,
+            heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.adaln_feedforward = AdaLayerNorm(width)
+        self.feedforward = nn.Sequential(
+            nn.Linear(width, feedforward_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(feedforward_dim, width),
+            nn.Dropout(dropout),
+        )
+
+    def forward(
+        self,
+        value: Tensor,
+        condition: Tensor,
+        memory: Tensor,
+        retention: Tensor,
+        future_mask: Tensor,
+    ) -> Tensor:
+        conditioned = self.adaln_self(value, condition)
+        attended = self.self_attention(
+            conditioned,
+            conditioned,
+            conditioned,
+            key_padding_mask=~future_mask,
+            need_weights=False,
+        )[0]
+        value = value + attended
+        query = self.adaln_cross(value, condition)
+        cross = self.cross_attention(
+            query,
+            memory,
+            memory,
+            need_weights=False,
+        )[0]
+        value = value + retention.unsqueeze(-1) * cross
+        value = value + self.feedforward(
+            self.adaln_feedforward(value, condition)
+        )
+        return value
+
+
+def _resolve_model_dimensions(
+    config: FlowModelConfig | None,
+    overrides: dict[str, int | float | None],
+) -> dict[str, int | float]:
+    defaults: dict[str, int | float] = {
+        "latent_dim": 16,
+        "context_frames": 32,
+        "future_frames": 64,
+        "d_model": 384,
+        "context_layers": 4,
+        "future_layers": 8,
+        "heads": 8,
+        "feedforward_dim": 1536,
+        "dropout": 0.0,
+        "note_min": 21,
+        "note_max": 109,
+    }
+    if config is not None:
+        if any(value is not None for value in overrides.values()):
+            raise ValueError(
+                "model dimension overrides cannot accompany config"
+            )
+        return {
+            name: getattr(config, name)
+            for name in defaults
+        }
+    return {
+        name: defaults[name] if value is None else value
+        for name, value in overrides.items()
+    }
+
+
+class ZraveFlowTransformer(nn.Module):
+    def __init__(
+        self,
+        config: FlowModelConfig | None = None,
+        statistics: FlowStatistics | None = None,
+        *,
+        latent_dim: int | None = None,
+        context_frames: int | None = None,
+        future_frames: int | None = None,
+        d_model: int | None = None,
+        context_layers: int | None = None,
+        future_layers: int | None = None,
+        heads: int | None = None,
+        feedforward_dim: int | None = None,
+        dropout: float | None = None,
+        note_min: int | None = None,
+        note_max: int | None = None,
+    ) -> None:
+        super().__init__()
+        dimensions = _resolve_model_dimensions(
+            config,
+            {
+                "latent_dim": latent_dim,
+                "context_frames": context_frames,
+                "future_frames": future_frames,
+                "d_model": d_model,
+                "context_layers": context_layers,
+                "future_layers": future_layers,
+                "heads": heads,
+                "feedforward_dim": feedforward_dim,
+                "dropout": dropout,
+                "note_min": note_min,
+                "note_max": note_max,
+            },
+        )
+        self.latent_dim = int(dimensions["latent_dim"])
+        self.context_frames = int(dimensions["context_frames"])
+        self.future_frames = int(dimensions["future_frames"])
+        self.d_model = int(dimensions["d_model"])
+        self.note_min = int(dimensions["note_min"])
+        self.note_max = int(dimensions["note_max"])
+        context_layer_count = int(dimensions["context_layers"])
+        future_layer_count = int(dimensions["future_layers"])
+        attention_heads = int(dimensions["heads"])
+        feedforward_width = int(dimensions["feedforward_dim"])
+        dropout_probability = float(dimensions["dropout"])
+        if statistics is None:
+            raise ValueError("statistics are required")
+        statistics.validate(self.latent_dim)
+        if self.d_model % attention_heads:
+            raise ValueError("d_model must be divisible by heads")
+        if min(
+            self.latent_dim,
+            self.context_frames,
+            self.future_frames,
+            self.d_model,
+            context_layer_count,
+            future_layer_count,
+            attention_heads,
+            feedforward_width,
+        ) <= 0:
+            raise ValueError("model dimensions must be positive")
+        if not 0.0 <= dropout_probability < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+        if self.note_max < self.note_min:
+            raise ValueError("invalid MIDI note range")
+
+        self.register_buffer("latent_mean", statistics.mean.float().clone())
+        self.register_buffer(
+            "latent_std",
+            statistics.latent_std.float().clone(),
+        )
+        self.register_buffer(
+            "delta_std",
+            statistics.delta_std.float().clone(),
+        )
+        self.register_buffer(
+            "latent_norm_p01",
+            statistics.latent_norm_p01.float().reshape(()).clone(),
+        )
+        self.register_buffer(
+            "latent_norm_p99",
+            statistics.latent_norm_p99.float().reshape(()).clone(),
+        )
+
+        self.history_projection = nn.Linear(self.latent_dim, self.d_model)
+        self.history_position = nn.Parameter(
+            torch.empty(1, self.context_frames, self.d_model)
+        )
+        context_layer = nn.TransformerEncoderLayer(
+            d_model=self.d_model,
+            nhead=attention_heads,
+            dim_feedforward=feedforward_width,
+            dropout=dropout_probability,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.context_encoder = nn.TransformerEncoder(
+            context_layer,
+            num_layers=context_layer_count,
+            norm=nn.LayerNorm(self.d_model),
+            enable_nested_tensor=False,
+        )
+        self.null_memory = nn.Parameter(
+            torch.empty(1, self.context_frames, self.d_model)
+        )
+
+        self.future_projection = nn.Linear(self.latent_dim, self.d_model)
+        self.future_position = nn.Parameter(
+            torch.empty(1, self.future_frames, self.d_model)
+        )
+        self.time_embedding = nn.Sequential(
+            nn.Linear(1, self.d_model),
+            nn.SiLU(),
+            nn.Linear(self.d_model, self.d_model),
+        )
+        note_count = self.note_max - self.note_min + 1
+        self.null_note_index = note_count
+        self.midi_embedding = nn.Embedding(note_count + 1, self.d_model)
+        self.future_layers = nn.ModuleList(
+            _FutureFlowLayer(
+                self.d_model,
+                attention_heads,
+                feedforward_width,
+                dropout_probability,
+            )
+            for _ in range(future_layer_count)
+        )
+        self.output_norm = nn.LayerNorm(self.d_model)
+        self.velocity_projection = nn.Linear(
+            self.d_model,
+            self.latent_dim,
+        )
+        nn.init.normal_(self.history_position, mean=0.0, std=0.02)
+        nn.init.normal_(self.future_position, mean=0.0, std=0.02)
+        nn.init.normal_(self.null_memory, mean=0.0, std=0.02)
+
+    def statistics(self) -> FlowStatistics:
+        return FlowStatistics(
+            mean=self.latent_mean,
+            latent_std=self.latent_std,
+            delta_std=self.delta_std,
+            latent_norm_p01=self.latent_norm_p01,
+            latent_norm_p99=self.latent_norm_p99,
+        )
+
+    def _validate_forward(
+        self,
+        noisy_future: Tensor,
+        flow_time: Tensor,
+        history: Tensor,
+        midi_note: Tensor,
+        retention: Tensor,
+        future_mask: Tensor | None,
+        context_present: Tensor | None,
+    ) -> tuple[Tensor, Tensor]:
+        batch = noisy_future.shape[0] if noisy_future.ndim else 0
+        future_shape = (batch, self.future_frames, self.latent_dim)
+        if noisy_future.ndim != 3 or noisy_future.shape != future_shape:
+            raise ValueError(
+                f"noisy_future must have shape {future_shape}, "
+                f"got {tuple(noisy_future.shape)}"
+            )
+        history_shape = (batch, self.context_frames, self.latent_dim)
+        if history.shape != history_shape:
+            raise ValueError(
+                f"history must have shape {history_shape}, "
+                f"got {tuple(history.shape)}"
+            )
+        for name, value in (
+            ("flow_time", flow_time),
+            ("midi_note", midi_note),
+        ):
+            if value.shape != (batch,):
+                raise ValueError(
+                    f"{name} must have shape ({batch},), "
+                    f"got {tuple(value.shape)}"
+                )
+        if retention.shape != (batch, self.future_frames):
+            raise ValueError(
+                "retention must have shape "
+                f"({batch}, {self.future_frames})"
+            )
+        if not torch.isfinite(noisy_future).all():
+            raise ValueError("noisy_future contains non-finite values")
+        if not torch.isfinite(history).all():
+            raise ValueError("history contains non-finite values")
+        if not torch.isfinite(flow_time).all():
+            raise ValueError("flow_time contains non-finite values")
+        if torch.any(flow_time < 0) or torch.any(flow_time > 1):
+            raise ValueError("flow_time must be in [0, 1]")
+        if not torch.isfinite(retention).all():
+            raise ValueError("retention contains non-finite values")
+        notes = midi_note.to(dtype=torch.long)
+        valid_notes = (notes == -1) | (
+            (notes >= self.note_min) & (notes <= self.note_max)
+        )
+        if not torch.all(valid_notes):
+            raise ValueError(
+                "midi_note must be -1 or in "
+                f"[{self.note_min}, {self.note_max}]"
+            )
+        if midi_note.is_floating_point() and not torch.equal(
+            midi_note,
+            midi_note.round(),
+        ):
+            raise ValueError("midi_note must contain integer values")
+        device = noisy_future.device
+        if future_mask is None:
+            resolved_mask = torch.ones(
+                batch,
+                self.future_frames,
+                device=device,
+                dtype=torch.bool,
+            )
+        else:
+            if future_mask.shape != (batch, self.future_frames):
+                raise ValueError(
+                    "future_mask must have shape "
+                    f"({batch}, {self.future_frames})"
+                )
+            resolved_mask = future_mask.to(device=device, dtype=torch.bool)
+        if not torch.all(resolved_mask.any(dim=1)):
+            raise ValueError("every future_mask row needs one valid frame")
+        if context_present is None:
+            resolved_context = torch.ones(
+                batch,
+                device=device,
+                dtype=torch.bool,
+            )
+        else:
+            if context_present.shape != (batch,):
+                raise ValueError(
+                    f"context_present must have shape ({batch},)"
+                )
+            resolved_context = context_present.to(
+                device=device,
+                dtype=torch.bool,
+            )
+        return resolved_mask, resolved_context
+
+    def forward(
+        self,
+        noisy_future: Tensor,
+        flow_time: Tensor,
+        history: Tensor,
+        midi_note: Tensor,
+        retention: Tensor,
+        future_mask: Tensor | None = None,
+        context_present: Tensor | None = None,
+    ) -> Tensor:
+        future_mask, context_present = self._validate_forward(
+            noisy_future,
+            flow_time,
+            history,
+            midi_note,
+            retention,
+            future_mask,
+            context_present,
+        )
+        device = noisy_future.device
+        normalized_history = (
+            history.float() - self.latent_mean
+        ) / self.latent_std
+        memory = self.history_projection(normalized_history)
+        memory = self.context_encoder(memory + self.history_position)
+        null_memory = self.null_memory.expand(memory.shape[0], -1, -1)
+        memory = torch.where(
+            context_present[:, None, None],
+            memory,
+            null_memory,
+        )
+
+        notes = midi_note.to(device=device, dtype=torch.long)
+        note_indices = torch.where(
+            notes == -1,
+            torch.full_like(notes, self.null_note_index),
+            notes - self.note_min,
+        )
+        condition = self.time_embedding(
+            flow_time.to(device=device, dtype=torch.float32).unsqueeze(-1)
+        )
+        condition = condition + self.midi_embedding(note_indices)
+        value = self.future_projection(noisy_future.float())
+        value = value + self.future_position
+        value = value.masked_fill(~future_mask.unsqueeze(-1), 0.0)
+        retention = retention.to(device=device, dtype=value.dtype)
+        for layer in self.future_layers:
+            value = layer(
+                value,
+                condition,
+                memory,
+                retention,
+                future_mask,
+            )
+        velocity = self.velocity_projection(self.output_norm(value))
+        return velocity.masked_fill(
+            ~future_mask.unsqueeze(-1),
+            0.0,
+        )
+
+
+def _smoothstep(progress: Tensor) -> Tensor:
+    progress = progress.clamp(0.0, 1.0)
+    return progress * progress * (3.0 - 2.0 * progress)
+
+
+def _schedule_progress(delays: Tensor, frames: int) -> Tensor:
+    if frames <= 1:
+        raise ValueError("frames must be greater than one")
+    if delays.ndim != 1 or delays.numel() == 0:
+        raise ValueError("delays must be a non-empty vector")
+    if not torch.isfinite(delays).all() or torch.any(delays <= 0):
+        raise ValueError("delays must be finite and positive")
+    positions = torch.arange(
+        frames,
+        device=delays.device,
+        dtype=torch.float32,
+    )
+    progress = positions.unsqueeze(0) / delays.float().unsqueeze(1)
+    return _smoothstep(progress)
+
+
+def retention_curve(delays: Tensor, frames: int) -> Tensor:
+    progress = _schedule_progress(delays, frames)
+    return 1.0 - 0.85 * progress
+
+
+def temperature_curve(
+    temperature: Tensor,
+    delays: Tensor,
+    frames: int,
+) -> Tensor:
+    progress = _schedule_progress(delays, frames)
+    temperature = torch.as_tensor(
+        temperature,
+        device=delays.device,
+        dtype=torch.float32,
+    )
+    if temperature.ndim == 0:
+        temperature = temperature.expand(delays.shape[0])
+    if temperature.shape != delays.shape:
+        raise ValueError("temperature and delays must have equal shape")
+    if not torch.isfinite(temperature).all() or torch.any(temperature < 0):
+        raise ValueError("temperature must be finite and non-negative")
+    return temperature.unsqueeze(1) * (0.15 + 0.85 * progress)
+
+
+def derive_block_seed(global_seed: int, block_index: int) -> int:
+    if global_seed < 0:
+        raise ValueError("global_seed must be non-negative")
+    if block_index < 0:
+        raise ValueError("block_index must be non-negative")
+    digest = hashlib.sha256(
+        f"{global_seed}:{block_index}".encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False)
+
+
+def _guided_velocity(
+    model: ZraveFlowTransformer,
+    state: Tensor,
+    flow_time: float,
+    history: Tensor,
+    midi_note: Tensor,
+    retention: Tensor,
+    pitch_guidance: float,
+) -> Tensor:
+    times = torch.full(
+        (state.shape[0],),
+        flow_time,
+        device=state.device,
+        dtype=torch.float32,
+    )
+    full = model(
+        state,
+        times,
+        history,
+        midi_note,
+        retention,
+    )
+    no_pitch = model(
+        state,
+        times,
+        history,
+        torch.full_like(midi_note, -1),
+        retention,
+    )
+    return no_pitch + pitch_guidance * (full - no_pitch)
+
+
+def sample_flow_block(
+    model: ZraveFlowTransformer,
+    statistics: FlowStatistics,
+    history: Tensor,
+    midi_note: Tensor,
+    *,
+    generation_seed: int,
+    block_index: int,
+    temperature: float,
+    wander_delay_frames: int,
+    pitch_guidance: float,
+    solver_steps: int,
+) -> Tensor:
+    if not torch.isfinite(torch.tensor(temperature)) or temperature < 0:
+        raise ValueError("temperature must be finite and non-negative")
+    if wander_delay_frames not in {16, 32, 48}:
+        raise ValueError("wander_delay_frames must be 16, 32, or 48")
+    if not 1.0 <= pitch_guidance <= 5.0:
+        raise ValueError("pitch_guidance must be in [1, 5]")
+    if solver_steps not in {4, 8, 12}:
+        raise ValueError("solver_steps must be 4, 8, or 12")
+    statistics.validate(model.latent_dim)
+    device = next(model.parameters()).device
+    history = history.to(device=device)
+    midi_note = midi_note.to(device=device)
+    batch = history.shape[0] if history.ndim else 0
+    if midi_note.shape != (batch,):
+        raise ValueError(f"midi_note must have shape ({batch},)")
+    delay = torch.full(
+        (batch,),
+        wander_delay_frames,
+        device=device,
+        dtype=torch.long,
+    )
+    retention = retention_curve(delay, model.future_frames)
+    temperatures = temperature_curve(
+        torch.full(
+            (batch,),
+            temperature,
+            device=device,
+            dtype=torch.float32,
+        ),
+        delay,
+        model.future_frames,
+    )
+    generator = torch.Generator(device=device)
+    generator.manual_seed(derive_block_seed(generation_seed, block_index))
+    state = torch.randn(
+        batch,
+        model.future_frames,
+        model.latent_dim,
+        generator=generator,
+        device=device,
+        dtype=torch.float32,
+    )
+    state = state * temperatures.unsqueeze(-1)
+    step = 1.0 / solver_steps
+    with torch.no_grad():
+        for index in range(solver_steps):
+            t0 = index * step
+            v0 = _guided_velocity(
+                model,
+                state,
+                t0,
+                history,
+                midi_note,
+                retention,
+                pitch_guidance,
+            )
+            proposal = state + step * v0
+            v1 = _guided_velocity(
+                model,
+                proposal,
+                min(1.0, t0 + step),
+                history,
+                midi_note,
+                retention,
+                pitch_guidance,
+            )
+            state = state + 0.5 * step * (v0 + v1)
+    mean = statistics.mean.to(device=device, dtype=state.dtype)
+    latent_std = statistics.latent_std.to(
+        device=device,
+        dtype=state.dtype,
+    )
+    return state * latent_std + mean
