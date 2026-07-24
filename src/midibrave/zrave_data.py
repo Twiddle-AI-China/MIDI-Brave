@@ -40,6 +40,22 @@ def _sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _verified_codec_hash(config: ZraveConfig) -> str:
+    checkpoint = Path(config.rave.checkpoint)
+    if not checkpoint.is_file():
+        raise FileNotFoundError(
+            f"missing standalone RAVE checkpoint: {checkpoint}"
+        )
+    actual = _sha256_file(checkpoint)
+    expected = config.rave.expected_sha256
+    if expected is not None and actual != expected:
+        raise ValueError(
+            f"standalone RAVE checkpoint SHA-256 mismatch: "
+            f"{actual} != {expected}"
+        )
+    return actual
+
+
 def _stable_key(seed: int, *values: object) -> bytes:
     payload = ":".join([str(seed), "zrave-balanced50", *map(str, values)])
     return hashlib.sha256(payload.encode("utf-8")).digest()
@@ -227,9 +243,7 @@ class PackedDatasetMetadata:
 def pack_cached_latents(config: ZraveConfig) -> PackedDatasetMetadata:
     rows = read_jsonl(config.data.selected_manifest)
     checkpoint_path = Path(config.rave.checkpoint)
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(f"missing RAVE checkpoint: {checkpoint_path}")
-    checkpoint_hash = _sha256_file(checkpoint_path)
+    checkpoint_hash = _verified_codec_hash(config)
     split_codes = {"train": 0, "validation": 1, "test": 2}
     sequences: list[np.ndarray] = []
     lengths: list[int] = []
@@ -340,6 +354,8 @@ def pack_cached_latents(config: ZraveConfig) -> PackedDatasetMetadata:
         "warmup_frames": config.data.warmup_frames,
         "rave_checkpoint": str(checkpoint_path.resolve()),
         "rave_checkpoint_sha256": checkpoint_hash,
+        "rave_codec": "standalone_torchscript_rave",
+        "rave_sample_rate": config.rave.sample_rate,
         "selected_manifest": str(
             Path(config.data.selected_manifest).resolve()
         ),
@@ -400,50 +416,68 @@ def cache_selected_latents(
 ) -> dict[str, object]:
     import torch
 
-    from .config import Config as SourceConfig
     from .data import load_audio
     from .latent_cache import save_latent_cache
-    from .rave_encoder import RaveEncoder
 
     if world_size <= 0 or not 0 <= rank < world_size:
         raise ValueError("rank must satisfy 0 <= rank < world_size")
-    source_config = SourceConfig.load(config.rave.source_config)
-    if source_config.predictive is None:
-        raise ValueError("source RAVE config must be predictive")
-    predictive = source_config.predictive
-    if predictive.rave_latent_dim != config.model.latent_dim:
-        raise ValueError("source RAVE latent dimension does not match Z-RAVE")
-    if predictive.samples_per_latent != config.data.latent_hop:
-        raise ValueError("source RAVE hop does not match Z-RAVE")
 
     checkpoint_path = Path(config.rave.checkpoint)
-    checkpoint_hash = _sha256_file(checkpoint_path)
-    payload = torch.load(
-        checkpoint_path,
-        map_location="cpu",
-        weights_only=False,
+    checkpoint_hash = _verified_codec_hash(config)
+    codec = torch.jit.load(
+        str(checkpoint_path),
+        map_location=device,
+    ).to(device).eval()
+    sample_rate_value = codec.sr
+    if hasattr(sample_rate_value, "__len__"):
+        sample_rate_value = sample_rate_value[0]
+    sample_rate = int(sample_rate_value)
+    latent_dim = int(codec.latent_size)
+    if sample_rate != config.rave.sample_rate:
+        raise ValueError(
+            f"standalone RAVE sample rate mismatch: "
+            f"{sample_rate} != {config.rave.sample_rate}"
+        )
+    if latent_dim != config.model.latent_dim:
+        raise ValueError(
+            f"standalone RAVE latent dimension mismatch: "
+            f"{latent_dim} != {config.model.latent_dim}"
+        )
+
+    probe_frames = 4
+    probe_audio = torch.zeros(
+        1,
+        1,
+        probe_frames * config.data.latent_hop,
+        device=device,
     )
-    if not isinstance(payload, dict) or not isinstance(
-        payload.get("model"),
-        dict,
+    with torch.inference_mode():
+        probe_latent = codec.encode(probe_audio)
+        probe_decoded = codec.decode(probe_latent)
+    expected_latent_shape = (
+        1,
+        config.model.latent_dim,
+        probe_frames,
+    )
+    if tuple(probe_latent.shape) != expected_latent_shape:
+        raise ValueError(
+            "standalone RAVE latent hop/layout mismatch: "
+            f"{tuple(probe_latent.shape)} != {expected_latent_shape}"
+        )
+    if (
+        probe_decoded.ndim != 3
+        or probe_decoded.shape[0] != 1
+        or probe_decoded.shape[1] != 1
+        or probe_decoded.shape[-1]
+        != probe_frames * config.data.latent_hop
     ):
-        raise ValueError("RAVE source checkpoint must contain model weights")
-    encoder = RaveEncoder(
-        source_config.model.pqmf_bands,
-        predictive.rave_latent_dim,
-        source_config.model.ratios,
-        source_config.model.capacity,
-        source_config.model.pqmf_taps,
-    ).to(device)
-    encoder_state = {
-        key.removeprefix("encoder."): value
-        for key, value in payload["model"].items()
-        if key.startswith("encoder.")
-    }
-    if not encoder_state:
-        raise ValueError("RAVE source checkpoint has no encoder weights")
-    encoder.load_state_dict(encoder_state)
-    encoder.eval()
+        raise ValueError(
+            "standalone RAVE decoder output does not match the latent hop"
+        )
+    if not torch.isfinite(probe_latent).all() or not torch.isfinite(
+        probe_decoded
+    ).all():
+        raise ValueError("standalone RAVE codec probe produced non-finite data")
 
     rows = read_jsonl(config.data.selected_manifest)
     selected = rows[rank::world_size]
@@ -458,14 +492,24 @@ def cache_selected_latents(
             audio_path = (
                 Path(config.data.audio_root) / str(row["audio_path"])
             ).resolve()
-            audio = load_audio(audio_path, source_config.data.sample_rate)
+            audio = load_audio(audio_path, sample_rate)
             usable = len(audio) - len(audio) % config.data.latent_hop
             if usable < config.data.latent_hop:
                 raise ValueError(f"audio is too short: {sample_id}")
             tensor = torch.from_numpy(audio[:usable]).view(1, 1, -1).to(
                 device
             )
-            latent = encoder(tensor, sample=False).latent[0].cpu().numpy()
+            latent_tensor = codec.encode(tensor)
+            if (
+                latent_tensor.ndim != 3
+                or latent_tensor.shape[0] != 1
+                or latent_tensor.shape[1] != config.model.latent_dim
+            ):
+                raise ValueError(
+                    f"standalone RAVE produced invalid latent shape: "
+                    f"{tuple(latent_tensor.shape)}"
+                )
+            latent = latent_tensor[0].float().cpu().numpy()
             save_latent_cache(
                 latent_cache_path(config, sample_id),
                 latent,
@@ -495,6 +539,9 @@ def cache_selected_latents(
         "cached": cached,
         "existing": existing,
         "checkpoint_hash": checkpoint_hash,
+        "codec": "standalone_torchscript_rave",
+        "sample_rate": sample_rate,
+        "latent_hop": config.data.latent_hop,
     }
 
 

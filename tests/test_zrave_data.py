@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from midibrave.latent_cache import save_latent_cache
 from midibrave.zrave_config import (
@@ -17,6 +19,7 @@ from midibrave.zrave_config import (
     ZraveTrainConfig,
 )
 from midibrave.zrave_data import (
+    cache_selected_latents,
     latent_cache_path,
     pack_cached_latents,
     read_jsonl,
@@ -99,8 +102,8 @@ def _fixture_config(tmp_path: Path) -> ZraveConfig:
             packed_root=str(tmp_path / "pack"),
         ),
         rave=ZraveRaveConfig(
-            source_config=str(tmp_path / "source.yaml"),
             checkpoint=str(tmp_path / "checkpoint.pt"),
+            sample_rate=44100,
         ),
         model=ZraveModelConfig(),
         loss=ZraveLossConfig(),
@@ -231,3 +234,89 @@ def test_pack_rejects_cache_contract_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="sample_id mismatch"):
         pack_cached_latents(config)
+
+
+def test_cache_uses_one_standalone_torchscript_codec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _fixture_config(tmp_path)
+    checkpoint = Path(config.rave.checkpoint)
+    checkpoint.write_bytes(b"standalone-rave")
+    selected = Path(config.data.selected_manifest)
+    _write_jsonl(
+        selected,
+        [
+            {
+                "sample_id": "pad-60-127",
+                "preset_id": "pad",
+                "audio_path": "pad.wav",
+                "split": "train",
+                "zrave_category": "Pad",
+            }
+        ],
+    )
+    (tmp_path / "pad.wav").write_bytes(b"fixture")
+
+    class FakeStandaloneRave:
+        sr = torch.tensor([44100])
+        latent_size = 16
+
+        def to(self, device: str) -> "FakeStandaloneRave":
+            assert device == "cpu"
+            return self
+
+        def eval(self) -> "FakeStandaloneRave":
+            return self
+
+        def encode(self, audio: torch.Tensor) -> torch.Tensor:
+            frames = audio.shape[-1] // config.data.latent_hop
+            return torch.ones(1, 16, frames)
+
+        def decode(self, latent: torch.Tensor) -> torch.Tensor:
+            return torch.zeros(
+                latent.shape[0],
+                1,
+                latent.shape[-1] * config.data.latent_hop,
+            )
+
+    load_calls: list[tuple[str, object]] = []
+
+    def fake_load(path: str, map_location: object) -> FakeStandaloneRave:
+        load_calls.append((path, map_location))
+        return FakeStandaloneRave()
+
+    monkeypatch.setattr(torch.jit, "load", fake_load)
+    monkeypatch.setattr(
+        "midibrave.data.load_audio",
+        lambda path, sample_rate: np.zeros(
+            config.data.latent_hop * 4,
+            dtype=np.float32,
+        ),
+    )
+
+    report = cache_selected_latents(config, 0, 1, "cpu")
+
+    assert report["cached"] == 1
+    assert report["codec"] == "standalone_torchscript_rave"
+    assert len(load_calls) == 1
+    cache = np.load(latent_cache_path(config, "pad-60-127"))
+    assert cache["latent"].shape == (16, 4)
+    assert cache["checkpoint_hash"].item() == hashlib.sha256(
+        checkpoint.read_bytes()
+    ).hexdigest()
+
+
+def test_zrave_data_has_no_conditional_model_dependency() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "src"
+        / "midibrave"
+        / "zrave_data.py"
+    ).read_text(encoding="utf-8").casefold()
+
+    assert "predictivemidibrave" not in source
+    assert "raveencoder" not in source
+    assert "sourceconfig" not in source
+    assert "clap" not in source
+    assert "midi_control" not in source

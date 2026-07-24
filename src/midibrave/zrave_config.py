@@ -60,10 +60,9 @@ class ZraveDataConfig:
             raise ValueError("data.presets_per_category must be 10")
         if self.conditions_per_preset != 72:
             raise ValueError("data.conditions_per_preset must be 72")
-        if self.warmup_frames != 64:
-            raise ValueError("data.warmup_frames must be 64")
-        if self.latent_hop != 128:
-            raise ValueError("data.latent_hop must be 128")
+        if self.warmup_frames < 0:
+            raise ValueError("data.warmup_frames must be non-negative")
+        _positive("data.latent_hop", self.latent_hop)
         for name in (
             "preset_metadata",
             "eligible_manifest",
@@ -79,12 +78,24 @@ class ZraveDataConfig:
 
 @dataclass(frozen=True)
 class ZraveRaveConfig:
-    source_config: str
     checkpoint: str
+    sample_rate: int = 44100
+    expected_sha256: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.source_config or not self.checkpoint:
-            raise ValueError("rave source_config and checkpoint are required")
+        if not self.checkpoint:
+            raise ValueError("rave.checkpoint is required")
+        _positive("rave.sample_rate", self.sample_rate)
+        if self.expected_sha256 is not None:
+            value = self.expected_sha256.casefold()
+            if (
+                len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(
+                    "rave.expected_sha256 must be a 64-character hex digest"
+                )
+            object.__setattr__(self, "expected_sha256", value)
 
 
 @dataclass(frozen=True)
@@ -101,11 +112,14 @@ class ZraveModelConfig:
     def __post_init__(self) -> None:
         if self.latent_dim != 16:
             raise ValueError("model.latent_dim must be 16")
-        if self.context_frames != 128:
-            raise ValueError("model.context_frames must be 128")
-        if self.horizon_frames != 16:
-            raise ValueError("model.horizon_frames must be 16")
-        for name in ("d_model", "layers", "heads", "feedforward_dim"):
+        for name in (
+            "context_frames",
+            "horizon_frames",
+            "d_model",
+            "layers",
+            "heads",
+            "feedforward_dim",
+        ):
             _positive(f"model.{name}", getattr(self, name))
         if self.d_model % self.heads:
             raise ValueError("model.d_model must be divisible by model.heads")
