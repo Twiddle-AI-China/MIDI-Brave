@@ -188,3 +188,48 @@ def test_benchmark_reports_valid_frame_throughput_and_exposure() -> None:
         report["median_valid_latent_frames_per_second"]
         == 16384.0
     )
+
+
+def test_flow_checkpoint_restores_only_explicit_gate_state(
+    tmp_path: Path,
+) -> None:
+    torch.manual_seed(5)
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    sampler = _TinySampler(seed=6)
+    controller = PitchWeightController()
+    contract = {
+        "world_size": 1,
+        "batch_per_gpu": 2,
+        "config_sha256": "a" * 64,
+        "pack_index_sha256": "b" * 64,
+        "statistics_sha256": "c" * 64,
+        "pitch_checkpoint_sha256": "d" * 64,
+        "pitch_qualification_sha256": "e" * 64,
+    }
+    checkpoint = tmp_path / "gated.pt"
+    save_flow_checkpoint(
+        checkpoint,
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=controller,
+        update=5000,
+        contract=contract,
+        latest_gate_report_sha256="f" * 64,
+        consecutive_gate_passes=2,
+    )
+
+    restored = load_flow_checkpoint(
+        checkpoint,
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=controller,
+        expected_contract=contract,
+    )
+
+    assert restored["latest_gate_report_sha256"] == "f" * 64
+    assert restored["consecutive_gate_passes"] == 2

@@ -21,6 +21,10 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.tensorboard import SummaryWriter
 
 from .zrave_flow_config import ZraveFlowConfig
+from .zrave_flow_evaluate import (
+    GateEarlyStopState,
+    evaluate_flow_checkpoint,
+)
 from .zrave_flow_loss import (
     FlowLossReport,
     PitchWeightController,
@@ -1179,6 +1183,10 @@ def _train(args: argparse.Namespace) -> None:
         consecutive_gate_passes = int(
             restored["consecutive_gate_passes"]
         )
+    gate_state = GateEarlyStopState(
+        required_consecutive_passes=config.train.early_stop_gate_passes,
+        consecutive_passes=consecutive_gate_passes,
+    )
     output_root = Path(config.train.output_root)
     checkpoint_root = output_root / "checkpoints"
     writer = (
@@ -1186,6 +1194,7 @@ def _train(args: argparse.Namespace) -> None:
         if rank == 0
         else None
     )
+    stopped_early = False
     while update < runtime["maximum_updates"]:
         result = _run_flow_update(
             training_model=runtime["training_model"],
@@ -1257,15 +1266,99 @@ def _train(args: argparse.Namespace) -> None:
                 update=update,
                 contract=runtime["contract"],
                 latest_gate_report_sha256=latest_gate_hash,
-                consecutive_gate_passes=consecutive_gate_passes,
+                consecutive_gate_passes=gate_state.consecutive_passes,
             )
             if dist.is_initialized():
                 dist.barrier()
-            if rank == 0 and final_due:
+            evaluation_message: list[object] = [None]
+            if rank == 0:
+                try:
+                    evaluation_root = (
+                        output_root
+                        / "evaluations"
+                        / f"update-{update:08d}"
+                    )
+                    evaluation = evaluate_flow_checkpoint(
+                        config,
+                        checkpoint,
+                        split="validation",
+                        output_root=evaluation_root,
+                        device=runtime["device"],
+                        model=_unwrapped(runtime["training_model"]),
+                    )
+                    stopped_early = gate_state.update(
+                        evaluation["gate"]
+                    )
+                    latest_gate_hash = _sha256_file(
+                        evaluation_root / "evaluation.json"
+                    )
+                    evaluation_message[0] = {
+                        "latest_gate_report_sha256": latest_gate_hash,
+                        "consecutive_gate_passes": (
+                            gate_state.consecutive_passes
+                        ),
+                        "stopped_early": stopped_early,
+                        "gate": evaluation["gate"],
+                    }
+                except Exception as error:
+                    evaluation_message[0] = {
+                        "error": (
+                            f"{type(error).__name__}: {error}"
+                        )
+                    }
+            if dist.is_initialized():
+                dist.broadcast_object_list(
+                    evaluation_message,
+                    src=0,
+                )
+            message = evaluation_message[0]
+            if not isinstance(message, dict):
+                raise RuntimeError("checkpoint evaluation returned no state")
+            if "error" in message:
+                raise RuntimeError(
+                    "checkpoint evaluation failed: "
+                    + str(message["error"])
+                )
+            latest_gate_hash = str(
+                message["latest_gate_report_sha256"]
+            )
+            gate_state.consecutive_passes = int(
+                message["consecutive_gate_passes"]
+            )
+            stopped_early = bool(message["stopped_early"])
+            if writer is not None:
+                writer.add_scalar(
+                    "validation/hard_gate_passed",
+                    float(bool(message["gate"]["passed"])),
+                    update,
+                )
+                writer.add_scalar(
+                    "health/consecutive_gate_passes",
+                    gate_state.consecutive_passes,
+                    update,
+                )
+                writer.flush()
+            save_flow_checkpoint(
+                checkpoint,
+                model=runtime["training_model"],
+                optimizer=runtime["optimizer"],
+                scaler=runtime["scaler"],
+                sampler=runtime["train_sampler"],
+                pitch_weight_controller=runtime["controller"],
+                update=update,
+                contract=runtime["contract"],
+                latest_gate_report_sha256=latest_gate_hash,
+                consecutive_gate_passes=gate_state.consecutive_passes,
+            )
+            if dist.is_initialized():
+                dist.barrier()
+            if rank == 0 and (final_due or stopped_early):
                 _atomic_copy(
                     checkpoint,
                     checkpoint_root / "final.pt",
                 )
+            if stopped_early:
+                break
     if writer is not None:
         writer.close()
     if dist.is_initialized():
