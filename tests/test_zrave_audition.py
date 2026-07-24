@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+import midibrave.zrave_audition as audition
 from midibrave.zrave_audition import (
     _decode_latent,
     crop_decoded_future,
@@ -121,6 +122,33 @@ def test_deterministic_start_stays_inside_sequence() -> None:
         deterministic_start("sample-a", 85, 86, 20260724)
 
 
+def test_deterministic_start_reserves_decoder_preroll() -> None:
+    first = deterministic_start(
+        "sample-a",
+        103,
+        32,
+        20260724,
+        minimum_start=32,
+    )
+
+    assert first == deterministic_start(
+        "sample-a",
+        103,
+        32,
+        20260724,
+        minimum_start=32,
+    )
+    assert 32 <= first <= 103 - 32
+    with pytest.raises(ValueError, match="pre-roll"):
+        deterministic_start(
+            "sample-a",
+            63,
+            32,
+            20260724,
+            minimum_start=32,
+        )
+
+
 def test_triplet_uses_one_gain_and_preserves_relative_levels() -> None:
     source = np.full(16, 0.25, np.float32)
     direct = np.full(16, 0.50, np.float32)
@@ -167,6 +195,32 @@ def test_codec_decode_seed_makes_stochastic_render_repeatable() -> None:
     second = _decode_latent(codec, latent, 20260724)
 
     np.testing.assert_array_equal(first, second)
+
+
+def test_prerolled_decode_removes_cold_start_before_gain() -> None:
+    class ColdStartCodec(torch.nn.Module):
+        def decode(self, latent: torch.Tensor) -> torch.Tensor:
+            decoded = torch.repeat_interleave(
+                latent[:, :1],
+                repeats=4,
+                dim=2,
+            )
+            decoded[:, :, :8] = 100.0
+            return decoded
+
+    preroll = torch.zeros(1, 16, 2)
+    audible = torch.ones(1, 16, 3)
+
+    decoded = audition.decode_prerolled_latent(
+        ColdStartCodec(),
+        preroll,
+        audible,
+        20260724,
+        latent_hop=4,
+    )
+
+    np.testing.assert_array_equal(decoded, np.ones(12, np.float32))
+    assert audition.shared_peak_gain(decoded) == pytest.approx(0.95)
 
 
 def test_rollout_consumes_all_eight_frame_chunks() -> None:
@@ -322,6 +376,7 @@ def test_long_rollout_manifest_requires_exact_stress_contract() -> None:
         "latent_dim": 16,
         "seed_frames": 32,
         "predicted_frames": 320,
+        "decoder_preroll_frames": 32,
         "horizon_frames": 8,
         "rollout_calls": 40,
         "conditioning": [],
@@ -332,6 +387,7 @@ def test_long_rollout_manifest_requires_exact_stress_contract() -> None:
                 "category": category,
                 "split": "test",
                 "sample_count": 720896,
+                "decoder_preroll_frames": 32,
                 "file": f"audio/{category.casefold()}.wav",
             }
             for index, category in enumerate(CATEGORIES, 1)
@@ -342,6 +398,11 @@ def test_long_rollout_manifest_requires_exact_stress_contract() -> None:
 
     manifest["predicted_frames"] = 319
     with pytest.raises(ValueError, match="320 predicted"):
+        validate_long_rollout_manifest(manifest, CATEGORIES)
+
+    manifest["predicted_frames"] = 320
+    manifest["decoder_preroll_frames"] = 0
+    with pytest.raises(ValueError, match="decoder pre-roll"):
         validate_long_rollout_manifest(manifest, CATEGORIES)
 
 

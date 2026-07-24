@@ -143,17 +143,28 @@ def deterministic_start(
     length: int,
     required_frames: int,
     seed: int,
+    *,
+    minimum_start: int = 0,
 ) -> int:
     if required_frames <= 0:
         raise ValueError("required frames must be positive")
-    if length < required_frames:
+    if minimum_start < 0:
+        raise ValueError("minimum start must not be negative")
+    if length < minimum_start + required_frames:
+        if minimum_start:
+            raise ValueError(
+                f"latent sequence cannot reserve {minimum_start} "
+                f"decoder pre-roll frames and {required_frames} "
+                f"audible frames: {sample_id} has {length}"
+            )
         raise ValueError(
             f"latent sequence is shorter than {required_frames}: "
             f"{sample_id} has {length}"
         )
     payload = f"{seed}:zrave-audition:{sample_id}".encode("utf-8")
     value = int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
-    return value % (length - required_frames + 1)
+    available_starts = length - minimum_start - required_frames + 1
+    return minimum_start + value % available_starts
 
 
 def _mono_float32(value: np.ndarray, name: str) -> np.ndarray:
@@ -410,6 +421,9 @@ def validate_long_rollout_manifest(
     latent_dim = int(manifest.get("latent_dim") or 0)
     seed_frames = int(manifest.get("seed_frames") or 0)
     predicted_frames = int(manifest.get("predicted_frames") or 0)
+    decoder_preroll_frames = int(
+        manifest.get("decoder_preroll_frames") or 0
+    )
     horizon_frames = int(manifest.get("horizon_frames") or 0)
     rollout_calls = int(manifest.get("rollout_calls") or 0)
     if min(sample_rate, latent_hop, latent_dim, horizon_frames) <= 0:
@@ -418,6 +432,10 @@ def validate_long_rollout_manifest(
         raise ValueError("long rollout requires exactly 32 seed frames")
     if predicted_frames != 320:
         raise ValueError("long rollout requires exactly 320 predicted frames")
+    if decoder_preroll_frames != 32:
+        raise ValueError(
+            "long rollout requires exactly 32 decoder pre-roll frames"
+        )
     if predicted_frames % horizon_frames != 0:
         raise ValueError("predicted frames must contain complete horizons")
     if rollout_calls != predicted_frames // horizon_frames:
@@ -446,6 +464,10 @@ def validate_long_rollout_manifest(
             row.get("predicted_frames") or predicted_frames
         ) != predicted_frames:
             raise ValueError("long rollout row prediction length mismatch")
+        if int(row.get("decoder_preroll_frames") or 0) != (
+            decoder_preroll_frames
+        ):
+            raise ValueError("long rollout row decoder pre-roll mismatch")
         if not str(row.get("file") or ""):
             raise ValueError("long rollout row audio file is required")
     expected = [(category, "test") for category in category_order]
@@ -583,6 +605,37 @@ def _decode_latent(
             f"{tuple(decoded.shape)}"
         )
     return _mono_float32(decoded[0, 0], "decoded")
+
+
+def decode_prerolled_latent(
+    codec: Any,
+    preroll: Tensor,
+    audible: Tensor,
+    random_seed: int,
+    *,
+    latent_hop: int,
+) -> np.ndarray:
+    if latent_hop <= 0:
+        raise ValueError("latent hop must be positive")
+    if preroll.ndim != 3 or audible.ndim != 3:
+        raise ValueError("pre-roll and audible latents must be rank three")
+    if preroll.shape[:2] != audible.shape[:2]:
+        raise ValueError("pre-roll and audible latent layouts must match")
+    if preroll.shape[0] != 1:
+        raise ValueError("pre-rolled decode requires a single sequence")
+    if preroll.shape[2] <= 0 or audible.shape[2] <= 0:
+        raise ValueError("pre-roll and audible latents must not be empty")
+
+    combined = torch.cat((preroll, audible), dim=2)
+    decoded = _decode_latent(codec, combined, random_seed)
+    sample_start = int(preroll.shape[2]) * latent_hop
+    sample_end = sample_start + int(audible.shape[2]) * latent_hop
+    if decoded.shape[0] < sample_end:
+        raise ValueError(
+            f"pre-rolled decode is too short: "
+            f"{decoded.shape[0]} < {sample_end}"
+        )
+    return np.ascontiguousarray(decoded[sample_start:sample_end])
 
 
 def _audio_path(
@@ -988,6 +1041,7 @@ def render_long_rollout(
     latent_hop = config.data.latent_hop
     total_frames = seed_frames + predicted_frames
     expected_samples = total_frames * latent_hop
+    decoder_preroll_frames = seed_frames
     rollout_calls = math.ceil(
         predicted_frames / config.model.horizon_frames
     )
@@ -1000,6 +1054,7 @@ def render_long_rollout(
             int(row["length"]),
             seed_frames,
             random_seed,
+            minimum_start=decoder_preroll_frames,
         )
         sequence = torch.from_numpy(
             np.asarray(
@@ -1010,6 +1065,10 @@ def render_long_rollout(
                 dtype=np.float32,
             ).copy()
         ).to(device).unsqueeze(0)
+        preroll = sequence[
+            :,
+            start - decoder_preroll_frames : start,
+        ]
         history = sequence[:, start : start + seed_frames]
         prediction = rollout_latents(
             transformer,
@@ -1020,15 +1079,23 @@ def render_long_rollout(
             raise ValueError(
                 f"long rollout prediction is non-finite: {sample_id}"
             )
-        latent = torch.cat((history, prediction), dim=1).transpose(1, 2)
+        audible_latent = torch.cat(
+            (history, prediction),
+            dim=1,
+        ).transpose(1, 2)
         codec_seed = random_seed + row_index
-        decoded = _decode_latent(codec, latent, codec_seed)
-        if decoded.shape[0] < expected_samples:
+        decoded = decode_prerolled_latent(
+            codec,
+            preroll.transpose(1, 2),
+            audible_latent,
+            codec_seed,
+            latent_hop=latent_hop,
+        )
+        if decoded.shape[0] != expected_samples:
             raise ValueError(
-                f"long rollout decode is too short: "
-                f"{decoded.shape[0]} < {expected_samples}"
+                f"long rollout decode length mismatch: "
+                f"{decoded.shape[0]} != {expected_samples}"
             )
-        decoded = np.ascontiguousarray(decoded[:expected_samples])
         gain = shared_peak_gain(decoded)
         decoded = np.ascontiguousarray(decoded * gain)
         stem = f"{row_index:02d}-{str(row['category']).casefold()}-test"
@@ -1049,6 +1116,7 @@ def render_long_rollout(
                 "window_start": start,
                 "seed_frames": seed_frames,
                 "predicted_frames": predicted_frames,
+                "decoder_preroll_frames": decoder_preroll_frames,
                 "seed_boundary_seconds": (
                     seed_frames * latent_hop / sample_rate
                 ),
@@ -1068,6 +1136,7 @@ def render_long_rollout(
         "latent_dim": config.model.latent_dim,
         "seed_frames": seed_frames,
         "predicted_frames": predicted_frames,
+        "decoder_preroll_frames": decoder_preroll_frames,
         "total_frames": total_frames,
         "horizon_frames": config.model.horizon_frames,
         "rollout_calls": rollout_calls,
