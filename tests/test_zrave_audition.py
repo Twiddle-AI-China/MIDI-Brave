@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from midibrave.zrave_audition import (
+    _decode_latent,
     crop_decoded_future,
     crop_source_future,
     deterministic_start,
@@ -135,6 +136,23 @@ def test_triplet_rejects_misaligned_or_invalid_audio() -> None:
         prepare_triplet(valid, np.full(16, np.nan, np.float32), valid)
     with pytest.raises(ValueError, match="silent"):
         prepare_triplet(np.zeros(16), np.zeros(16), np.zeros(16))
+
+
+def test_codec_decode_seed_makes_stochastic_render_repeatable() -> None:
+    class StochasticCodec:
+        def decode(self, latent: torch.Tensor) -> torch.Tensor:
+            return torch.randn(
+                latent.shape[0],
+                1,
+                latent.shape[-1] * 4,
+            )
+
+    latent = torch.zeros(1, 16, 8)
+
+    first = _decode_latent(StochasticCodec(), latent, 20260724)
+    second = _decode_latent(StochasticCodec(), latent, 20260724)
+
+    np.testing.assert_array_equal(first, second)
 
 
 def test_rollout_consumes_all_eight_frame_chunks() -> None:
@@ -282,7 +300,7 @@ def test_octopus_audition_uses_exactly_one_slurm_gpu() -> None:
     assert "#SBATCH --gres=gpu:2" not in script
     assert "scripts/render_zrave_audition.py" in script
     assert "checkpoints/best.pt" in script
-    assert "standalone-best-v1" in script
+    assert "standalone-best-v2" in script
     assert "zrave-sequence-comparison/index.html" in script
     assert "/srv/data-branches/nvme/datasets" in script
     assert "-v /data:/data" not in script
@@ -308,3 +326,5 @@ def test_renderer_has_no_conditional_model_dependency() -> None:
     assert "torch.jit.load" in module
     assert ".encode(" in module
     assert ".decode(" in module
+    assert "torch.manual_seed" in module
+    assert "torch.cuda.manual_seed_all" in module

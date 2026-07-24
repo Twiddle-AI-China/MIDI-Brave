@@ -19,8 +19,8 @@ root=/srv/data-branches/nvme/midibrave-zrave
 container_root=/data/midibrave-zrave-standalone
 checkpoint=$root/runs/zrave_transformer_balanced50/checkpoints/best.pt
 container_checkpoint=$container_root/runs/zrave_transformer_balanced50/checkpoints/best.pt
-output=$root/audition/standalone-best-v1
-container_output=$container_root/audition/standalone-best-v1
+output=$root/audition/standalone-best-v2
+container_output=$container_root/audition/standalone-best-v2
 
 test -f "$checkpoint"
 if [[ -e "$output" ]]; then

@@ -488,34 +488,14 @@ def _load_codec(
     return codec
 
 
-def _encode_audio(
+def _decode_latent(
     codec: Any,
-    audio: np.ndarray,
-    latent_hop: int,
-    device: torch.device,
-) -> Tensor:
-    usable = audio.shape[0] - audio.shape[0] % latent_hop
-    if usable < latent_hop:
-        raise ValueError("source audio is too short for standalone RAVE")
-    tensor = torch.from_numpy(
-        np.asarray(audio[:usable], dtype=np.float32)
-    ).view(1, 1, -1).to(device)
-    latent = codec.encode(tensor).float()
-    if (
-        latent.ndim != 3
-        or latent.shape[0] != 1
-        or latent.shape[-1] != usable // latent_hop
-    ):
-        raise ValueError(
-            f"standalone RAVE returned invalid latent shape: "
-            f"{tuple(latent.shape)}"
-        )
-    if not torch.isfinite(latent).all():
-        raise ValueError("standalone RAVE encoder returned non-finite data")
-    return latent
-
-
-def _decode_latent(codec: Any, latent: Tensor) -> np.ndarray:
+    latent: Tensor,
+    random_seed: int,
+) -> np.ndarray:
+    torch.manual_seed(random_seed)
+    if latent.is_cuda:
+        torch.cuda.manual_seed_all(random_seed)
     decoded = codec.decode(latent).detach().float().cpu().numpy()
     if decoded.ndim != 3 or decoded.shape[:2] != (1, 1):
         raise ValueError(
@@ -551,46 +531,6 @@ def _atomic_json(path: Path, value: object) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
-
-
-def _assert_cache_matches_encoding(
-    packed: np.ndarray,
-    sequence_index: int,
-    sequence_length: int,
-    encoded: Tensor,
-    warmup_frames: int,
-) -> float:
-    fresh = (
-        encoded[
-            0,
-            :,
-            warmup_frames : warmup_frames + sequence_length,
-        ]
-        .transpose(0, 1)
-        .detach()
-        .cpu()
-        .numpy()
-    )
-    cached = np.asarray(
-        packed[sequence_index, :sequence_length],
-        dtype=np.float32,
-    )
-    if fresh.shape != cached.shape:
-        raise ValueError(
-            f"fresh/cache latent shape mismatch: "
-            f"{fresh.shape} != {cached.shape}"
-        )
-    maximum_error = float(np.max(np.abs(fresh - cached)))
-    tolerance = max(
-        5.0e-3,
-        float(np.max(np.abs(fresh))) * 5.0e-3,
-    )
-    if maximum_error > tolerance:
-        raise ValueError(
-            f"fresh standalone RAVE encoding does not match packed cache: "
-            f"{maximum_error} > {tolerance}"
-        )
-    return maximum_error
 
 
 @torch.inference_mode()
@@ -669,24 +609,15 @@ def render_audition(
     codec = _load_codec(config, device)
     packed = np.load(latents_path, mmap_mode="r", allow_pickle=False)
 
-    encoded_by_id: dict[str, Tensor] = {}
     audio_by_id: dict[str, np.ndarray] = {}
-    cache_errors: dict[str, float] = {}
     for row in [*selected, *random_rows]:
         sample_id = str(row["sample_id"])
-        if sample_id in encoded_by_id:
+        if sample_id in audio_by_id:
             continue
-        audio = load_audio(_audio_path(config, row), sample_rate)
-        encoded = _encode_audio(codec, audio, latent_hop, device)
-        cache_errors[sample_id] = _assert_cache_matches_encoding(
-            packed,
-            int(row["sequence_index"]),
-            int(row["length"]),
-            encoded,
-            config.data.warmup_frames,
+        audio_by_id[sample_id] = load_audio(
+            _audio_path(config, row),
+            sample_rate,
         )
-        audio_by_id[sample_id] = audio
-        encoded_by_id[sample_id] = encoded
 
     comparisons: list[dict[str, object]] = []
     for row_index, row in enumerate(selected, 1):
@@ -697,35 +628,57 @@ def render_audition(
             required_frames,
             random_seed,
         )
-        encoded = encoded_by_id[sample_id]
-        latent_start = config.data.warmup_frames + start
-        future_start = latent_start + context_frames
+        sequence = torch.from_numpy(
+            np.asarray(
+                packed[
+                    int(row["sequence_index"]),
+                    : int(row["length"]),
+                ],
+                dtype=np.float32,
+            ).copy()
+        ).to(device).unsqueeze(0)
+        future_start = start + context_frames
         future_end = future_start + future_frames
-        history = encoded[
-            :,
-            :,
-            latent_start:future_start,
-        ].transpose(1, 2)
+        history = sequence[:, start:future_start]
         predicted_future = rollout_latents(
             transformer,
             history,
             future_frames,
         )
-        direct_latent = encoded[:, :, :future_end]
+        direct_latent = sequence[:, :future_end].transpose(1, 2)
         predicted_latent = torch.cat(
             (
-                encoded[:, :, :future_start],
-                predicted_future.transpose(1, 2),
+                sequence[:, :future_start],
+                predicted_future,
             ),
-            dim=2,
+            dim=1,
+        ).transpose(1, 2)
+        codec_seed = random_seed + row_index
+        direct_full = _decode_latent(
+            codec,
+            direct_latent,
+            codec_seed,
         )
-        direct_full = _decode_latent(codec, direct_latent)
-        predicted_full = _decode_latent(codec, predicted_latent)
-        sample_start = future_start * latent_hop
-        sample_end = future_end * latent_hop
-        direct = direct_full[sample_start:sample_end]
-        predicted = predicted_full[sample_start:sample_end]
-        original = audio_by_id[sample_id][sample_start:sample_end]
+        predicted_full = _decode_latent(
+            codec,
+            predicted_latent,
+            codec_seed,
+        )
+        decoded_sample_start = future_start * latent_hop
+        decoded_sample_end = future_end * latent_hop
+        source_sample_start = (
+            config.data.warmup_frames + future_start
+        ) * latent_hop
+        source_sample_end = source_sample_start + future_frames * latent_hop
+        direct = direct_full[
+            decoded_sample_start:decoded_sample_end
+        ]
+        predicted = predicted_full[
+            decoded_sample_start:decoded_sample_end
+        ]
+        original = audio_by_id[sample_id][
+            source_sample_start:source_sample_end
+        ]
         original, direct, predicted, gain = prepare_triplet(
             original,
             direct,
@@ -756,10 +709,10 @@ def render_audition(
                 "sample_id": sample_id,
                 "sequence_index": int(row["sequence_index"]),
                 "window_start": start,
-                "source_sample_start": sample_start,
+                "source_sample_start": source_sample_start,
                 "sample_count": int(original.shape[0]),
                 "shared_gain": gain,
-                "cache_max_abs_error": cache_errors[sample_id],
+                "codec_random_seed": codec_seed,
                 "audio": files,
             }
         )
@@ -773,14 +726,17 @@ def render_audition(
             required_frames,
             random_seed + 1000 + continuation_index,
         )
-        encoded = encoded_by_id[sample_id]
-        latent_start = config.data.warmup_frames + start
-        future_start = latent_start + context_frames
-        history = encoded[
-            :,
-            :,
-            latent_start:future_start,
-        ].transpose(1, 2)
+        sequence = torch.from_numpy(
+            np.asarray(
+                packed[
+                    int(row["sequence_index"]),
+                    : int(row["length"]),
+                ],
+                dtype=np.float32,
+            ).copy()
+        ).to(device).unsqueeze(0)
+        future_start = start + context_frames
+        history = sequence[:, start:future_start]
         prediction = rollout_latents(
             transformer,
             history,
@@ -790,7 +746,8 @@ def render_audition(
             (history, prediction),
             dim=1,
         ).transpose(1, 2)
-        decoded = _decode_latent(codec, latent)
+        codec_seed = random_seed + 100 + continuation_index
+        decoded = _decode_latent(codec, latent, codec_seed)
         expected_samples = required_frames * latent_hop
         if decoded.shape[0] < expected_samples:
             raise ValueError("random continuation decode is too short")
@@ -819,7 +776,7 @@ def render_audition(
                 ),
                 "sample_count": int(decoded.shape[0]),
                 "gain": gain,
-                "cache_max_abs_error": cache_errors[sample_id],
+                "codec_random_seed": codec_seed,
                 "file": relative_path,
             }
         )
@@ -838,6 +795,9 @@ def render_audition(
             future_frames * latent_hop / sample_rate
         ),
         "random_seed": random_seed,
+        "codec_random_seed_policy": (
+            "paired direct/predicted decodes use identical seeds"
+        ),
         "conditioning": [],
         "codec": {
             "kind": _CODEC_KIND,
