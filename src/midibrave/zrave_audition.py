@@ -126,6 +126,18 @@ def select_audition_rows(
     return selected
 
 
+def select_long_rollout_rows(
+    index: dict[str, object],
+    manifest_rows: Iterable[dict[str, object]],
+    categories: Iterable[str],
+) -> list[dict[str, object]]:
+    return [
+        row
+        for row in select_audition_rows(index, manifest_rows, categories)
+        if row["split"] == "test"
+    ]
+
+
 def deterministic_start(
     sample_id: str,
     length: int,
@@ -377,6 +389,70 @@ def validate_audition_manifest(
         transition = float(row.get("transition_seconds") or 0.0)
         if not math.isfinite(transition) or transition <= 0.0:
             raise ValueError("random continuation transition is invalid")
+
+
+def validate_long_rollout_manifest(
+    manifest: dict[str, object],
+    categories: Iterable[str],
+) -> None:
+    if manifest.get("schema") != 1:
+        raise ValueError("unsupported long rollout manifest schema")
+    if manifest.get("conditioning") != []:
+        raise ValueError("long rollout conditioning must be empty")
+    codec = manifest.get("codec")
+    if (
+        not isinstance(codec, dict)
+        or codec.get("kind") != _CODEC_KIND
+    ):
+        raise ValueError("long rollout must use a standalone RAVE codec")
+    sample_rate = int(manifest.get("sample_rate") or 0)
+    latent_hop = int(manifest.get("latent_hop") or 0)
+    latent_dim = int(manifest.get("latent_dim") or 0)
+    seed_frames = int(manifest.get("seed_frames") or 0)
+    predicted_frames = int(manifest.get("predicted_frames") or 0)
+    horizon_frames = int(manifest.get("horizon_frames") or 0)
+    rollout_calls = int(manifest.get("rollout_calls") or 0)
+    if min(sample_rate, latent_hop, latent_dim, horizon_frames) <= 0:
+        raise ValueError("long rollout dimensions must be positive")
+    if seed_frames != 32:
+        raise ValueError("long rollout requires exactly 32 seed frames")
+    if predicted_frames != 320:
+        raise ValueError("long rollout requires exactly 320 predicted frames")
+    if predicted_frames % horizon_frames != 0:
+        raise ValueError("predicted frames must contain complete horizons")
+    if rollout_calls != predicted_frames // horizon_frames:
+        raise ValueError("long rollout call count mismatch")
+
+    rows = manifest.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("long rollout rows must be a list")
+    category_order = tuple(categories)
+    expected_samples = (seed_frames + predicted_frames) * latent_hop
+    actual: list[tuple[object, object]] = []
+    identifiers: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("long rollout row must be an object")
+        identifier = str(row.get("id") or "")
+        if not identifier or identifier in identifiers:
+            raise ValueError("long rollout row IDs must be unique")
+        identifiers.add(identifier)
+        actual.append((row.get("category"), row.get("split")))
+        if int(row.get("sample_count") or 0) != expected_samples:
+            raise ValueError("long rollout sample count mismatch")
+        if int(row.get("seed_frames") or seed_frames) != seed_frames:
+            raise ValueError("long rollout row seed length mismatch")
+        if int(
+            row.get("predicted_frames") or predicted_frames
+        ) != predicted_frames:
+            raise ValueError("long rollout row prediction length mismatch")
+        if not str(row.get("file") or ""):
+            raise ValueError("long rollout row audio file is required")
+    expected = [(category, "test") for category in category_order]
+    if actual != expected:
+        raise ValueError(
+            "long rollout must contain one ordered test row per category"
+        )
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -829,4 +905,196 @@ def render_audition(
     }
     validate_audition_manifest(manifest, _CATEGORIES)
     _atomic_json(destination / "audition-manifest.json", manifest)
+    return manifest
+
+
+@torch.inference_mode()
+def render_long_rollout(
+    config_path: str | Path,
+    checkpoint_path: str | Path,
+    output_path: str | Path,
+    *,
+    seed_frames: int = 32,
+    predicted_frames: int = 320,
+    random_seed: int = 20260724,
+    device_name: str = "cuda",
+) -> dict[str, object]:
+    config = ZraveConfig.load(config_path)
+    if seed_frames != config.model.context_frames or seed_frames != 32:
+        raise ValueError("long rollout seed must match the 32-frame context")
+    if predicted_frames != 320:
+        raise ValueError("long rollout requires exactly 320 predicted frames")
+
+    device = torch.device(device_name)
+    packed_root = Path(config.data.packed_root)
+    index_path = packed_root / "index.json"
+    statistics_path = packed_root / "statistics.npz"
+    latents_path = packed_root / "latents.npy"
+    checkpoint = Path(checkpoint_path)
+    codec_path = Path(config.rave.checkpoint)
+    for required in (
+        index_path,
+        statistics_path,
+        latents_path,
+        checkpoint,
+        codec_path,
+    ):
+        if not required.is_file():
+            raise FileNotFoundError(
+                f"missing long rollout artifact: {required}"
+            )
+
+    destination = Path(output_path)
+    if destination.exists() and any(destination.iterdir()):
+        raise FileExistsError(
+            f"long rollout output directory is not empty: {destination}"
+        )
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "audio").mkdir(parents=True, exist_ok=True)
+
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    codec_hash = _sha256_file(codec_path)
+    if index.get("schema") != 1:
+        raise ValueError("unsupported packed index schema")
+    if index.get("rave_codec") != _CODEC_KIND:
+        raise ValueError("packed latents did not come from a standalone codec")
+    if index.get("rave_latent_encoding") != (
+        "posterior_mean_temp0_reset_v1"
+    ):
+        raise ValueError("packed latents are not deterministic posterior means")
+    if index.get("streaming_state_reset_per_clip") is not True:
+        raise ValueError("packed latents contain cross-clip streaming state")
+    if index.get("rave_checkpoint_sha256") != codec_hash:
+        raise ValueError("packed latents and standalone codec do not match")
+    if int(index.get("latent_hop") or 0) != config.data.latent_hop:
+        raise ValueError("packed latent hop does not match config")
+
+    manifest_rows = read_jsonl(config.data.selected_manifest)
+    selected = select_long_rollout_rows(
+        index,
+        manifest_rows,
+        _CATEGORIES,
+    )
+    transformer, transformer_payload = _load_transformer(
+        config,
+        checkpoint,
+        index_path,
+        statistics_path,
+        device,
+    )
+    codec = _load_codec(config, device)
+    packed = np.load(latents_path, mmap_mode="r", allow_pickle=False)
+    sample_rate = config.rave.sample_rate
+    latent_hop = config.data.latent_hop
+    total_frames = seed_frames + predicted_frames
+    expected_samples = total_frames * latent_hop
+    rollout_calls = math.ceil(
+        predicted_frames / config.model.horizon_frames
+    )
+
+    rows: list[dict[str, object]] = []
+    for row_index, row in enumerate(selected, 1):
+        sample_id = str(row["sample_id"])
+        start = deterministic_start(
+            sample_id,
+            int(row["length"]),
+            seed_frames,
+            random_seed,
+        )
+        sequence = torch.from_numpy(
+            np.asarray(
+                packed[
+                    int(row["sequence_index"]),
+                    : int(row["length"]),
+                ],
+                dtype=np.float32,
+            ).copy()
+        ).to(device).unsqueeze(0)
+        history = sequence[:, start : start + seed_frames]
+        prediction = rollout_latents(
+            transformer,
+            history,
+            predicted_frames,
+        )
+        if not torch.isfinite(prediction).all():
+            raise ValueError(
+                f"long rollout prediction is non-finite: {sample_id}"
+            )
+        latent = torch.cat((history, prediction), dim=1).transpose(1, 2)
+        codec_seed = random_seed + row_index
+        decoded = _decode_latent(codec, latent, codec_seed)
+        if decoded.shape[0] < expected_samples:
+            raise ValueError(
+                f"long rollout decode is too short: "
+                f"{decoded.shape[0]} < {expected_samples}"
+            )
+        decoded = np.ascontiguousarray(decoded[:expected_samples])
+        gain = shared_peak_gain(decoded)
+        decoded = np.ascontiguousarray(decoded * gain)
+        stem = f"{row_index:02d}-{str(row['category']).casefold()}-test"
+        relative_path = f"audio/{stem}-seed32-predict320.wav"
+        _write_wav(
+            destination / relative_path,
+            decoded,
+            sample_rate,
+        )
+        rows.append(
+            {
+                "id": stem,
+                "category": row["category"],
+                "split": "test",
+                "preset_id": row["preset_id"],
+                "sample_id": sample_id,
+                "sequence_index": int(row["sequence_index"]),
+                "window_start": start,
+                "seed_frames": seed_frames,
+                "predicted_frames": predicted_frames,
+                "seed_boundary_seconds": (
+                    seed_frames * latent_hop / sample_rate
+                ),
+                "sample_count": int(decoded.shape[0]),
+                "gain": gain,
+                "codec_random_seed": codec_seed,
+                "file": relative_path,
+            }
+        )
+
+    manifest: dict[str, object] = {
+        "schema": 1,
+        "title": "Z-RAVE 32 Seed to 320 Predicted Frames",
+        "categories": list(_CATEGORIES),
+        "sample_rate": sample_rate,
+        "latent_hop": latent_hop,
+        "latent_dim": config.model.latent_dim,
+        "seed_frames": seed_frames,
+        "predicted_frames": predicted_frames,
+        "total_frames": total_frames,
+        "horizon_frames": config.model.horizon_frames,
+        "rollout_calls": rollout_calls,
+        "seed_duration_seconds": seed_frames * latent_hop / sample_rate,
+        "predicted_duration_seconds": (
+            predicted_frames * latent_hop / sample_rate
+        ),
+        "total_duration_seconds": total_frames * latent_hop / sample_rate,
+        "random_seed": random_seed,
+        "conditioning": [],
+        "codec": {
+            "kind": _CODEC_KIND,
+            "path": str(codec_path.resolve()),
+            "sha256": codec_hash,
+            "sample_rate": sample_rate,
+            "latent_dim": config.model.latent_dim,
+            "latent_hop": latent_hop,
+        },
+        "transformer": {
+            "path": str(checkpoint.resolve()),
+            "sha256": _sha256_file(checkpoint),
+            "update": int(transformer_payload["update"]),
+            "architecture": transformer_payload["architecture"],
+        },
+        "packed_index_sha256": _sha256_file(index_path),
+        "rows": rows,
+    }
+    validate_long_rollout_manifest(manifest, _CATEGORIES)
+    _atomic_json(destination / "long-rollout-manifest.json", manifest)
     return manifest

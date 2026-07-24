@@ -16,14 +16,21 @@ from midibrave.zrave_audition import (
     prepare_triplet,
     rollout_latents,
     select_audition_rows,
+    select_long_rollout_rows,
     select_random_seed_rows,
     validate_audition_manifest,
+    validate_long_rollout_manifest,
 )
 
 
 CATEGORIES = ("Pad", "Bass", "Lead", "Pluck", "Keys")
 RENDER_SCRIPT = (
     Path(__file__).parents[1] / "scripts" / "render_zrave_audition.py"
+)
+LONG_RENDER_SCRIPT = (
+    Path(__file__).parents[1]
+    / "scripts"
+    / "render_zrave_long_rollout.py"
 )
 SBATCH_SCRIPT = (
     Path(__file__).parents[1]
@@ -181,6 +188,30 @@ def test_rollout_consumes_all_eight_frame_chunks() -> None:
     )
 
 
+def test_long_rollout_selects_one_test_row_per_class() -> None:
+    index, manifest = _audition_fixtures()
+
+    selected = select_long_rollout_rows(index, manifest, CATEGORIES)
+
+    assert [(row["category"], row["split"]) for row in selected] == [
+        (category, "test") for category in CATEGORIES
+    ]
+
+
+def test_long_rollout_uses_forty_eight_frame_calls() -> None:
+    history = torch.zeros(1, 32, 16)
+    model = _CountingModel()
+
+    predicted = rollout_latents(model, history, 320)
+
+    assert predicted.shape == (1, 320, 16)
+    assert model.calls == 40
+    torch.testing.assert_close(
+        predicted[:, -8:],
+        torch.full((1, 8, 16), 40.0),
+    )
+
+
 def test_future_crop_removes_exact_context() -> None:
     decoded = np.arange((32 + 54) * 2048, dtype=np.float32)
 
@@ -283,6 +314,37 @@ def test_manifest_contract_requires_all_five_classes_and_two_seeds() -> None:
         validate_audition_manifest(manifest, CATEGORIES)
 
 
+def test_long_rollout_manifest_requires_exact_stress_contract() -> None:
+    manifest = {
+        "schema": 1,
+        "sample_rate": 44100,
+        "latent_hop": 2048,
+        "latent_dim": 16,
+        "seed_frames": 32,
+        "predicted_frames": 320,
+        "horizon_frames": 8,
+        "rollout_calls": 40,
+        "conditioning": [],
+        "codec": {"kind": "standalone_torchscript_rave"},
+        "rows": [
+            {
+                "id": f"{index:02d}-{category.casefold()}-test",
+                "category": category,
+                "split": "test",
+                "sample_count": 720896,
+                "file": f"audio/{category.casefold()}.wav",
+            }
+            for index, category in enumerate(CATEGORIES, 1)
+        ],
+    }
+
+    validate_long_rollout_manifest(manifest, CATEGORIES)
+
+    manifest["predicted_frames"] = 319
+    with pytest.raises(ValueError, match="320 predicted"):
+        validate_long_rollout_manifest(manifest, CATEGORIES)
+
+
 def test_render_script_exposes_reproducible_cli_contract() -> None:
     script = RENDER_SCRIPT.read_text(encoding="utf-8")
 
@@ -296,6 +358,24 @@ def test_render_script_exposes_reproducible_cli_contract() -> None:
     ):
         assert option in script
     assert "render_audition" in script
+
+
+def test_long_rollout_script_exposes_exact_cli_contract() -> None:
+    script = LONG_RENDER_SCRIPT.read_text(encoding="utf-8")
+
+    for option in (
+        "--config",
+        "--checkpoint",
+        "--output",
+        "--seed-frames",
+        "--predicted-frames",
+        "--random-seed",
+        "--device",
+    ):
+        assert option in script
+    assert "default=32" in script
+    assert "default=320" in script
+    assert "render_long_rollout" in script
 
 
 def test_octopus_audition_uses_exactly_one_slurm_gpu() -> None:
