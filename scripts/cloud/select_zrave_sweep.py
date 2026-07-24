@@ -9,11 +9,20 @@ from typing import Any
 
 
 EXPECTED_BATCHES = (128, 256, 384, 512)
+THROUGHPUT_METRICS = (
+    "median_windows_per_second",
+    "median_valid_latent_frames_per_second",
+)
 
 
-def _valid(candidate: dict[str, Any]) -> bool:
+def _valid(
+    candidate: dict[str, Any],
+    metric: str = "median_windows_per_second",
+) -> bool:
+    if metric not in THROUGHPUT_METRICS:
+        raise ValueError(f"unsupported sweep metric: {metric}")
     try:
-        throughput = float(candidate["median_windows_per_second"])
+        throughput = float(candidate[metric])
         peak = float(candidate["peak_memory_mib"])
         total = float(candidate["total_memory_mib"])
         return (
@@ -26,6 +35,10 @@ def _valid(candidate: dict[str, Any]) -> bool:
             and math.isfinite(peak)
             and math.isfinite(total)
             and 0.0 < peak < total
+            and (
+                metric != "median_valid_latent_frames_per_second"
+                or int(candidate["exposure_safety_updates"]) == 5
+            )
         )
     except (KeyError, TypeError, ValueError):
         return False
@@ -33,18 +46,25 @@ def _valid(candidate: dict[str, Any]) -> bool:
 
 def select_candidate(
     candidates: list[dict[str, Any]],
+    metric: str = "median_windows_per_second",
 ) -> dict[str, Any]:
-    valid = [candidate for candidate in candidates if _valid(candidate)]
+    if metric not in THROUGHPUT_METRICS:
+        raise ValueError(f"unsupported sweep metric: {metric}")
+    valid = [
+        candidate
+        for candidate in candidates
+        if _valid(candidate, metric)
+    ]
     if not valid:
         raise ValueError("no valid Z-RAVE sweep candidate")
     fastest = max(
-        float(candidate["median_windows_per_second"])
+        float(candidate[metric])
         for candidate in valid
     )
     tied = [
         candidate
         for candidate in valid
-        if float(candidate["median_windows_per_second"]) >= fastest * 0.98
+        if float(candidate[metric]) >= fastest * 0.98
     ]
     return min(tied, key=lambda candidate: int(candidate["batch_per_gpu"]))
 
@@ -97,16 +117,27 @@ def main() -> None:
         type=int,
         default=list(EXPECTED_BATCHES),
     )
+    parser.add_argument(
+        "--metric",
+        choices=THROUGHPUT_METRICS,
+        default="median_windows_per_second",
+    )
     args = parser.parse_args()
     root = Path(args.sweep_root)
     batches = tuple(args.batches)
     candidates = load_candidates(root, batches)
-    winner = select_candidate(candidates)
+    winner = select_candidate(candidates, metric=args.metric)
+    rule = (
+        "highest median global windows/s; within 2% choose smaller batch"
+        if args.metric == "median_windows_per_second"
+        else (
+            "highest median valid latent frames/s; "
+            "within 2% choose smaller batch"
+        )
+    )
     selection = {
         "schema": 1,
-        "rule": (
-            "highest median global windows/s; within 2% choose smaller batch"
-        ),
+        "rule": rule,
         "expected_batches": list(batches),
         "candidates": candidates,
         "selected": winner,
@@ -114,6 +145,8 @@ def main() -> None:
         "median_windows_per_second": float(
             winner["median_windows_per_second"]
         ),
+        "metric": args.metric,
+        "metric_value": float(winner[args.metric]),
     }
     output = Path(args.output)
     _atomic_json(output, selection)

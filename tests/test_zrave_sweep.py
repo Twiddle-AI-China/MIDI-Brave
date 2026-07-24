@@ -97,3 +97,25 @@ def test_sweep_loads_an_explicit_batch_contract(tmp_path: Path) -> None:
 def test_sweep_rejects_duplicate_explicit_batches(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unique"):
         load_candidates(tmp_path, (1024, 1024))
+
+
+def test_flow_selector_uses_valid_latent_frame_throughput() -> None:
+    candidates = [
+        _candidate(128, 12000.0)
+        | {
+            "median_valid_latent_frames_per_second": 500000.0,
+            "exposure_safety_updates": 5,
+        },
+        _candidate(256, 11000.0)
+        | {
+            "median_valid_latent_frames_per_second": 520000.0,
+            "exposure_safety_updates": 5,
+        },
+    ]
+
+    winner = select_candidate(
+        candidates,
+        metric="median_valid_latent_frames_per_second",
+    )
+
+    assert winner["batch_per_gpu"] == 256
