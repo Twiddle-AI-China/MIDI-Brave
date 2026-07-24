@@ -25,14 +25,14 @@ dataset_mount=/srv/data-branches/nvme/datasets:/data/datasets:ro
 codec_mount=/data/midibrave-zrave-standalone:/data/midibrave-zrave-standalone:ro
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-: "${FLOW_CHECKPOINT_BASENAME:?set an explicit checkpoint basename}"
-if [[ "$FLOW_CHECKPOINT_BASENAME" == */* || "$FLOW_CHECKPOINT_BASENAME" != *.pt ]]; then
+: "${ZRAVE_FLOW_CHECKPOINT:?set an explicit checkpoint basename}"
+if [[ "$ZRAVE_FLOW_CHECKPOINT" == */* || "$ZRAVE_FLOW_CHECKPOINT" != *.pt ]]; then
   echo "checkpoint must be a basename ending in .pt" >&2
   exit 2
 fi
-checkpoint=$checkpoint_root/$FLOW_CHECKPOINT_BASENAME
+checkpoint=$checkpoint_root/$ZRAVE_FLOW_CHECKPOINT
 test -f "$checkpoint"
-checkpoint_stem=${FLOW_CHECKPOINT_BASENAME%.pt}
+checkpoint_stem=${ZRAVE_FLOW_CHECKPOINT%.pt}
 output=$run_root/evaluations/test-${checkpoint_stem}
 mkdir -p "$output"
 
@@ -51,7 +51,7 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores \
     "$image" \
     python -c 'import torch; torch.use_deterministic_algorithms(True); from midibrave.zrave_flow_evaluate import main; main()' \
       --config "$config" \
-      --checkpoint "$flow_root/runs/flow-v1/checkpoints/$FLOW_CHECKPOINT_BASENAME" \
+      --checkpoint "$flow_root/runs/flow-v1/checkpoints/$ZRAVE_FLOW_CHECKPOINT" \
       --split test \
       --output "$flow_root/runs/flow-v1/evaluations/test-${checkpoint_stem}" \
       --device cuda
