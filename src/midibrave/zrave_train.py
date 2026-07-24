@@ -512,6 +512,33 @@ def rollout_training_frames(
     return horizon_frames * (maximum_depth + 1)
 
 
+def create_rollout_shadow(
+    source: ZraveTransformer,
+) -> ZraveTransformer:
+    try:
+        device = next(source.parameters()).device
+    except StopIteration as error:
+        raise ValueError("rollout source model has no parameters") from error
+    shadow = ZraveTransformer(
+        source.config,
+        source.statistics(),
+    ).to(device)
+    synchronize_rollout_shadow(source, shadow)
+    shadow.requires_grad_(False)
+    shadow.eval()
+    return shadow
+
+
+@torch.no_grad()
+def synchronize_rollout_shadow(
+    source: ZraveTransformer,
+    shadow: ZraveTransformer,
+) -> None:
+    if source.config != shadow.config:
+        raise ValueError("rollout shadow architecture mismatch")
+    shadow.load_state_dict(source.state_dict())
+
+
 @torch.no_grad()
 def condition_rollout_history(
     model: Any,
@@ -696,6 +723,7 @@ def _train(args: argparse.Namespace) -> None:
         seed=config.seed + 1000 + rank,
     )
     model = ZraveTransformer(config.model, statistics).to(device)
+    rollout_model = create_rollout_shadow(model)
     if world_size > 1:
         training_model: nn.Module = DistributedDataParallel(
             model,
@@ -818,12 +846,14 @@ def _train(args: argparse.Namespace) -> None:
             rollout_depth,
             device,
         )
+        if rollout_depth:
+            synchronize_rollout_shadow(model, rollout_model)
         optimizer.zero_grad(set_to_none=True)
         torch.cuda.synchronize(device)
         started = time.perf_counter()
         with torch.autocast("cuda", dtype=torch.float16):
             conditioned_history = condition_rollout_history(
-                training_model,
+                rollout_model,
                 history,
                 rollout_depth,
             )

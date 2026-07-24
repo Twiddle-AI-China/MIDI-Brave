@@ -21,6 +21,7 @@ from midibrave.zrave_train import (
     GpuWindowSampler,
     allowed_rollout_depth,
     condition_rollout_history,
+    create_rollout_shadow,
     load_zrave_checkpoint,
     load_zrave_warm_start,
     rollout_training_frames,
@@ -28,6 +29,7 @@ from midibrave.zrave_train import (
     save_zrave_checkpoint,
     select_rollout_target,
     should_checkpoint,
+    synchronize_rollout_shadow,
     synchronize_rollout_depth,
     summarize_benchmark,
 )
@@ -317,6 +319,35 @@ def test_condition_rollout_history_uses_distributed_wrapper_forward() -> None:
         conditioned[:, -1],
         torch.full((2, 16), 4.0),
     )
+
+
+def test_rollout_shadow_is_independent_frozen_and_synchronized() -> None:
+    torch.manual_seed(47)
+    source, _ = _model()
+
+    shadow = create_rollout_shadow(source)
+
+    assert shadow is not source
+    assert shadow.training is False
+    assert all(
+        parameter.requires_grad is False
+        for parameter in shadow.parameters()
+    )
+    for source_parameter, shadow_parameter in zip(
+        source.parameters(),
+        shadow.parameters(),
+        strict=True,
+    ):
+        assert source_parameter.data_ptr() != shadow_parameter.data_ptr()
+        torch.testing.assert_close(source_parameter, shadow_parameter)
+
+    with torch.no_grad():
+        source.output.bias.add_(3.0)
+    assert not torch.equal(source.output.bias, shadow.output.bias)
+
+    synchronize_rollout_shadow(source, shadow)
+
+    torch.testing.assert_close(source.output.bias, shadow.output.bias)
 
 
 def test_select_rollout_target_uses_matching_chunk() -> None:
