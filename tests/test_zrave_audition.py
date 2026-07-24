@@ -276,5 +276,10 @@ def test_octopus_audition_uses_exactly_one_slurm_gpu() -> None:
     assert 'sha256sum "$checkpoint"' not in script
     assert "best-8000-v1" in script
     assert "zrave-sequence-comparison/index.html" in script
+    assert "/srv/data-branches/hdd-b/data/midibrave-zrave" in script
+    assert "/srv/data-branches/hdd-a/data/midibrave-v3" in script
+    assert "/srv/data-branches/nvme/model_weights" in script
+    assert "/srv/data-branches/nvme/datasets" in script
+    assert "-v /data:/data" not in script
     assert "wav_count" in script
     assert "-ne 32" in script

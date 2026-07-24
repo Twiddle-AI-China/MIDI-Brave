@@ -16,27 +16,38 @@ container_repo=/workspace/MidiBrave
 config=$container_repo/configs/zrave/octopus_balanced50.yaml
 image=midibrave:v0.10.0-clap-recon
 checkpoint=/data/midibrave-zrave/runs/zrave_transformer_balanced50/checkpoints/update-00008000.pt
-output=${ZRAVE_AUDITION_OUTPUT:-/data/midibrave-zrave/audition/best-8000-v1}
+zrave_branch=/srv/data-branches/hdd-b/data/midibrave-zrave
+v3_branch=/srv/data-branches/hdd-a/data/midibrave-v3
+model_branch=/srv/data-branches/nvme/model_weights
+dataset_branch=/srv/data-branches/nvme/datasets
+host_output=${ZRAVE_AUDITION_OUTPUT:-/srv/data-branches/nvme/midibrave-zrave/audition/best-8000-v1}
+output=/output
 page=$container_repo/audition/zrave-sequence-comparison/index.html
 
 test -d "$repo"
 test -f "$repo/configs/zrave/octopus_balanced50.yaml"
 test -f "$repo/scripts/render_zrave_audition.py"
 test -f "$repo/audition/zrave-sequence-comparison/index.html"
-test -f "$checkpoint"
-test -f /data/midibrave-zrave/packs/serum-balanced50/index.json
-test -f /data/midibrave-zrave/packs/serum-balanced50/latents.npy
-test -f /data/model_weights/laion-clap/music_audioset_epoch_15_esc_90.14.pt
-test ! -e "$output"
+test -f "$zrave_branch/runs/zrave_transformer_balanced50/checkpoints/update-00008000.pt"
+test -f "$zrave_branch/packs/serum-balanced50/index.json"
+test -f "$zrave_branch/packs/serum-balanced50/latents.npy"
+test -f "$v3_branch/runs/pad50_scratch_control_rescue_window_clap_v1/rollout/update-00000500.pt"
+test -f "$model_branch/laion-clap/music_audioset_epoch_15_esc_90.14.pt"
+test -d "$dataset_branch/latent-cosmos-synth/serum-dataset"
+test ! -e "$host_output"
 
-mkdir -p "$(dirname "$output")"
+mkdir -p "$host_output"
 
 srun --kill-on-bad-exit=1 --cpu-bind=cores \
   docker run --rm \
     --gpus "device=${CUDA_VISIBLE_DEVICES}" \
     --shm-size=16g \
     -v "$repo:$container_repo:ro" \
-    -v /data:/data \
+    -v "$zrave_branch:/data/midibrave-zrave:ro" \
+    -v "$v3_branch:/data/midibrave-v3:ro" \
+    -v "$model_branch:/data/model_weights:ro" \
+    -v "$dataset_branch:/data/datasets:ro" \
+    -v "$host_output:$output" \
     -e "PYTHONPATH=$container_repo/src" \
     -e HF_HUB_OFFLINE=1 \
     -e TRANSFORMERS_OFFLINE=1 \
@@ -53,17 +64,17 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores \
 srun --kill-on-bad-exit=1 \
   docker run --rm \
     -v "$repo:$container_repo:ro" \
-    -v /data:/data \
+    -v "$host_output:$output" \
     "$image" \
     cp "$page" "$output/index.html"
 
-wav_count=$(find "$output/audio" -maxdepth 1 -type f -name '*.wav' | wc -l)
+wav_count=$(find "$host_output/audio" -maxdepth 1 -type f -name '*.wav' | wc -l)
 if [[ "$wav_count" -ne 32 ]]; then
   echo "expected 32 audition WAV files, found $wav_count" >&2
   exit 3
 fi
 
-python3 - "$output" <<'PY'
+python3 - "$host_output" <<'PY'
 import json
 import sys
 from pathlib import Path
