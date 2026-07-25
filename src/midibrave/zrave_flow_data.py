@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
 import numpy as np
+import soundfile as sf
 import torch
 from torch import Tensor, nn
+from scipy.signal import resample_poly
 
-from .data import load_audio
 from .zrave_codec import decode_with_seed, encode_posterior_mean
 from .zrave_flow_config import ZraveFlowConfig
 from .zrave_flow_manifest import build_flow_manifest, read_flow_manifest
@@ -45,6 +46,52 @@ def _resolve_encode_device(
     if local_rank < 0:
         raise ValueError("LOCAL_RANK must be non-negative")
     return f"cuda:{local_rank}"
+
+
+def _activate_encode_device(
+    requested: str,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    resolved = _resolve_encode_device(requested, environment)
+    device = torch.device(resolved)
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    return str(device)
+
+
+def _load_rave_audio(
+    path: Path,
+    *,
+    sample_rate: int,
+    maximum_seconds: float,
+) -> np.ndarray:
+    if sample_rate <= 0 or maximum_seconds <= 0.0:
+        raise ValueError("audio limits must be positive")
+    with sf.SoundFile(path, mode="r") as handle:
+        source_rate = int(handle.samplerate)
+        source_frames = math.ceil(source_rate * maximum_seconds)
+        channels = handle.read(
+            frames=source_frames,
+            dtype="float32",
+            always_2d=True,
+        )
+    if channels.shape[1] < 1:
+        raise ValueError(f"audio has no channels: {path}")
+    audio = channels.mean(axis=1, dtype=np.float32)
+    if not np.isfinite(audio).all():
+        raise ValueError(f"non-finite audio: {path}")
+    if source_rate != sample_rate:
+        divisor = math.gcd(source_rate, sample_rate)
+        audio = resample_poly(
+            audio,
+            sample_rate // divisor,
+            source_rate // divisor,
+        ).astype(np.float32)
+    maximum_samples = round(sample_rate * maximum_seconds)
+    audio = audio[:maximum_samples]
+    if not np.isfinite(audio).all():
+        raise ValueError(f"non-finite resampled audio: {path}")
+    return np.ascontiguousarray(audio, dtype=np.float32)
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -339,15 +386,11 @@ def encode_flow_shards(
     with torch.inference_mode():
         for manifest_index, row in assigned:
             try:
-                audio = load_audio(
+                audio = _load_rave_audio(
                     Path(str(row["audio_path"])),
-                    config.rave.sample_rate,
+                    sample_rate=config.rave.sample_rate,
+                    maximum_seconds=config.data.maximum_audio_seconds,
                 )
-                maximum_samples = round(
-                    config.rave.sample_rate
-                    * config.data.maximum_audio_seconds
-                )
-                audio = audio[:maximum_samples]
                 usable = len(audio) - len(audio) % config.rave.latent_hop
                 if usable < config.rave.latent_hop:
                     raise ValueError("audio is shorter than one latent hop")
@@ -882,7 +925,7 @@ def main() -> None:
             config,
             args.rank,
             args.world_size,
-            _resolve_encode_device(args.device),
+            _activate_encode_device(args.device),
         )
     elif args.command == "finalize":
         report = finalize_flow_pack(config)

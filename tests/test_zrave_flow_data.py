@@ -5,13 +5,16 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 import torch
 from torch import Tensor, nn
 
 from midibrave.zrave_flow_config import ZraveFlowConfig
 from midibrave.zrave_flow_data import (
+    _activate_encode_device,
     _build_pitch_pairs,
+    _load_rave_audio,
     _resolve_encode_device,
     encode_flow_shards,
     finalize_flow_pack,
@@ -58,6 +61,48 @@ def test_encode_device_uses_torchrun_local_rank() -> None:
         "cpu",
         {"LOCAL_RANK": "5"},
     ) == "cpu"
+
+
+def test_encode_device_activation_sets_cuda_current_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected: list[str] = []
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_device",
+        lambda device: selected.append(str(device)),
+    )
+
+    assert _activate_encode_device(
+        "cuda",
+        {"LOCAL_RANK": "5"},
+    ) == "cuda:5"
+    assert selected == ["cuda:5"]
+
+
+def test_rave_audio_loader_downmixes_resamples_and_limits_duration(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "stereo-48k.wav"
+    frames = 96_000
+    stereo = np.column_stack(
+        (
+            np.full(frames, 0.25, dtype=np.float32),
+            np.full(frames, 0.75, dtype=np.float32),
+        )
+    )
+    sf.write(path, stereo, 48_000, subtype="FLOAT")
+
+    audio = _load_rave_audio(
+        path,
+        sample_rate=44_100,
+        maximum_seconds=0.5,
+    )
+
+    assert audio.shape == (22_050,)
+    assert audio.dtype == np.float32
+    assert np.isfinite(audio).all()
+    assert np.median(audio[100:-100]) == pytest.approx(0.5, abs=1.0e-4)
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
