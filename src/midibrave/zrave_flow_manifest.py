@@ -40,6 +40,10 @@ _CATEGORY_ALIASES = {
 }
 
 
+class _MissingAudioError(ValueError):
+    """A manifest row references audio that is absent from its data tier."""
+
+
 @dataclass(frozen=True)
 class FlowManifestReport:
     rows: int
@@ -50,6 +54,7 @@ class FlowManifestReport:
     by_split: dict[str, int]
     manifest_sha256: str
     source_sha256: dict[str, str]
+    missing_audio_by_source: dict[str, int]
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -192,7 +197,7 @@ def _resolve_audio(root_value: str, relative_value: object) -> str:
             f"audio path escapes audio_root: {relative_value!r}"
         ) from error
     if not candidate.is_file():
-        raise ValueError(f"missing audio: {candidate}")
+        raise _MissingAudioError(f"missing audio: {candidate}")
     return str(candidate)
 
 
@@ -457,16 +462,21 @@ def build_flow_manifest(config: ZraveFlowConfig) -> FlowManifestReport:
     seen_ids: set[str] = set()
     categories_by_preset: dict[str, str] = {}
     source_hashes: dict[str, str] = {}
+    missing_audio: Counter[str] = Counter()
     for source in config.data.sources:
         preset_categories = _preset_categories(source.preset_metadata)
         source_hashes[source.name] = _sha256_file(source.manifest)
         for raw in _source_rows(source):
-            row = _adapt_row(
-                source,
-                raw,
-                config.seed,
-                preset_categories,
-            )
+            try:
+                row = _adapt_row(
+                    source,
+                    raw,
+                    config.seed,
+                    preset_categories,
+                )
+            except _MissingAudioError:
+                missing_audio[source.name] += 1
+                continue
             if row is None:
                 continue
             sample_id = str(row["sample_id"])
@@ -509,6 +519,7 @@ def build_flow_manifest(config: ZraveFlowConfig) -> FlowManifestReport:
         ),
         manifest_sha256=_sha256_file(manifest_path),
         source_sha256=source_hashes,
+        missing_audio_by_source=dict(sorted(missing_audio.items())),
     )
     _atomic_json(Path(config.data.manifest_report), report.__dict__)
     return report

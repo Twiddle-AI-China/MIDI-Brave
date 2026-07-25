@@ -201,6 +201,14 @@ def _fixture_config(tmp_path: Path) -> ZraveFlowConfig:
                 "wav_path": "surge-xt/000009/note072_vel080.wav",
                 "duration_sec": 5.0,
             },
+            {
+                "preset_index": 10,
+                "canonical_synth_id": "dexed/dexed",
+                "midi_note": 36,
+                "velocity": 108,
+                "wav_path": "dexed/000010/missing.wav",
+                "duration_sec": 5.0,
+            },
         ],
     )
     _touch_audio(roots[2], "dexed/000028/note060_vel054.wav")
@@ -235,6 +243,9 @@ def test_manifest_merges_aliases_and_keeps_presets_in_one_split(
     rows = read_flow_manifest(config.data.unified_manifest)
 
     assert report.rows == len(rows) == 6
+    assert report.missing_audio_by_source == {
+        "dexed_surge_broad": 1
+    }
     assert all(set(row) == FIELDS for row in rows)
     assert {"Pad", "Lead", "Pianobook", "Dexed", "Surge"} == {
         row["category"] for row in rows
