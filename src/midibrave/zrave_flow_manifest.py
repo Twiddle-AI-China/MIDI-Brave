@@ -255,6 +255,9 @@ def _registry_rows(source: FlowSourceConfig) -> Iterator[dict[str, Any]]:
                   AND dm.status = 'active'
                   AND dm.is_duplicate = 0
                   AND dm.is_silent = 0
+                  AND ai.pitch_midi BETWEEN 21 AND 109
+                  AND ai.velocity BETWEEN 0 AND 127
+                  AND dm.duration_sec > 0
                 ORDER BY dm.data_item_id
             """
             for result in connection.execute(
@@ -358,6 +361,9 @@ def _registry_rows(source: FlowSourceConfig) -> Iterator[dict[str, Any]]:
             f"AND {quoted(aliases['status'])}='active' "
             f"AND {quoted(aliases['duplicate'])}=0 "
             f"AND {quoted(aliases['silent'])}=0 "
+            f"AND {quoted(aliases['midi_note'])} BETWEEN 21 AND 109 "
+            f"AND {quoted(aliases['velocity'])} BETWEEN 0 AND 127 "
+            f"AND {quoted(aliases['duration'])}>0 "
             "ORDER BY sample_id"
         )
         for row in connection.execute(

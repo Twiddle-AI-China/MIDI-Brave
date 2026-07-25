@@ -143,6 +143,17 @@ def _write_registry(path: Path) -> None:
                 0,
                 0,
             ),
+            (
+                "pianobook-invalid-note",
+                "pianobook",
+                "pianobook_32350",
+                "audio/invalid-note.wav",
+                json.dumps({"velocity": 100}),
+                8.0,
+                "active",
+                0,
+                0,
+            ),
         ],
     )
     connection.executemany(
@@ -154,6 +165,7 @@ def _write_registry(path: Path) -> None:
             ("registry-fx", 60, 100),
             ("pianobook-60", 60, 100),
             ("pianobook-72", 72, 100),
+            ("pianobook-invalid-note", None, 100),
         ],
     )
     connection.commit()
