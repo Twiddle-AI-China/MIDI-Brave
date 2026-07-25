@@ -129,3 +129,34 @@ def test_sampler_state_restores_the_next_batch() -> None:
 
     assert torch.equal(expected.history, actual.history)
     assert torch.equal(expected.future, actual.future)
+
+
+def test_sampler_accepts_three_real_octopus_sources() -> None:
+    records = 9
+    sampler = GpuFlowSampler(
+        latents=torch.randn(records, 100, 16),
+        lengths=torch.full((records,), 100),
+        active_frames=torch.full((records,), 100),
+        notes=torch.tensor([48, 60, 72] * 3),
+        velocities=torch.full((records,), 100),
+        split_codes=torch.zeros(records, dtype=torch.uint8),
+        source_codes=torch.tensor([0] * 3 + [1] * 3 + [2] * 3),
+        category_codes=torch.tensor([0] * 3 + [1] * 3 + [2] * 3),
+        maximum_future_frames=torch.full((records,), 64),
+        pitch_pairs=torch.full((records,), -1),
+        source_weights=(0.65, 0.10, 0.25),
+        context_frames=32,
+        future_frames=64,
+        wander_delays=(16, 32, 48),
+        pitch_transition_fraction=0.0,
+        seed=53,
+        device="cpu",
+    )
+
+    batch = sampler.sample(20, maximum_valid_future=64)
+
+    assert torch.bincount(batch.source_code, minlength=3).tolist() == [
+        13,
+        2,
+        5,
+    ]

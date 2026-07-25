@@ -23,11 +23,16 @@ def test_flow_config_locks_runtime_and_data_contract() -> None:
     assert config.model.wander_delay_frames == (16, 32, 48)
     assert config.model.solver_steps == 8
     assert config.data.shard_records == 4096
+    assert config.data.maximum_audio_seconds == 5.0
+    assert [source.name for source in config.data.sources] == [
+        "serum_full",
+        "pianobook_pitch",
+        "dexed_surge_broad",
+    ]
     assert [source.weight for source in config.data.sources] == [
-        0.55,
-        0.20,
-        0.15,
+        0.65,
         0.10,
+        0.25,
     ]
     assert config.train.checkpoint_every == 5000
     assert config.train.pitch_transition_fraction == 0.20

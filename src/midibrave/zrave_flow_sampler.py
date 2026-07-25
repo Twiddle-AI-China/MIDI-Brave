@@ -103,12 +103,16 @@ class GpuFlowSampler:
             raise ValueError("wander delays must be 16, 32, 48")
         if not 0.0 <= pitch_transition_fraction <= 1.0:
             raise ValueError("pitch transition fraction must be in [0, 1]")
-        if len(source_weights) != 4 or not math.isclose(
+        if not source_weights or not math.isclose(
             sum(source_weights),
             1.0,
             abs_tol=1.0e-9,
         ):
-            raise ValueError("source_weights must contain four values summing to 1")
+            raise ValueError("source_weights must sum to 1")
+        if torch.any(source_codes < 0) or torch.any(
+            source_codes >= len(source_weights)
+        ):
+            raise ValueError("source code is outside source_weights")
         self.device = torch.device(device)
         self.latents = latents.to(self.device)
         self.lengths = lengths.to("cpu", dtype=torch.long)
@@ -328,29 +332,51 @@ class GpuFlowSampler:
             raise ValueError("batch_size must be positive")
         if not 1 <= maximum_valid_future <= self.future_frames:
             raise ValueError("maximum_valid_future must be in [1, 64]")
-        weights = list(self.source_weights)
-        if require_full_future:
-            weights[2] = 0.0
+        eligible_by_source = [
+            self._eligible(source, require_full_future)
+            for source in range(len(self.source_weights))
+        ]
+        weights = [
+            weight if eligible.numel() else 0.0
+            for weight, eligible in zip(
+                self.source_weights,
+                eligible_by_source,
+                strict=True,
+            )
+        ]
         source_counts = _largest_remainder(batch_size, tuple(weights))
         transition_total = (
             0
             if require_full_future
             else math.floor(batch_size * self.pitch_transition_fraction)
         )
-        dense_total = source_counts[1] + source_counts[2]
-        if transition_total > dense_total:
-            raise ValueError("not enough dense source slots for transitions")
-        dense_transition_counts = _largest_remainder(
-            transition_total,
-            (
-                float(source_counts[1]),
-                float(source_counts[2]),
-            ),
+        transition_sources = [
+            source
+            for source, (count, eligible) in enumerate(
+                zip(source_counts, eligible_by_source, strict=True)
+            )
+            if count
+            and torch.any(self.pitch_pairs[eligible] >= 0)
+        ]
+        transition_capacity = sum(
+            source_counts[source] for source in transition_sources
         )
-        transition_by_source = {
-            1: dense_transition_counts[0],
-            2: dense_transition_counts[1],
-        }
+        if transition_total > transition_capacity:
+            raise ValueError(
+                "not enough pitch-paired source slots for transitions"
+            )
+        transition_by_source: dict[int, int] = {}
+        if transition_total:
+            allocated = _largest_remainder(
+                transition_total,
+                tuple(
+                    float(source_counts[source])
+                    for source in transition_sources
+                ),
+            )
+            transition_by_source = dict(
+                zip(transition_sources, allocated, strict=True)
+            )
 
         selected_parts: list[Tensor] = []
         transition_parts: list[Tensor] = []

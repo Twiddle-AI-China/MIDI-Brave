@@ -73,8 +73,7 @@ class PitchWindowSampler:
         if torch.any(self.active_frames > latents.shape[1]):
             raise ValueError("active_frames exceeds latent storage")
         eligible_mask = (
-            ((self.source_codes == 1) | (self.source_codes == 2))
-            & (self.split_codes == self.split_code)
+            (self.split_codes == self.split_code)
             & (self.active_frames >= 16)
             & (self.notes >= 21)
             & (self.notes <= 109)
@@ -84,7 +83,7 @@ class PitchWindowSampler:
             as_tuple=False,
         ).flatten()
         if not self.eligible.numel():
-            raise ValueError("dense split has no eligible pitch windows")
+            raise ValueError("split has no eligible pitch windows")
         self.note_values = torch.unique(
             self.notes[self.eligible],
             sorted=True,

@@ -144,6 +144,24 @@ def test_pitch_sampler_balances_notes_and_uses_dense_sources() -> None:
     assert set(sampler.last_source_codes.tolist()) == {1, 2}
 
 
+def test_pitch_sampler_uses_every_source_with_valid_midi() -> None:
+    sampler = PitchWindowSampler(
+        latents=torch.randn(3, 24, 16),
+        active_frames=torch.full((3,), 24),
+        notes=torch.tensor([48, 60, 72]),
+        source_codes=torch.tensor([0, 1, 2]),
+        split_codes=torch.zeros(3, dtype=torch.long),
+        split_code=0,
+        seed=21,
+        device="cpu",
+    )
+
+    _windows, notes = sampler.sample(3)
+
+    assert sorted(notes.tolist()) == [48, 60, 72]
+    assert set(sampler.last_source_codes.tolist()) == {0, 1, 2}
+
+
 def test_qualified_loader_checks_pack_hash_and_freezes(
     tmp_path: Path,
 ) -> None:

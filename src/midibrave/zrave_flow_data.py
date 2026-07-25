@@ -330,6 +330,11 @@ def encode_flow_shards(
                     Path(str(row["audio_path"])),
                     config.rave.sample_rate,
                 )
+                maximum_samples = round(
+                    config.rave.sample_rate
+                    * config.data.maximum_audio_seconds
+                )
+                audio = audio[:maximum_samples]
                 usable = len(audio) - len(audio) % config.rave.latent_hop
                 if usable < config.rave.latent_hop:
                     raise ValueError("audio is shorter than one latent hop")
@@ -496,8 +501,6 @@ def _build_pitch_pairs(
     ] = defaultdict(list)
     for index, row in enumerate(sequences):
         source = str(row["source_name"])
-        if source not in {"dexed_dense", "serum_dense"}:
-            continue
         key = (
             source,
             str(row["split"]),
@@ -510,8 +513,6 @@ def _build_pitch_pairs(
     result = np.full(len(sequences), -1, dtype=np.int64)
     for index, row in enumerate(sequences):
         source = str(row["source_name"])
-        if source not in {"dexed_dense", "serum_dense"}:
-            continue
         base = (
             source,
             str(row["split"]),
@@ -547,13 +548,20 @@ def _write_seed_bank(
     packed_root: Path,
     sequences: list[dict[str, object]],
 ) -> dict[str, object]:
-    priority = {"serum_full": 0, "serum_dense": 1}
+    priority = {
+        "serum_full": 0,
+        "dexed_surge_broad": 1,
+        "pianobook_pitch": 2,
+    }
     candidates = [
         row
         for row in sequences
-        if row["split"] == "validation"
+        if row["split"] in {"train", "validation"}
         and row["source_name"] in priority
-        and row["category"] in _SEED_CATEGORIES
+        and (
+            row["category"] in _SEED_CATEGORIES
+            or row["source_name"] == "pianobook_pitch"
+        )
         and int(row["active_frames"]) >= 32
     ]
     candidates.sort(
@@ -561,6 +569,7 @@ def _write_seed_bank(
             int(row["midi_note"]),
             str(row["category"]),
             priority[str(row["source_name"])],
+            0 if row["split"] == "validation" else 1,
             str(row["canonical_preset_id"]),
             str(row["sample_id"]),
         )

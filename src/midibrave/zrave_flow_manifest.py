@@ -141,7 +141,7 @@ def canonical_preset_id(
     source_name: str,
     row: dict[str, Any],
 ) -> str:
-    if source_name in {"serum_full", "serum_dense"}:
+    if source_name == "serum_full":
         raw = str(row.get("preset_id") or "")
         match = re.fullmatch(
             r"(?:serum_s|xfer/serum:|serum:)(\d+)",
@@ -151,16 +151,16 @@ def canonical_preset_id(
         if match is None:
             raise ValueError(f"invalid Serum preset_id: {raw!r}")
         return f"serum:{int(match.group(1)):06d}"
-    if source_name == "dexed_dense":
+    if source_name == "pianobook_pitch":
         raw = str(row.get("preset_id") or "")
         match = re.fullmatch(
-            r"(?:dexed_p|dexed:)(\d+)",
+            r"(?:pianobook_|pianobook:)(\d+)",
             raw,
             flags=re.IGNORECASE,
         )
         if match is None:
-            raise ValueError(f"invalid Dexed preset_id: {raw!r}")
-        return f"dexed:{int(match.group(1)):04d}"
+            raise ValueError(f"invalid Pianobook preset_id: {raw!r}")
+        return f"pianobook:{int(match.group(1)):06d}"
     if source_name == "dexed_surge_broad":
         index = _number(row.get("preset_index"), "preset_index")
         synth = str(row.get("canonical_synth_id") or "").casefold()
@@ -381,7 +381,7 @@ def _adapt_row(
     row: dict[str, Any],
     seed: int,
     preset_categories: dict[str, str],
-) -> dict[str, object]:
+) -> dict[str, object] | None:
     source_name = source.name
     if source_name == "dexed_surge_broad":
         synth_id = str(row.get("canonical_synth_id") or "").casefold()
@@ -395,24 +395,27 @@ def _adapt_row(
         duration_value = row.get("duration_sec")
         category = "Dexed" if synth == "dexed" else "Surge"
         articulation = "steady"
+    elif source_name == "pianobook_pitch":
+        native_id = str(row.get("sample_id") or "")
+        audio_value = row.get("audio_path")
+        duration_value = row.get("duration_seconds")
+        articulation = str(row.get("articulation_id") or "steady")
+        category = "Pianobook"
     else:
         native_id = str(row.get("sample_id") or "")
         audio_value = row.get("audio_path")
         duration_value = row.get("duration_seconds")
         articulation = str(row.get("articulation_id") or "steady")
         if source_name == "serum_full":
-            category = _category(row.get("category"))
+            category = _CATEGORY_ALIASES.get(
+                str(row.get("category") or "").strip().casefold()
+            )
+            if category is None:
+                return None
             if category not in source.allowed_categories:
-                raise ValueError(f"disallowed Serum category: {category}")
-        elif source_name == "serum_dense":
-            preset_id = str(row.get("preset_id") or "")
-            if preset_id not in preset_categories:
-                raise ValueError(
-                    f"missing Serum preset category: {preset_id}"
-                )
-            category = preset_categories[preset_id]
+                return None
         else:
-            category = "Dexed"
+            raise ValueError(f"unknown source name: {source_name}")
     if not native_id:
         raise ValueError(f"{source_name} row lacks sample_id")
     note = _number(row.get("midi_note"), "midi_note")
@@ -458,6 +461,8 @@ def build_flow_manifest(config: ZraveFlowConfig) -> FlowManifestReport:
                 config.seed,
                 preset_categories,
             )
+            if row is None:
+                continue
             sample_id = str(row["sample_id"])
             if sample_id in seen_ids:
                 raise ValueError(f"duplicate sample_id: {sample_id}")

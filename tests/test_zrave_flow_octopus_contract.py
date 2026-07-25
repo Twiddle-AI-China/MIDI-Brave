@@ -79,8 +79,7 @@ def test_formal_config_uses_only_approved_sources_and_output_root() -> None:
 
     assert [source.name for source in config.data.sources] == [
         "serum_full",
-        "dexed_dense",
-        "serum_dense",
+        "pianobook_pitch",
         "dexed_surge_broad",
     ]
     assert config.data.sources[0].manifest.endswith(
@@ -90,7 +89,14 @@ def test_formal_config_uses_only_approved_sources_and_output_root() -> None:
         config.data.sources[0].registry_dataset_id
         == "serum-octopus-v1"
     )
-    assert config.data.sources[2].maximum_future_frames == 20
+    assert config.data.sources[1].registry_dataset_id == "pianobook"
+    assert config.data.sources[1].audio_root.endswith(
+        "/Timbre_A/derived/pianobook"
+    )
+    assert all(
+        source.maximum_future_frames == 64
+        for source in config.data.sources
+    )
     assert (
         config.train.output_root
         == "/data/midibrave-zrave-flow/runs/flow-v1"

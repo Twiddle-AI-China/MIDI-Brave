@@ -110,6 +110,39 @@ def _write_registry(path: Path) -> None:
                 0,
                 0,
             ),
+            (
+                "registry-fx",
+                "serum-octopus-v1",
+                "xfer/serum:21",
+                "registry/fx.wav",
+                json.dumps({"category": "FX"}),
+                5.0,
+                "active",
+                0,
+                0,
+            ),
+            (
+                "pianobook-60",
+                "pianobook",
+                "pianobook_32350",
+                "audio/piano-60.wav",
+                json.dumps({"velocity": 100}),
+                8.0,
+                "active",
+                0,
+                0,
+            ),
+            (
+                "pianobook-72",
+                "pianobook",
+                "pianobook_32350",
+                "audio/piano-72.wav",
+                json.dumps({"velocity": 100}),
+                8.0,
+                "active",
+                0,
+                0,
+            ),
         ],
     )
     connection.executemany(
@@ -118,6 +151,9 @@ def _write_registry(path: Path) -> None:
             ("registry-17", 60, 100),
             ("registry-18", 72, 100),
             ("inactive", 60, 100),
+            ("registry-fx", 60, 100),
+            ("pianobook-60", 60, 100),
+            ("pianobook-72", 72, 100),
         ],
     )
     connection.commit()
@@ -126,62 +162,14 @@ def _write_registry(path: Path) -> None:
 
 def _fixture_config(tmp_path: Path) -> ZraveFlowConfig:
     config = ZraveFlowConfig.load(FORMAL_CONFIG)
-    roots = [tmp_path / f"source-{index}" for index in range(4)]
+    roots = [tmp_path / f"source-{index}" for index in range(3)]
     registry = tmp_path / "registry" / "samples.db"
-    dense_dexed = tmp_path / "dexed.jsonl"
-    dense_serum = tmp_path / "serum.jsonl"
     broad = tmp_path / "broad.jsonl"
-    serum_presets = tmp_path / "serum-presets.jsonl"
     _write_registry(registry)
     for relative in ("registry/17.wav", "registry/18.wav"):
         _touch_audio(roots[0], relative)
-    _write_jsonl(
-        dense_dexed,
-        [
-            {
-                "sample_id": "dexed_p0028_n060_v100",
-                "audio_path": "audio/dexed.wav",
-                "preset_id": "dexed_p0028",
-                "midi_note": 60,
-                "velocity": 100,
-                "articulation_id": "steady",
-                "duration_seconds": 5.2,
-            }
-        ],
-    )
-    _touch_audio(roots[1], "audio/dexed.wav")
-    _write_jsonl(
-        dense_serum,
-        [
-            {
-                "sample_id": "serum_s000017_n048_v100",
-                "audio_path": "audio/serum17.wav",
-                "preset_id": "serum_s000017",
-                "midi_note": 48,
-                "velocity": 100,
-                "articulation_id": "steady",
-                "duration_seconds": 5.0,
-            },
-            {
-                "sample_id": "serum_s000019_n060_v100",
-                "audio_path": "audio/serum19.wav",
-                "preset_id": "serum_s000019",
-                "midi_note": 60,
-                "velocity": 100,
-                "articulation_id": "steady",
-                "duration_seconds": 5.0,
-            },
-        ],
-    )
-    _write_jsonl(
-        serum_presets,
-        [
-            {"preset_id": "serum_s000017", "category": "Pads"},
-            {"preset_id": "serum_s000019", "category": "Lead"},
-        ],
-    )
-    _touch_audio(roots[2], "audio/serum17.wav")
-    _touch_audio(roots[2], "audio/serum19.wav")
+    _touch_audio(roots[1], "audio/piano-60.wav")
+    _touch_audio(roots[1], "audio/piano-72.wav")
     _write_jsonl(
         broad,
         [
@@ -203,18 +191,15 @@ def _fixture_config(tmp_path: Path) -> ZraveFlowConfig:
             },
         ],
     )
-    _touch_audio(roots[3], "dexed/000028/note060_vel054.wav")
-    _touch_audio(roots[3], "surge-xt/000009/note072_vel080.wav")
+    _touch_audio(roots[2], "dexed/000028/note060_vel054.wav")
+    _touch_audio(roots[2], "surge-xt/000009/note072_vel080.wav")
 
-    manifests = (registry, dense_dexed, dense_serum, broad)
+    manifests = (registry, registry, broad)
     sources = tuple(
         replace(
             source,
             manifest=str(manifests[index]),
             audio_root=str(roots[index]),
-            preset_metadata=(
-                str(serum_presets) if source.name == "serum_dense" else None
-            ),
         )
         for index, source in enumerate(config.data.sources)
     )
@@ -237,9 +222,9 @@ def test_manifest_merges_aliases_and_keeps_presets_in_one_split(
     report = build_flow_manifest(config)
     rows = read_flow_manifest(config.data.unified_manifest)
 
-    assert report.rows == len(rows) == 7
+    assert report.rows == len(rows) == 6
     assert all(set(row) == FIELDS for row in rows)
-    assert {"Pad", "Lead", "Dexed", "Surge"} == {
+    assert {"Pad", "Lead", "Pianobook", "Dexed", "Surge"} == {
         row["category"] for row in rows
     }
     splits_by_preset: dict[str, set[str]] = defaultdict(set)
@@ -282,23 +267,26 @@ def test_manifest_opens_registry_read_only(
     monkeypatch.setattr(sqlite3, "connect", recording_connect)
     build_flow_manifest(config)
 
-    assert calls == [(f"file:{registry}?mode=ro", True)]
+    assert calls == [
+        (f"file:{registry}?mode=ro", True),
+        (f"file:{registry}?mode=ro", True),
+    ]
     assert not (registry.parent / f"{registry.name}-wal").exists()
 
 
 def test_manifest_rejects_audio_path_escape(tmp_path: Path) -> None:
     config = _fixture_config(tmp_path)
-    source = config.data.sources[1]
+    source = config.data.sources[2]
     _write_jsonl(
         Path(source.manifest),
         [
             {
-                "sample_id": "escape",
-                "audio_path": "../outside.wav",
-                "preset_id": "dexed_p0001",
+                "preset_index": 1,
+                "canonical_synth_id": "dexed/dexed",
+                "wav_path": "../outside.wav",
                 "midi_note": 60,
                 "velocity": 100,
-                "duration_seconds": 5.0,
+                "duration_sec": 5.0,
             }
         ],
     )

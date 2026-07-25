@@ -113,9 +113,11 @@ evaluation_job=$(sbatch --parsable --dependency=afterok:"$train_job" \
 ```
 
 `sbatch --parsable` returns the concrete job ID consumed by the next
-`afterok` dependency. Preparation builds the four-source manifest, encodes the
-fixed standalone RAVE latents, and writes a seed bank. The pitch probe must pass
-its held-out 98% gate before the four 100-update batch candidates are swept.
+`afterok` dependency. Preparation builds a three-source manifest from Serum
+(65%), Pianobook pitch coverage (10%), and Dexed/Surge (25%), clips source
+audio to five seconds, encodes the fixed standalone RAVE latents, and writes a
+seed bank spanning MIDI 21--109. The pitch probe must pass its held-out 98% gate
+before the four 100-update batch candidates are swept.
 Training evaluates every 5,000-update checkpoint on validation presets and
 stops only after three consecutive full hard-gate passes; the last job evaluates
 `final.pt` on test presets.

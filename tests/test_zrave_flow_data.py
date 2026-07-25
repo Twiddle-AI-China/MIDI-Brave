@@ -11,6 +11,7 @@ from torch import Tensor, nn
 
 from midibrave.zrave_flow_config import ZraveFlowConfig
 from midibrave.zrave_flow_data import (
+    _build_pitch_pairs,
     encode_flow_shards,
     finalize_flow_pack,
 )
@@ -111,10 +112,10 @@ def test_shards_preserve_masks_notes_and_contract(tmp_path: Path) -> None:
     config = _fixture_config(tmp_path, shard_records=2)
     sources = [
         "serum_full",
-        "dexed_dense",
-        "serum_dense",
+        "pianobook_pitch",
         "dexed_surge_broad",
-        "dexed_dense",
+        "pianobook_pitch",
+        "dexed_surge_broad",
     ]
     notes = [36, 62, 48, 72, 60]
     rows: list[dict[str, object]] = []
@@ -126,11 +127,11 @@ def test_shards_preserve_masks_notes_and_contract(tmp_path: Path) -> None:
                 index,
                 audio,
                 source_name=source,
-                split="validation" if index == 0 else "train",
+                split="validation" if index < 2 else "train",
                 note=note,
                 preset=f"preset:{index}",
                 category="Pad" if source.startswith("serum") else "Dexed",
-                maximum_future=20 if source == "serum_dense" else 64,
+                maximum_future=64,
             )
         )
     _write_jsonl(Path(config.data.unified_manifest), rows)
@@ -152,6 +153,7 @@ def test_shards_preserve_masks_notes_and_contract(tmp_path: Path) -> None:
     assert pitch_pairs.shape == (5,)
     seed_bank = np.load(Path(config.data.packed_root) / "seed-bank.npz")
     assert seed_bank["history"].shape[1:] == (32, 16)
+    assert set(seed_bank["notes"].tolist()) == {36, 62, 72}
     with np.load(
         Path(config.data.packed_root) / "shard-000000.npz"
     ) as shard:
@@ -178,7 +180,7 @@ def test_pack_statistics_ignore_validation_and_test(tmp_path: Path) -> None:
             _row(
                 index,
                 audio,
-                source_name="dexed_dense",
+                source_name="pianobook_pitch",
                 split=split,
                 note=60,
                 preset=f"dexed:{index:04d}",
@@ -201,3 +203,62 @@ def test_pack_statistics_ignore_validation_and_test(tmp_path: Path) -> None:
         assert np.allclose(stats["mean"], 1.0)
         assert stats["latent_norm_p01"] < 10.0
         assert stats["latent_norm_p99"] < 10.0
+
+
+def test_pitch_pairs_support_all_configured_sources() -> None:
+    rows = [
+        {
+            "source_name": source,
+            "split": "train",
+            "canonical_preset_id": f"{source}:1",
+            "velocity": 100,
+            "articulation_id": "steady",
+            "midi_note": note,
+            "sample_id": f"{source}-{note}",
+        }
+        for source in (
+            "serum_full",
+            "pianobook_pitch",
+            "dexed_surge_broad",
+        )
+        for note in (48, 60)
+    ]
+
+    pairs = _build_pitch_pairs(rows)
+
+    assert pairs.tolist() == [1, 0, 3, 2, 5, 4]
+
+
+def test_encoder_clips_long_audio_to_five_seconds(tmp_path: Path) -> None:
+    config = _fixture_config(tmp_path, shard_records=2)
+    audio = tmp_path / "audio" / "long.wav"
+    _audio(audio, code=0.3, frames=120)
+    _write_jsonl(
+        Path(config.data.unified_manifest),
+        [
+            _row(
+                0,
+                audio,
+                source_name="pianobook_pitch",
+                split="train",
+                note=60,
+                preset="pianobook:000001",
+                category="Pianobook",
+                maximum_future=64,
+            )
+        ],
+    )
+
+    encode_flow_shards(
+        config,
+        rank=0,
+        world_size=1,
+        device="cpu",
+        codec=_FakeStandaloneCodec(),
+    )
+
+    with np.load(
+        Path(config.data.cache_root) / "rank-0" / "part-000000.npz"
+    ) as part:
+        expected_frames = int(44100 * 5.0) // 2048
+        assert part["lengths"].tolist() == [expected_frames]

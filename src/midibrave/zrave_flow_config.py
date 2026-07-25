@@ -11,12 +11,11 @@ import yaml
 _SECTION = TypeVar("_SECTION")
 _SOURCE_NAMES = (
     "serum_full",
-    "dexed_dense",
-    "serum_dense",
+    "pianobook_pitch",
     "dexed_surge_broad",
 )
-_SOURCE_WEIGHTS = (0.55, 0.20, 0.15, 0.10)
-_SOURCE_FUTURES = (64, 64, 20, 64)
+_SOURCE_WEIGHTS = (0.65, 0.10, 0.25)
+_SOURCE_FUTURES = (64, 64, 64)
 _WANDER_DELAYS = (16, 32, 48)
 _CODEC_SHA256 = (
     "3ec093e132ce75d7fee3b8b734c739ebf"
@@ -95,6 +94,7 @@ class FlowDataConfig:
     cache_root: str
     packed_root: str
     shard_records: int
+    maximum_audio_seconds: float
     sources: tuple[FlowSourceConfig, ...]
 
     def __post_init__(self) -> None:
@@ -108,6 +108,12 @@ class FlowDataConfig:
             if not getattr(self, name):
                 raise ValueError(f"data.{name} must not be empty")
         _positive("data.shard_records", self.shard_records)
+        _positive(
+            "data.maximum_audio_seconds",
+            self.maximum_audio_seconds,
+        )
+        if self.maximum_audio_seconds != 5.0:
+            raise ValueError("data.maximum_audio_seconds must be 5.0")
         total = sum(source.weight for source in self.sources)
         if not isclose(total, 1.0, rel_tol=0.0, abs_tol=1.0e-9):
             raise ValueError("source weights must sum to 1")
@@ -121,14 +127,14 @@ class FlowDataConfig:
         weights = tuple(source.weight for source in self.sources)
         if weights != _SOURCE_WEIGHTS:
             raise ValueError(
-                "data source weights must be 0.55, 0.20, 0.15, 0.10"
+                "data source weights must be 0.65, 0.10, 0.25"
             )
         futures = tuple(
             source.maximum_future_frames for source in self.sources
         )
         if futures != _SOURCE_FUTURES:
             raise ValueError(
-                "data source maximum futures must be 64, 64, 20, 64"
+                "data source maximum futures must be 64, 64, 64"
             )
 
 

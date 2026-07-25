@@ -5,33 +5,28 @@ data:
   cache_root: /data/midibrave-zrave-flow/cache
   packed_root: /data/midibrave-zrave-flow/packs/all-synth
   shard_records: 4096
+  maximum_audio_seconds: 5.0
   sources:
     - name: serum_full
       kind: registry
       manifest: /data/datasets/TimbreDatasets/registry/timbreclap_dataset.db
       audio_root: /data/datasets/Timbre_A/serum-octopus-v1
-      weight: 0.55
+      weight: 0.65
       maximum_future_frames: 64
       registry_dataset_id: serum-octopus-v1
       allowed_categories: [Pad, Lead, Bass, Pluck, Keys, Arp, Chord, Synth]
-    - name: dexed_dense
-      kind: jsonl
-      manifest: /data/datasets/latent-cosmos-synth/dexed-dataset/metadata/samples.jsonl
-      audio_root: /data/datasets/latent-cosmos-synth/dexed-dataset
-      weight: 0.20
+    - name: pianobook_pitch
+      kind: registry
+      manifest: /data/datasets/TimbreDatasets/registry/timbreclap_dataset.db
+      audio_root: /data/datasets/Timbre_A/derived/pianobook
+      weight: 0.10
       maximum_future_frames: 64
-    - name: serum_dense
-      kind: jsonl
-      manifest: /data/datasets/latent-cosmos-synth/serum-dataset/metadata/samples.jsonl
-      audio_root: /data/datasets/latent-cosmos-synth/serum-dataset
-      weight: 0.15
-      maximum_future_frames: 20
-      preset_metadata: /data/datasets/latent-cosmos-synth/serum-dataset/metadata/presets.jsonl
+      registry_dataset_id: pianobook
     - name: dexed_surge_broad
       kind: jsonl
       manifest: /data/datasets/Timbre_A/new_dexed_surge/multi_render/manifest.jsonl
       audio_root: /data/datasets/Timbre_A/new_dexed_surge/multi_render
-      weight: 0.10
+      weight: 0.25
       maximum_future_frames: 64
 rave:
   checkpoint: /data/midibrave-zrave-standalone/models/freesoundloop10k_raspi_b2048_r44100_z16.ts
