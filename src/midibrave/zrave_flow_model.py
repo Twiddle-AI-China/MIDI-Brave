@@ -499,15 +499,31 @@ class ZraveFlowTransformer(nn.Module):
         noisy_future: Tensor,
         flow_time: Tensor,
         history: Tensor,
-        midi_note: Tensor,
-        retention: Tensor,
+        midi_note: Tensor | None = None,
+        retention: Tensor | None = None,
         future_mask: Tensor | None = None,
         context_present: Tensor | None = None,
     ) -> Tensor:
-        if not self.pitch_conditioning or self.midi_embedding is None:
-            raise RuntimeError(
-                "MIDI-conditioned forward is disabled for this model"
+        if not self.pitch_conditioning:
+            if midi_note is not None or context_present is not None:
+                raise ValueError(
+                    "pure flow forward does not accept MIDI/context dropout"
+                )
+            if retention is None:
+                raise ValueError("retention is required")
+            return self.forward_pure(
+                noisy_future,
+                flow_time,
+                history,
+                retention,
+                future_mask=future_mask,
             )
+        if midi_note is None or retention is None:
+            raise ValueError(
+                "conditional flow forward requires MIDI and retention"
+            )
+        if self.midi_embedding is None:
+            raise RuntimeError("conditional model lacks MIDI embedding")
         future_mask, context_present = self._validate_forward(
             noisy_future,
             flow_time,

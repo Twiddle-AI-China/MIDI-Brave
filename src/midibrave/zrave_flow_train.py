@@ -31,12 +31,14 @@ from .zrave_flow_loss import (
     distributed_gradient_l2_norm,
     make_flow_training_pair,
     zrave_flow_loss,
+    zrave_pure_flow_loss,
 )
 from .zrave_flow_model import (
     FlowStatistics,
     ZraveFlowTransformer,
     retention_curve,
     sample_flow_block,
+    sample_pure_flow_block,
 )
 from .zrave_flow_sampler import FlowBatch, GpuFlowSampler
 from .zrave_pitch_probe import LatentPitchProbe
@@ -160,10 +162,12 @@ def _unwrapped(model: nn.Module) -> nn.Module:
     )
 
 
-_CONTRACT_HASHES = {
+_BASE_CONTRACT_HASHES = {
     "config_sha256",
     "pack_index_sha256",
     "statistics_sha256",
+}
+_PITCH_CONTRACT_HASHES = {
     "pitch_checkpoint_sha256",
     "pitch_qualification_sha256",
 }
@@ -171,20 +175,84 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _validate_checkpoint_contract(contract: dict[str, object]) -> None:
-    required = _CONTRACT_HASHES | {"world_size", "batch_per_gpu"}
+    pitch_conditioning = contract.get("pitch_conditioning", True)
+    if not isinstance(pitch_conditioning, bool):
+        raise ValueError("pitch_conditioning must be boolean")
+    required = _BASE_CONTRACT_HASHES | {"world_size", "batch_per_gpu"}
+    if pitch_conditioning:
+        required |= _PITCH_CONTRACT_HASHES
     missing = required - set(contract)
     if missing:
         raise ValueError(
             "flow checkpoint contract missing: "
             + ", ".join(sorted(missing))
         )
-    for name in _CONTRACT_HASHES:
+    if not pitch_conditioning:
+        unexpected = _PITCH_CONTRACT_HASHES & set(contract)
+        if unexpected:
+            raise ValueError(
+                "pure flow checkpoint contract contains pitch hashes"
+            )
+    for name in _BASE_CONTRACT_HASHES | (
+        _PITCH_CONTRACT_HASHES if pitch_conditioning else set()
+    ):
         if not _SHA256.fullmatch(str(contract[name])):
             raise ValueError(f"{name} must be a lowercase SHA-256")
     if int(contract["world_size"]) <= 0:
         raise ValueError("world_size must be positive")
     if int(contract["batch_per_gpu"]) <= 0:
         raise ValueError("batch_per_gpu must be positive")
+
+
+def build_flow_checkpoint_contract(
+    *,
+    config: ZraveFlowConfig,
+    world_size: int,
+    batch_per_gpu: int,
+    maximum_updates: int,
+    config_sha256: str,
+    pack_index_sha256: str,
+    statistics_sha256: str,
+    pitch_checkpoint_sha256: str | None = None,
+    pitch_qualification_sha256: str | None = None,
+) -> dict[str, object]:
+    contract: dict[str, object] = {
+        "config_sha256": config_sha256,
+        "pack_index_sha256": pack_index_sha256,
+        "statistics_sha256": statistics_sha256,
+        "world_size": world_size,
+        "batch_per_gpu": batch_per_gpu,
+        "maximum_updates": maximum_updates,
+        "latent_dim": config.model.latent_dim,
+        "context_frames": config.model.context_frames,
+        "future_frames": config.model.future_frames,
+        "pitch_conditioning": config.model.pitch_conditioning,
+    }
+    pitch_hashes = (
+        pitch_checkpoint_sha256,
+        pitch_qualification_sha256,
+    )
+    if config.model.pitch_conditioning:
+        if any(value is None for value in pitch_hashes):
+            raise ValueError(
+                "pitch-conditioned flow requires both pitch hashes"
+            )
+        contract["pitch_checkpoint_sha256"] = pitch_checkpoint_sha256
+        contract["pitch_qualification_sha256"] = (
+            pitch_qualification_sha256
+        )
+    elif any(value is not None for value in pitch_hashes):
+        raise ValueError("pure flow contract must not contain pitch hashes")
+    _validate_checkpoint_contract(contract)
+    return contract
+
+
+def _checkpoint_architecture(contract: dict[str, object]) -> str:
+    return (
+        "zrave_conditional_flow_transformer_v1"
+        if contract.get("pitch_conditioning", True)
+        else "zrave_pure_flow_transformer_v1"
+    )
 
 
 def save_flow_checkpoint(
@@ -194,7 +262,7 @@ def save_flow_checkpoint(
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler | None,
     sampler: StatefulSampler,
-    pitch_weight_controller: PitchWeightController,
+    pitch_weight_controller: PitchWeightController | None,
     update: int,
     contract: dict[str, object],
     latest_gate_report_sha256: str | None = None,
@@ -230,20 +298,25 @@ def save_flow_checkpoint(
         rng_states = [local_rng]
     payload: dict[str, object] = {
         "format": 1,
-        "architecture": "zrave_conditional_flow_transformer_v1",
+        "architecture": _checkpoint_architecture(contract),
         "model": _unwrapped(model).state_dict(),
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict() if scaler is not None else None,
         "sampler_by_rank": sampler_states,
         "rng_by_rank": rng_states,
-        "pitch_weight_controller": (
-            pitch_weight_controller.state_dict()
-        ),
         "update": int(update),
         "contract": dict(contract),
         "latest_gate_report_sha256": latest_gate_report_sha256,
         "consecutive_gate_passes": int(consecutive_gate_passes),
     }
+    if contract.get("pitch_conditioning", True):
+        if pitch_weight_controller is None:
+            raise ValueError(
+                "conditional checkpoint requires pitch controller"
+            )
+        payload["pitch_weight_controller"] = (
+            pitch_weight_controller.state_dict()
+        )
     _atomic_torch_save(Path(path), payload)
 
 
@@ -254,7 +327,7 @@ def load_flow_checkpoint(
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler | None,
     sampler: StatefulSampler,
-    pitch_weight_controller: PitchWeightController,
+    pitch_weight_controller: PitchWeightController | None,
     expected_contract: dict[str, object],
 ) -> dict[str, int | str | None]:
     _validate_checkpoint_contract(expected_contract)
@@ -263,9 +336,8 @@ def load_flow_checkpoint(
         raise ValueError("flow checkpoint must be a mapping")
     if payload.get("format") != 1:
         raise ValueError("unsupported flow checkpoint format")
-    if (
-        payload.get("architecture")
-        != "zrave_conditional_flow_transformer_v1"
+    if payload.get("architecture") != _checkpoint_architecture(
+        expected_contract
     ):
         raise ValueError("flow checkpoint architecture mismatch")
     actual_contract = payload.get("contract")
@@ -293,10 +365,15 @@ def load_flow_checkpoint(
         raise ValueError("flow checkpoint lacks rank resume state")
     sampler.load_state_dict(sampler_states[rank])
     _restore_rng_state(rng_states[rank])
-    controller_state = payload.get("pitch_weight_controller")
-    if not isinstance(controller_state, dict):
-        raise ValueError("flow checkpoint lacks pitch controller state")
-    pitch_weight_controller.load_state_dict(controller_state)
+    if expected_contract.get("pitch_conditioning", True):
+        if pitch_weight_controller is None:
+            raise ValueError(
+                "conditional checkpoint requires pitch controller"
+            )
+        controller_state = payload.get("pitch_weight_controller")
+        if not isinstance(controller_state, dict):
+            raise ValueError("flow checkpoint lacks pitch controller state")
+        pitch_weight_controller.load_state_dict(controller_state)
     gate_hash = payload.get("latest_gate_report_sha256")
     if gate_hash is not None and (
         not isinstance(gate_hash, str)
@@ -434,18 +511,30 @@ def _prepare_exposure_batch(
     generation_seed: int,
     block_index: int,
 ) -> FlowBatch:
-    generated = sample_flow_block(
-        model,
-        model.statistics(),
-        batch.history,
-        batch.midi_note,
-        generation_seed=generation_seed,
-        block_index=block_index,
-        temperature=1.0,
-        wander_delay_frames=32,
-        pitch_guidance=3.0,
-        solver_steps=4,
-    )[:, :32]
+    if model.pitch_conditioning:
+        generated = sample_flow_block(
+            model,
+            model.statistics(),
+            batch.history,
+            batch.midi_note,
+            generation_seed=generation_seed,
+            block_index=block_index,
+            temperature=1.0,
+            wander_delay_frames=32,
+            pitch_guidance=3.0,
+            solver_steps=4,
+        )[:, :32]
+    else:
+        generated = sample_pure_flow_block(
+            model,
+            model.statistics(),
+            batch.history,
+            generation_seed=generation_seed,
+            block_index=block_index,
+            temperature=1.0,
+            wander_delay_frames=32,
+            solver_steps=4,
+        )[:, :32]
     rolled_history = roll_exposure_history(batch.history, generated)
     shifted_future = torch.zeros_like(batch.future)
     shifted_future[:, :32] = batch.future[:, 32:64]
@@ -543,11 +632,11 @@ def _run_flow_update(
     *,
     training_model: nn.Module,
     sampler: GpuFlowSampler,
-    pitch_probe: LatentPitchProbe,
+    pitch_probe: LatentPitchProbe | None,
     statistics: FlowStatistics,
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
-    controller: PitchWeightController,
+    controller: PitchWeightController | None,
     config: ZraveFlowConfig,
     update: int,
     maximum_updates: int,
@@ -587,18 +676,6 @@ def _run_flow_update(
             generation_seed=config.seed + update,
             block_index=rank,
         )
-    dropout = config.model.condition_dropout
-    pitch_present = (
-        torch.rand(batch_per_gpu, device=device) >= dropout
-    )
-    context_present = (
-        torch.rand(batch_per_gpu, device=device) >= dropout
-    )
-    conditioned_note = torch.where(
-        pitch_present,
-        batch.midi_note,
-        torch.full_like(batch.midi_note, -1),
-    )
     temperatures = 0.7 + 0.6 * torch.rand(
         batch_per_gpu,
         device=device,
@@ -619,31 +696,73 @@ def _run_flow_update(
     )
     _set_learning_rate(optimizer, learning_rate)
     optimizer.zero_grad(set_to_none=True)
-    with torch.autocast(device_type="cuda", dtype=torch.float16):
-        predicted_velocity = training_model(
-            pair.noisy_future,
-            pair.flow_time,
-            batch.history,
-            conditioned_note,
-            retention_curve(batch.wander_delay_frames, 64),
-            future_mask=batch.future_mask,
-            context_present=context_present,
-        )
-        pitch_weight = _effective_pitch_weight(
-            controller,
-            next_update,
-        )
-        report = zrave_flow_loss(
-            predicted_velocity,
-            pair,
-            batch.history,
-            batch.future_mask,
-            batch.midi_note,
-            pitch_probe,
-            statistics,
-            pitch_weight,
-        )
-    if next_update % config.loss.pitch_gradient_measure_every == 0:
+    retention = retention_curve(batch.wander_delay_frames, 64)
+    with torch.autocast(
+        device_type=device.type,
+        dtype=torch.float16,
+        enabled=device.type == "cuda",
+    ):
+        if config.model.pitch_conditioning:
+            if pitch_probe is None or controller is None:
+                raise ValueError(
+                    "conditional flow update requires pitch runtime"
+                )
+            dropout = config.model.condition_dropout
+            pitch_present = (
+                torch.rand(batch_per_gpu, device=device) >= dropout
+            )
+            context_present = (
+                torch.rand(batch_per_gpu, device=device) >= dropout
+            )
+            conditioned_note = torch.where(
+                pitch_present,
+                batch.midi_note,
+                torch.full_like(batch.midi_note, -1),
+            )
+            predicted_velocity = training_model(
+                pair.noisy_future,
+                pair.flow_time,
+                batch.history,
+                conditioned_note,
+                retention,
+                future_mask=batch.future_mask,
+                context_present=context_present,
+            )
+            pitch_weight = _effective_pitch_weight(
+                controller,
+                next_update,
+            )
+            report = zrave_flow_loss(
+                predicted_velocity,
+                pair,
+                batch.history,
+                batch.future_mask,
+                batch.midi_note,
+                pitch_probe,
+                statistics,
+                pitch_weight,
+            )
+        else:
+            predicted_velocity = training_model(
+                pair.noisy_future,
+                pair.flow_time,
+                batch.history,
+                retention=retention,
+                future_mask=batch.future_mask,
+            )
+            pitch_weight = 0.0
+            report = zrave_pure_flow_loss(
+                predicted_velocity,
+                pair,
+                batch.history,
+                batch.future_mask,
+                statistics,
+            )
+    if (
+        config.model.pitch_conditioning
+        and next_update % config.loss.pitch_gradient_measure_every == 0
+    ):
+        assert controller is not None
         parameters = _future_parameters(training_model)
         flow_norm = distributed_gradient_l2_norm(
             report.components["flow"],
@@ -692,13 +811,17 @@ def _run_flow_update(
         global_frames = int(frame_value.item())
     else:
         global_frames = int(timing[1].item())
-    pitch_metrics = _pitch_diagnostics(
-        pair,
-        predicted_velocity,
-        batch.midi_note,
-        batch.pitch_transition_mask,
-        pitch_probe,
-        statistics,
+    pitch_metrics = (
+        _pitch_diagnostics(
+            pair,
+            predicted_velocity,
+            batch.midi_note,
+            batch.pitch_transition_mask,
+            pitch_probe,
+            statistics,
+        )
+        if pitch_probe is not None
+        else {}
     )
     return FlowUpdateResult(
         loss=float(report.total.detach()),
@@ -851,16 +974,22 @@ def summarize_flow_benchmark(
     nonfinite_updates: int,
     config_sha256: str,
     pack_index_sha256: str,
-    pitch_checkpoint_sha256: str,
+    pitch_checkpoint_sha256: str | None,
     git_commit: str,
 ) -> dict[str, object]:
     for name, digest in (
         ("config_sha256", config_sha256),
         ("pack_index_sha256", pack_index_sha256),
-        ("pitch_checkpoint_sha256", pitch_checkpoint_sha256),
     ):
         if not _SHA256.fullmatch(digest):
             raise ValueError(f"{name} must be a lowercase SHA-256")
+    if (
+        pitch_checkpoint_sha256 is not None
+        and not _SHA256.fullmatch(pitch_checkpoint_sha256)
+    ):
+        raise ValueError(
+            "pitch_checkpoint_sha256 must be a lowercase SHA-256"
+        )
     if not re.fullmatch(r"[0-9a-f]{40}", git_commit):
         raise ValueError("git_commit must be an exact Git commit ID")
     durations = np.asarray(list(durations_seconds), dtype=np.float64)
@@ -889,7 +1018,7 @@ def summarize_flow_benchmark(
         if durations.size
         else np.asarray([], dtype=np.float64)
     )
-    return {
+    report: dict[str, object] = {
         "status": "ok" if valid else "invalid",
         "batch_per_gpu": int(batch_per_gpu),
         "world_size": int(world_size),
@@ -916,9 +1045,11 @@ def summarize_flow_benchmark(
         "nonfinite_updates": int(nonfinite_updates),
         "config_sha256": config_sha256,
         "pack_index_sha256": pack_index_sha256,
-        "pitch_checkpoint_sha256": pitch_checkpoint_sha256,
         "git_commit": git_commit,
     }
+    if pitch_checkpoint_sha256 is not None:
+        report["pitch_checkpoint_sha256"] = pitch_checkpoint_sha256
+    return report
 
 
 def _build_runtime(
@@ -936,26 +1067,42 @@ def _build_runtime(
     statistics_path = packed_root / "statistics.npz"
     pack_hash = _sha256_file(index_path)
     statistics = _load_statistics(packed_root)
-    qualification_path, pitch_checkpoint, _qualification = (
-        _qualification_artifacts(args.pitch_probe)
-    )
-    pitch_probe = load_qualified_pitch_probe(
-        args.pitch_probe,
-        pack_hash,
-    ).to(device)
-    pitch_probe.requires_grad_(False)
-    pitch_probe.eval()
+    pitch_probe: LatentPitchProbe | None = None
+    pitch_checkpoint_hash: str | None = None
+    pitch_qualification_hash: str | None = None
+    if config.model.pitch_conditioning:
+        if args.pitch_probe is None:
+            raise ValueError(
+                "conditional flow config requires --pitch-probe"
+            )
+        qualification_path, pitch_checkpoint, _qualification = (
+            _qualification_artifacts(args.pitch_probe)
+        )
+        pitch_probe = load_qualified_pitch_probe(
+            args.pitch_probe,
+            pack_hash,
+        ).to(device)
+        pitch_probe.requires_grad_(False)
+        pitch_probe.eval()
+        pitch_checkpoint_hash = _sha256_file(pitch_checkpoint)
+        pitch_qualification_hash = _sha256_file(qualification_path)
+    elif args.pitch_probe is not None:
+        raise ValueError("pure flow config does not accept --pitch-probe")
     train_sampler = GpuFlowSampler.from_pack(
         config,
         split="train",
         device=device,
         seed=config.seed + 3000 + rank,
     )
-    validation_sampler = GpuFlowSampler.from_pack(
-        config,
-        split="validation",
-        device=device,
-        seed=config.seed + 4000 + rank,
+    validation_sampler = (
+        GpuFlowSampler.from_pack(
+            config,
+            split="validation",
+            device=device,
+            seed=config.seed + 4000 + rank,
+        )
+        if config.model.pitch_conditioning
+        else None
     )
     model = ZraveFlowTransformer(
         config.model,
@@ -977,29 +1124,31 @@ def _build_runtime(
         betas=(config.optimizer.beta1, config.optimizer.beta2),
         weight_decay=config.optimizer.weight_decay,
     )
-    scaler = torch.amp.GradScaler("cuda")
+    scaler = torch.amp.GradScaler("cuda", init_scale=1024.0)
     if config.source_path is None:
         raise ValueError("training requires a file-backed config")
-    contract: dict[str, object] = {
-        "config_sha256": _sha256_file(config.source_path),
-        "pack_index_sha256": pack_hash,
-        "statistics_sha256": _sha256_file(statistics_path),
-        "pitch_checkpoint_sha256": _sha256_file(pitch_checkpoint),
-        "pitch_qualification_sha256": _sha256_file(qualification_path),
-        "world_size": world_size,
-        "batch_per_gpu": batch_per_gpu,
-        "maximum_updates": maximum_updates,
-        "latent_dim": config.model.latent_dim,
-        "context_frames": config.model.context_frames,
-        "future_frames": config.model.future_frames,
-    }
-    controller = PitchWeightController(
-        initial=config.loss.pitch_initial,
-        minimum=config.loss.pitch_minimum,
-        maximum=config.loss.pitch_maximum,
-        target_minimum=config.loss.pitch_gradient_minimum_ratio,
-        target_maximum=config.loss.pitch_gradient_maximum_ratio,
-        warmup_updates=config.loss.pitch_warmup_updates,
+    contract = build_flow_checkpoint_contract(
+        config=config,
+        world_size=world_size,
+        batch_per_gpu=batch_per_gpu,
+        maximum_updates=maximum_updates,
+        config_sha256=_sha256_file(config.source_path),
+        pack_index_sha256=pack_hash,
+        statistics_sha256=_sha256_file(statistics_path),
+        pitch_checkpoint_sha256=pitch_checkpoint_hash,
+        pitch_qualification_sha256=pitch_qualification_hash,
+    )
+    controller = (
+        PitchWeightController(
+            initial=config.loss.pitch_initial,
+            minimum=config.loss.pitch_minimum,
+            maximum=config.loss.pitch_maximum,
+            target_minimum=config.loss.pitch_gradient_minimum_ratio,
+            target_maximum=config.loss.pitch_gradient_maximum_ratio,
+            warmup_updates=config.loss.pitch_warmup_updates,
+        )
+        if config.model.pitch_conditioning
+        else None
     )
     return {
         "config": config,
@@ -1035,7 +1184,12 @@ def _log_update(
         result.global_valid_frames / result.duration_seconds,
         update,
     )
-    writer.add_scalar("train/pitch_weight", result.pitch_weight, update)
+    if result.pitch_metrics or result.pitch_weight:
+        writer.add_scalar(
+            "train/pitch_weight",
+            result.pitch_weight,
+            update,
+        )
     writer.add_scalar(
         "health/gradient_norm",
         result.gradient_norm,
@@ -1149,8 +1303,10 @@ def _benchmark(args: argparse.Namespace) -> None:
         pack_index_sha256=str(
             runtime["contract"]["pack_index_sha256"]
         ),
-        pitch_checkpoint_sha256=str(
-            runtime["contract"]["pitch_checkpoint_sha256"]
+        pitch_checkpoint_sha256=(
+            str(runtime["contract"]["pitch_checkpoint_sha256"])
+            if "pitch_checkpoint_sha256" in runtime["contract"]
+            else None
         ),
         git_commit=_git_commit(commit_root),
     )
@@ -1216,7 +1372,18 @@ def _train(args: argparse.Namespace) -> None:
             update == 1 or update % config.train.log_every == 0
         ):
             _log_update(writer, result, update)
-        if update % config.train.validation_every == 0:
+        if (
+            config.model.pitch_conditioning
+            and update % config.train.validation_every == 0
+        ):
+            if (
+                runtime["validation_sampler"] is None
+                or runtime["pitch_probe"] is None
+                or runtime["controller"] is None
+            ):
+                raise RuntimeError(
+                    "conditional validation runtime is incomplete"
+                )
             validation, diversity = _validation_snapshot(
                 model=runtime["training_model"],
                 sampler=runtime["validation_sampler"],
@@ -1270,6 +1437,13 @@ def _train(args: argparse.Namespace) -> None:
             )
             if dist.is_initialized():
                 dist.barrier()
+            if not config.model.pitch_conditioning:
+                if rank == 0 and final_due:
+                    _atomic_copy(
+                        checkpoint,
+                        checkpoint_root / "final.pt",
+                    )
+                continue
             evaluation_message: list[object] = [None]
             if rank == 0:
                 try:
@@ -1371,7 +1545,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Train or benchmark the stochastic Z-RAVE flow model."
     )
     parser.add_argument("--config", required=True)
-    parser.add_argument("--pitch-probe", required=True)
+    parser.add_argument("--pitch-probe")
     parser.add_argument("--batch-per-gpu", type=int)
     parser.add_argument("--max-updates", type=int)
     parser.add_argument("--resume")
