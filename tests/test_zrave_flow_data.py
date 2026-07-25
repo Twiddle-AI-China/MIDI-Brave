@@ -12,6 +12,7 @@ from torch import Tensor, nn
 from midibrave.zrave_flow_config import ZraveFlowConfig
 from midibrave.zrave_flow_data import (
     _build_pitch_pairs,
+    _resolve_encode_device,
     encode_flow_shards,
     finalize_flow_pack,
 )
@@ -42,6 +43,21 @@ class _FakeStandaloneCodec(nn.Module):
             ),
         )
         return values.view(-1, 1, 1).expand(-1, 16, frames).clone()
+
+
+def test_encode_device_uses_torchrun_local_rank() -> None:
+    assert _resolve_encode_device(
+        "cuda",
+        {"LOCAL_RANK": "5"},
+    ) == "cuda:5"
+    assert _resolve_encode_device(
+        "cuda:3",
+        {"LOCAL_RANK": "5"},
+    ) == "cuda:3"
+    assert _resolve_encode_device(
+        "cpu",
+        {"LOCAL_RANK": "5"},
+    ) == "cpu"
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:

@@ -8,7 +8,7 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Mapping
 
 import numpy as np
 import torch
@@ -32,6 +32,19 @@ _SEED_CATEGORIES = (
     "Chord",
     "Synth",
 )
+
+
+def _resolve_encode_device(
+    requested: str,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    if requested != "cuda":
+        return requested
+    values = os.environ if environment is None else environment
+    local_rank = int(values.get("LOCAL_RANK", "0"))
+    if local_rank < 0:
+        raise ValueError("LOCAL_RANK must be non-negative")
+    return f"cuda:{local_rank}"
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -869,7 +882,7 @@ def main() -> None:
             config,
             args.rank,
             args.world_size,
-            args.device,
+            _resolve_encode_device(args.device),
         )
     elif args.command == "finalize":
         report = finalize_flow_pack(config)
