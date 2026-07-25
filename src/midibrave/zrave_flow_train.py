@@ -949,9 +949,16 @@ def _qualification_artifacts(
 
 
 def _git_commit(root: Path) -> str:
+    resolved_root = root.resolve()
     result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=root,
+        [
+            "git",
+            "-c",
+            f"safe.directory={resolved_root}",
+            "rev-parse",
+            "HEAD",
+        ],
+        cwd=resolved_root,
         check=True,
         capture_output=True,
         text=True,

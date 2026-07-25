@@ -13,6 +13,7 @@ from midibrave.zrave_flow_model import (
 )
 from midibrave.zrave_flow_sampler import FlowBatch
 from midibrave.zrave_flow_train import (
+    _git_commit,
     _parser,
     _run_flow_update,
     build_flow_checkpoint_contract,
@@ -183,6 +184,36 @@ def test_pure_cli_does_not_require_pitch_probe() -> None:
     arguments = _parser().parse_args(["--config", str(PURE_CONFIG)])
 
     assert arguments.pitch_probe is None
+
+
+def test_git_commit_marks_only_exact_repo_as_safe(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class _Result:
+        stdout = "d" * 40 + "\n"
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["cwd"] = kwargs["cwd"]
+        return _Result()
+
+    monkeypatch.setattr(
+        "midibrave.zrave_flow_train.subprocess.run",
+        fake_run,
+    )
+
+    assert _git_commit(tmp_path) == "d" * 40
+    assert observed["command"] == [
+        "git",
+        "-c",
+        f"safe.directory={tmp_path.resolve()}",
+        "rev-parse",
+        "HEAD",
+    ]
+    assert observed["cwd"] == tmp_path.resolve()
 
 
 def test_pure_runtime_contract_has_no_pitch_hashes() -> None:
