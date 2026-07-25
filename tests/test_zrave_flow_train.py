@@ -5,6 +5,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
+import midibrave.zrave_flow_train as flow_train
 from midibrave.zrave_flow_config import ZraveFlowConfig
 from midibrave.zrave_flow_loss import PitchWeightController
 from midibrave.zrave_flow_model import (
@@ -326,6 +327,84 @@ def test_pure_checkpoint_omits_pitch_state(tmp_path: Path) -> None:
         expected_contract=contract,
     )
     assert restored["update"] == 1
+
+
+def test_distributed_checkpoint_uses_explicit_cpu_process_group(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    sampler = _TinySampler(seed=5)
+    checkpoint_group = object()
+    observed_groups: list[object] = []
+
+    monkeypatch.setattr(
+        "midibrave.zrave_flow_train.dist.is_initialized",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "midibrave.zrave_flow_train.dist.get_world_size",
+        lambda: 2,
+    )
+    monkeypatch.setattr(
+        "midibrave.zrave_flow_train.dist.get_rank",
+        lambda: 1,
+    )
+
+    def gather_object(
+        _source,
+        _destination,
+        *,
+        dst: int,
+        group,
+    ) -> None:
+        assert dst == 0
+        observed_groups.append(group)
+
+    monkeypatch.setattr(
+        "midibrave.zrave_flow_train.dist.gather_object",
+        gather_object,
+    )
+
+    save_flow_checkpoint(
+        tmp_path / "distributed.pt",
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=None,
+        update=5000,
+        contract={
+            "world_size": 2,
+            "batch_per_gpu": 2,
+            "config_sha256": "a" * 64,
+            "pack_index_sha256": "b" * 64,
+            "statistics_sha256": "c" * 64,
+            "pitch_conditioning": False,
+        },
+        checkpoint_process_group=checkpoint_group,
+    )
+
+    assert observed_groups == [checkpoint_group, checkpoint_group]
+
+
+def test_checkpoint_process_group_uses_gloo(monkeypatch) -> None:
+    checkpoint_group = object()
+    observed: dict[str, object] = {}
+
+    def new_group(*, backend: str):
+        observed["backend"] = backend
+        return checkpoint_group
+
+    monkeypatch.setattr(flow_train.dist, "new_group", new_group)
+
+    assert flow_train._new_checkpoint_process_group(1) is None
+    assert (
+        flow_train._new_checkpoint_process_group(8)
+        is checkpoint_group
+    )
+    assert observed == {"backend": "gloo"}
 
 
 def test_exposure_batches_start_only_in_final_twenty_percent() -> None:

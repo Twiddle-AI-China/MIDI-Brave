@@ -267,6 +267,7 @@ def save_flow_checkpoint(
     contract: dict[str, object],
     latest_gate_report_sha256: str | None = None,
     consecutive_gate_passes: int = 0,
+    checkpoint_process_group: dist.ProcessGroup | None = None,
 ) -> None:
     _validate_checkpoint_contract(contract)
     if update < 0 or consecutive_gate_passes < 0:
@@ -282,14 +283,28 @@ def save_flow_checkpoint(
     local_sampler = sampler.state_dict()
     local_rng = _capture_rng_state()
     if dist.is_initialized():
+        if checkpoint_process_group is None:
+            raise ValueError(
+                "distributed checkpoint requires a CPU process group"
+            )
         sampler_states: list[object] | None = (
             [None] * world_size if rank == 0 else None
         )
         rng_states: list[object] | None = (
             [None] * world_size if rank == 0 else None
         )
-        dist.gather_object(local_sampler, sampler_states, dst=0)
-        dist.gather_object(local_rng, rng_states, dst=0)
+        dist.gather_object(
+            local_sampler,
+            sampler_states,
+            dst=0,
+            group=checkpoint_process_group,
+        )
+        dist.gather_object(
+            local_rng,
+            rng_states,
+            dst=0,
+            group=checkpoint_process_group,
+        )
         if rank != 0:
             return
         assert sampler_states is not None and rng_states is not None
@@ -414,6 +429,12 @@ def _setup_distributed() -> tuple[int, int, int, torch.device]:
     if world_size > 1:
         dist.init_process_group("nccl")
     return rank, local_rank, world_size, torch.device("cuda", local_rank)
+
+
+def _new_checkpoint_process_group(
+    world_size: int,
+) -> dist.ProcessGroup | None:
+    return dist.new_group(backend="gloo") if world_size > 1 else None
 
 
 def _seed_everything(seed: int, rank: int) -> None:
@@ -1064,6 +1085,7 @@ def _build_runtime(
 ) -> dict[str, Any]:
     config = ZraveFlowConfig.load(args.config)
     rank, local_rank, world_size, device = _setup_distributed()
+    checkpoint_process_group = _new_checkpoint_process_group(world_size)
     _seed_everything(config.seed, rank)
     batch_per_gpu = int(args.batch_per_gpu or config.train.batch_per_gpu)
     maximum_updates = int(args.max_updates or config.train.max_updates)
@@ -1162,6 +1184,7 @@ def _build_runtime(
         "rank": rank,
         "world_size": world_size,
         "device": device,
+        "checkpoint_process_group": checkpoint_process_group,
         "batch_per_gpu": batch_per_gpu,
         "maximum_updates": maximum_updates,
         "statistics": statistics,
@@ -1441,6 +1464,9 @@ def _train(args: argparse.Namespace) -> None:
                 contract=runtime["contract"],
                 latest_gate_report_sha256=latest_gate_hash,
                 consecutive_gate_passes=gate_state.consecutive_passes,
+                checkpoint_process_group=runtime[
+                    "checkpoint_process_group"
+                ],
             )
             if dist.is_initialized():
                 dist.barrier()
@@ -1530,6 +1556,9 @@ def _train(args: argparse.Namespace) -> None:
                 contract=runtime["contract"],
                 latest_gate_report_sha256=latest_gate_hash,
                 consecutive_gate_passes=gate_state.consecutive_passes,
+                checkpoint_process_group=runtime[
+                    "checkpoint_process_group"
+                ],
             )
             if dist.is_initialized():
                 dist.barrier()
