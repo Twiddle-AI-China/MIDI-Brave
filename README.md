@@ -89,43 +89,38 @@ midibrave-train --config configs/smoke.yaml --phase 2 --max-effective-updates 3 
 
 GPU work on Octopus must run through SLURM and Docker. See `scripts/`.
 
-## Stochastic Z-RAVE Flow Training
+## Pure Z-RAVE Transformer + Flow Matching POC
 
-This standalone path learns possible continuations of the original 16-D RAVE
-latent sequence. A 32-frame latent history and an independently controlled MIDI
-note condition a non-causal 64-frame conditional Flow Matching Transformer.
-It does not import the older conditional decoder, audio-conditioning, or
-deterministic `zrave_prediction_loss` paths.
+The active proof of concept learns stochastic continuations of the original
+16-D RAVE latent sequence. It consumes 32 consecutive `z_rave` frames and uses
+a Transformer velocity field with Flow Matching to generate the next 64
+frames. This path has no MIDI, pitch probe, CLAP, waveform reconstruction, or
+KL objective. Its loss is flow matching plus small boundary-continuity and
+latent-statistics terms.
 
-Submit the formal Octopus stages as one dependency chain:
+The completed pack at
+`/data/midibrave-zrave-flow/packs/all-synth` already contains Serum,
+Pianobook, and Dexed/Surge material. Do not encode the source audio again.
+Submit only the throughput sweep and formal training:
 
 ```bash
-prepare_job=$(sbatch --parsable scripts/cloud/octopus_zrave_flow_prepare.sbatch)
-pitch_job=$(sbatch --parsable --dependency=afterok:"$prepare_job" \
-  scripts/cloud/octopus_zrave_pitch_train.sbatch)
-sweep_job=$(sbatch --parsable --dependency=afterok:"$pitch_job" \
-  scripts/cloud/octopus_zrave_flow_sweep.sbatch)
+sweep_job=$(sbatch --parsable \
+  scripts/cloud/octopus_zrave_pure_flow_sweep.sbatch)
 train_job=$(sbatch --parsable --dependency=afterok:"$sweep_job" \
-  scripts/cloud/octopus_zrave_flow_train.sbatch)
-evaluation_job=$(sbatch --parsable --dependency=afterok:"$train_job" \
-  --export=ALL,ZRAVE_FLOW_CHECKPOINT=final.pt \
-  scripts/cloud/octopus_zrave_flow_evaluate.sbatch)
+  scripts/cloud/octopus_zrave_pure_flow_train.sbatch)
 ```
 
-`sbatch --parsable` returns the concrete job ID consumed by the next
-`afterok` dependency. Preparation builds a three-source manifest from Serum
-(65%), Pianobook pitch coverage (10%), and Dexed/Surge (25%), clips source
-audio to five seconds, encodes the fixed standalone RAVE latents, and writes a
-seed bank spanning MIDI 21--109. The pitch probe must pass its held-out 98% gate
-before the four 100-update batch candidates are swept.
-Training evaluates every 5,000-update checkpoint on validation presets and
-stops only after three consecutive full hard-gate passes; the last job evaluates
-`final.pt` on test presets.
+The sweep measures per-GPU batches 128, 256, 384, and 512 for 100 updates on
+eight GPUs and selects the highest valid latent-frame throughput. Formal
+training runs 100,000 updates and writes a checkpoint every 5,000 updates under
+`/data/midibrave-zrave-flow/runs/pure-flow-poc-v1`; TensorBoard events are in
+the adjacent `tensorboard/` directory.
 
-All generated manifests, packs, checkpoints, TensorBoard events, WAVs, and
-reports remain under `/data/midibrave-zrave-flow`. Runtime does not need a RAVE
-encoder: it needs a saved seed latent bank, the flow checkpoint, MIDI note,
-generation seed, temperature, wander delay, and the fixed RAVE decoder.
+Runtime needs only a saved 32-frame latent seed, the pure-flow checkpoint,
+generation seed, temperature, wander delay, and the frozen RAVE decoder. The
+RAVE encoder is not required after seed-bank construction. The older
+MIDI-conditioned flow scripts remain solely for artifact compatibility and are
+not part of this POC.
 
 ## Predictive RAVE + CLAP runtime (v3)
 
