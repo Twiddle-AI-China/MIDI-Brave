@@ -128,9 +128,9 @@ class _FutureFlowLayer(nn.Module):
 
 def _resolve_model_dimensions(
     config: FlowModelConfig | None,
-    overrides: dict[str, int | float | None],
-) -> dict[str, int | float]:
-    defaults: dict[str, int | float] = {
+    overrides: dict[str, bool | int | float | None],
+) -> dict[str, bool | int | float]:
+    defaults: dict[str, bool | int | float] = {
         "latent_dim": 16,
         "context_frames": 32,
         "future_frames": 64,
@@ -140,6 +140,7 @@ def _resolve_model_dimensions(
         "heads": 8,
         "feedforward_dim": 1536,
         "dropout": 0.0,
+        "pitch_conditioning": True,
         "note_min": 21,
         "note_max": 109,
     }
@@ -173,6 +174,7 @@ class ZraveFlowTransformer(nn.Module):
         heads: int | None = None,
         feedforward_dim: int | None = None,
         dropout: float | None = None,
+        pitch_conditioning: bool | None = None,
         note_min: int | None = None,
         note_max: int | None = None,
     ) -> None:
@@ -189,6 +191,7 @@ class ZraveFlowTransformer(nn.Module):
                 "heads": heads,
                 "feedforward_dim": feedforward_dim,
                 "dropout": dropout,
+                "pitch_conditioning": pitch_conditioning,
                 "note_min": note_min,
                 "note_max": note_max,
             },
@@ -197,6 +200,9 @@ class ZraveFlowTransformer(nn.Module):
         self.context_frames = int(dimensions["context_frames"])
         self.future_frames = int(dimensions["future_frames"])
         self.d_model = int(dimensions["d_model"])
+        self.pitch_conditioning = bool(
+            dimensions["pitch_conditioning"]
+        )
         self.note_min = int(dimensions["note_min"])
         self.note_max = int(dimensions["note_max"])
         context_layer_count = int(dimensions["context_layers"])
@@ -262,9 +268,12 @@ class ZraveFlowTransformer(nn.Module):
             norm=nn.LayerNorm(self.d_model),
             enable_nested_tensor=False,
         )
-        self.null_memory = nn.Parameter(
-            torch.empty(1, self.context_frames, self.d_model)
-        )
+        if self.pitch_conditioning:
+            self.null_memory = nn.Parameter(
+                torch.empty(1, self.context_frames, self.d_model)
+            )
+        else:
+            self.register_parameter("null_memory", None)
 
         self.future_projection = nn.Linear(self.latent_dim, self.d_model)
         self.future_position = nn.Parameter(
@@ -277,7 +286,11 @@ class ZraveFlowTransformer(nn.Module):
         )
         note_count = self.note_max - self.note_min + 1
         self.null_note_index = note_count
-        self.midi_embedding = nn.Embedding(note_count + 1, self.d_model)
+        self.midi_embedding = (
+            nn.Embedding(note_count + 1, self.d_model)
+            if self.pitch_conditioning
+            else None
+        )
         self.future_layers = nn.ModuleList(
             _FutureFlowLayer(
                 self.d_model,
@@ -294,7 +307,8 @@ class ZraveFlowTransformer(nn.Module):
         )
         nn.init.normal_(self.history_position, mean=0.0, std=0.02)
         nn.init.normal_(self.future_position, mean=0.0, std=0.02)
-        nn.init.normal_(self.null_memory, mean=0.0, std=0.02)
+        if self.null_memory is not None:
+            nn.init.normal_(self.null_memory, mean=0.0, std=0.02)
 
     def statistics(self) -> FlowStatistics:
         return FlowStatistics(
@@ -305,16 +319,14 @@ class ZraveFlowTransformer(nn.Module):
             latent_norm_p99=self.latent_norm_p99,
         )
 
-    def _validate_forward(
+    def _validate_core_forward(
         self,
         noisy_future: Tensor,
         flow_time: Tensor,
         history: Tensor,
-        midi_note: Tensor,
         retention: Tensor,
         future_mask: Tensor | None,
-        context_present: Tensor | None,
-    ) -> tuple[Tensor, Tensor]:
+    ) -> Tensor:
         batch = noisy_future.shape[0] if noisy_future.ndim else 0
         future_shape = (batch, self.future_frames, self.latent_dim)
         if noisy_future.ndim != 3 or noisy_future.shape != future_shape:
@@ -328,15 +340,11 @@ class ZraveFlowTransformer(nn.Module):
                 f"history must have shape {history_shape}, "
                 f"got {tuple(history.shape)}"
             )
-        for name, value in (
-            ("flow_time", flow_time),
-            ("midi_note", midi_note),
-        ):
-            if value.shape != (batch,):
-                raise ValueError(
-                    f"{name} must have shape ({batch},), "
-                    f"got {tuple(value.shape)}"
-                )
+        if flow_time.shape != (batch,):
+            raise ValueError(
+                f"flow_time must have shape ({batch},), "
+                f"got {tuple(flow_time.shape)}"
+            )
         if retention.shape != (batch, self.future_frames):
             raise ValueError(
                 "retention must have shape "
@@ -352,20 +360,6 @@ class ZraveFlowTransformer(nn.Module):
             raise ValueError("flow_time must be in [0, 1]")
         if not torch.isfinite(retention).all():
             raise ValueError("retention contains non-finite values")
-        notes = midi_note.to(dtype=torch.long)
-        valid_notes = (notes == -1) | (
-            (notes >= self.note_min) & (notes <= self.note_max)
-        )
-        if not torch.all(valid_notes):
-            raise ValueError(
-                "midi_note must be -1 or in "
-                f"[{self.note_min}, {self.note_max}]"
-            )
-        if midi_note.is_floating_point() and not torch.equal(
-            midi_note,
-            midi_note.round(),
-        ):
-            raise ValueError("midi_note must contain integer values")
         device = noisy_future.device
         if future_mask is None:
             resolved_mask = torch.ones(
@@ -383,6 +377,46 @@ class ZraveFlowTransformer(nn.Module):
             resolved_mask = future_mask.to(device=device, dtype=torch.bool)
         if not torch.all(resolved_mask.any(dim=1)):
             raise ValueError("every future_mask row needs one valid frame")
+        return resolved_mask
+
+    def _validate_forward(
+        self,
+        noisy_future: Tensor,
+        flow_time: Tensor,
+        history: Tensor,
+        midi_note: Tensor,
+        retention: Tensor,
+        future_mask: Tensor | None,
+        context_present: Tensor | None,
+    ) -> tuple[Tensor, Tensor]:
+        resolved_mask = self._validate_core_forward(
+            noisy_future,
+            flow_time,
+            history,
+            retention,
+            future_mask,
+        )
+        batch = noisy_future.shape[0]
+        if midi_note.shape != (batch,):
+            raise ValueError(
+                f"midi_note must have shape ({batch},), "
+                f"got {tuple(midi_note.shape)}"
+            )
+        notes = midi_note.to(dtype=torch.long)
+        valid_notes = (notes == -1) | (
+            (notes >= self.note_min) & (notes <= self.note_max)
+        )
+        if not torch.all(valid_notes):
+            raise ValueError(
+                "midi_note must be -1 or in "
+                f"[{self.note_min}, {self.note_max}]"
+            )
+        if midi_note.is_floating_point() and not torch.equal(
+            midi_note,
+            midi_note.round(),
+        ):
+            raise ValueError("midi_note must contain integer values")
+        device = noisy_future.device
         if context_present is None:
             resolved_context = torch.ones(
                 batch,
@@ -400,48 +434,48 @@ class ZraveFlowTransformer(nn.Module):
             )
         return resolved_mask, resolved_context
 
-    def forward(
+    def _encode_history(
         self,
-        noisy_future: Tensor,
-        flow_time: Tensor,
         history: Tensor,
-        midi_note: Tensor,
-        retention: Tensor,
-        future_mask: Tensor | None = None,
         context_present: Tensor | None = None,
     ) -> Tensor:
-        future_mask, context_present = self._validate_forward(
-            noisy_future,
-            flow_time,
-            history,
-            midi_note,
-            retention,
-            future_mask,
-            context_present,
-        )
-        device = noisy_future.device
         normalized_history = (
             history.float() - self.latent_mean
         ) / self.latent_std
         memory = self.history_projection(normalized_history)
         memory = self.context_encoder(memory + self.history_position)
-        null_memory = self.null_memory.expand(memory.shape[0], -1, -1)
-        memory = torch.where(
-            context_present[:, None, None],
-            memory,
-            null_memory,
-        )
+        if context_present is not None:
+            if self.null_memory is None:
+                raise RuntimeError(
+                    "context dropout requires pitch conditioning"
+                )
+            null_memory = self.null_memory.expand(
+                memory.shape[0],
+                -1,
+                -1,
+            )
+            memory = torch.where(
+                context_present[:, None, None],
+                memory,
+                null_memory,
+            )
+        return memory
 
-        notes = midi_note.to(device=device, dtype=torch.long)
-        note_indices = torch.where(
-            notes == -1,
-            torch.full_like(notes, self.null_note_index),
-            notes - self.note_min,
-        )
+    def _predict_velocity(
+        self,
+        noisy_future: Tensor,
+        flow_time: Tensor,
+        memory: Tensor,
+        retention: Tensor,
+        future_mask: Tensor,
+        condition_offset: Tensor | None = None,
+    ) -> Tensor:
+        device = noisy_future.device
         condition = self.time_embedding(
             flow_time.to(device=device, dtype=torch.float32).unsqueeze(-1)
         )
-        condition = condition + self.midi_embedding(note_indices)
+        if condition_offset is not None:
+            condition = condition + condition_offset
         value = self.future_projection(noisy_future.float())
         value = value + self.future_position
         value = value.masked_fill(~future_mask.unsqueeze(-1), 0.0)
@@ -458,6 +492,70 @@ class ZraveFlowTransformer(nn.Module):
         return velocity.masked_fill(
             ~future_mask.unsqueeze(-1),
             0.0,
+        )
+
+    def forward(
+        self,
+        noisy_future: Tensor,
+        flow_time: Tensor,
+        history: Tensor,
+        midi_note: Tensor,
+        retention: Tensor,
+        future_mask: Tensor | None = None,
+        context_present: Tensor | None = None,
+    ) -> Tensor:
+        if not self.pitch_conditioning or self.midi_embedding is None:
+            raise RuntimeError(
+                "MIDI-conditioned forward is disabled for this model"
+            )
+        future_mask, context_present = self._validate_forward(
+            noisy_future,
+            flow_time,
+            history,
+            midi_note,
+            retention,
+            future_mask,
+            context_present,
+        )
+        device = noisy_future.device
+        memory = self._encode_history(history, context_present)
+
+        notes = midi_note.to(device=device, dtype=torch.long)
+        note_indices = torch.where(
+            notes == -1,
+            torch.full_like(notes, self.null_note_index),
+            notes - self.note_min,
+        )
+        return self._predict_velocity(
+            noisy_future,
+            flow_time,
+            memory,
+            retention,
+            future_mask,
+            self.midi_embedding(note_indices),
+        )
+
+    def forward_pure(
+        self,
+        noisy_future: Tensor,
+        flow_time: Tensor,
+        history: Tensor,
+        retention: Tensor,
+        future_mask: Tensor | None = None,
+    ) -> Tensor:
+        resolved_mask = self._validate_core_forward(
+            noisy_future,
+            flow_time,
+            history,
+            retention,
+            future_mask,
+        )
+        return self._predict_velocity(
+            noisy_future,
+            flow_time,
+            self._encode_history(history),
+            retention,
+            resolved_mask,
         )
 
 
@@ -628,6 +726,106 @@ def sample_flow_block(
                 midi_note,
                 retention,
                 pitch_guidance,
+            )
+            state = state + 0.5 * step * (v0 + v1)
+    mean = statistics.mean.to(device=device, dtype=state.dtype)
+    latent_std = statistics.latent_std.to(
+        device=device,
+        dtype=state.dtype,
+    )
+    return state * latent_std + mean
+
+
+def _pure_velocity(
+    model: ZraveFlowTransformer,
+    state: Tensor,
+    flow_time: float,
+    history: Tensor,
+    retention: Tensor,
+) -> Tensor:
+    times = torch.full(
+        (state.shape[0],),
+        flow_time,
+        device=state.device,
+        dtype=torch.float32,
+    )
+    return model.forward_pure(
+        state,
+        times,
+        history,
+        retention,
+    )
+
+
+def sample_pure_flow_block(
+    model: ZraveFlowTransformer,
+    statistics: FlowStatistics,
+    history: Tensor,
+    *,
+    generation_seed: int,
+    block_index: int,
+    temperature: float,
+    wander_delay_frames: int,
+    solver_steps: int,
+) -> Tensor:
+    if not torch.isfinite(torch.tensor(temperature)) or temperature < 0:
+        raise ValueError("temperature must be finite and non-negative")
+    if wander_delay_frames not in {16, 32, 48}:
+        raise ValueError("wander_delay_frames must be 16, 32, or 48")
+    if solver_steps not in {4, 8, 12}:
+        raise ValueError("solver_steps must be 4, 8, or 12")
+    statistics.validate(model.latent_dim)
+    device = next(model.parameters()).device
+    history = history.to(device=device)
+    batch = history.shape[0] if history.ndim else 0
+    delay = torch.full(
+        (batch,),
+        wander_delay_frames,
+        device=device,
+        dtype=torch.long,
+    )
+    retention = retention_curve(delay, model.future_frames)
+    temperatures = temperature_curve(
+        torch.full(
+            (batch,),
+            temperature,
+            device=device,
+            dtype=torch.float32,
+        ),
+        delay,
+        model.future_frames,
+    )
+    generator = torch.Generator(device=device)
+    generator.manual_seed(
+        derive_block_seed(generation_seed, block_index)
+    )
+    state = torch.randn(
+        batch,
+        model.future_frames,
+        model.latent_dim,
+        generator=generator,
+        device=device,
+        dtype=torch.float32,
+    )
+    state = state * temperatures.unsqueeze(-1)
+    step = 1.0 / solver_steps
+    with torch.no_grad():
+        for index in range(solver_steps):
+            t0 = index * step
+            v0 = _pure_velocity(
+                model,
+                state,
+                t0,
+                history,
+                retention,
+            )
+            proposal = state + step * v0
+            v1 = _pure_velocity(
+                model,
+                proposal,
+                min(1.0, t0 + step),
+                history,
+                retention,
             )
             state = state + 0.5 * step * (v0 + v1)
     mean = statistics.mean.to(device=device, dtype=state.dtype)

@@ -10,6 +10,9 @@ from midibrave.zrave_flow_config import ZraveFlowConfig
 
 ROOT = Path(__file__).parents[1]
 CONFIG = ROOT / "configs" / "zrave" / "octopus_flow.yaml"
+PURE_CONFIG = (
+    ROOT / "configs" / "zrave" / "octopus_pure_flow_poc.yaml"
+)
 
 
 def test_flow_config_locks_runtime_and_data_contract() -> None:
@@ -36,6 +39,18 @@ def test_flow_config_locks_runtime_and_data_contract() -> None:
     ]
     assert config.train.checkpoint_every == 5000
     assert config.train.pitch_transition_fraction == 0.20
+
+
+def test_pure_flow_config_disables_pitch_conditioning() -> None:
+    config = ZraveFlowConfig.load(PURE_CONFIG)
+
+    assert config.model.pitch_conditioning is False
+    assert config.model.context_frames == 32
+    assert config.model.future_frames == 64
+    assert config.model.solver_steps == 8
+    assert config.train.checkpoint_every == 5000
+    assert config.train.pitch_transition_fraction == 0.0
+    assert config.train.output_root.endswith("/pure-flow-poc-v1")
 
 
 def test_flow_config_rejects_unknown_and_inconsistent_values(

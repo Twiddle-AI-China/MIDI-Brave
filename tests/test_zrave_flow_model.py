@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 
 import pytest
 import torch
@@ -11,6 +12,7 @@ from midibrave.zrave_flow_model import (
     derive_block_seed,
     retention_curve,
     sample_flow_block,
+    sample_pure_flow_block,
     temperature_curve,
 )
 
@@ -25,7 +27,10 @@ def _unit_statistics() -> FlowStatistics:
     )
 
 
-def _small_model() -> tuple[ZraveFlowTransformer, FlowStatistics]:
+def _small_model(
+    *,
+    pitch_conditioning: bool = True,
+) -> tuple[ZraveFlowTransformer, FlowStatistics]:
     statistics = _unit_statistics()
     model = ZraveFlowTransformer(
         statistics=statistics,
@@ -38,6 +43,7 @@ def _small_model() -> tuple[ZraveFlowTransformer, FlowStatistics]:
         heads=4,
         feedforward_dim=64,
         dropout=0.0,
+        pitch_conditioning=pitch_conditioning,
     )
     return model, statistics
 
@@ -94,6 +100,48 @@ def test_flow_forward_and_sampling_contract() -> None:
     assert first.shape == (1, 64, 16)
     assert torch.equal(first, second)
     assert not torch.equal(first, different)
+
+
+def test_pure_forward_has_no_midi_argument() -> None:
+    signature = inspect.signature(ZraveFlowTransformer.forward_pure)
+
+    assert "midi_note" not in signature.parameters
+    assert "context_present" not in signature.parameters
+
+
+def test_pure_forward_and_sampling_replay_seed_and_branch() -> None:
+    model, statistics = _small_model(pitch_conditioning=False)
+    model.eval()
+    history = torch.randn(1, 32, 16)
+    noisy = torch.randn(1, 64, 16)
+    velocity = model.forward_pure(
+        noisy,
+        torch.tensor([0.5]),
+        history,
+        retention_curve(torch.tensor([32]), 64),
+    )
+
+    arguments = {
+        "model": model,
+        "statistics": statistics,
+        "history": history,
+        "block_index": 3,
+        "temperature": 1.0,
+        "wander_delay_frames": 32,
+        "solver_steps": 4,
+    }
+    first = sample_pure_flow_block(generation_seed=99, **arguments)
+    replay = sample_pure_flow_block(generation_seed=99, **arguments)
+    branch = sample_pure_flow_block(generation_seed=100, **arguments)
+
+    assert velocity.shape == noisy.shape
+    assert first.shape == (1, 64, 16)
+    assert torch.equal(first, replay)
+    assert not torch.equal(first, branch)
+    assert all(
+        "midi" not in name
+        for name, _parameter in model.named_parameters()
+    )
 
 
 def test_context_and_pitch_conditions_can_drop_independently() -> None:

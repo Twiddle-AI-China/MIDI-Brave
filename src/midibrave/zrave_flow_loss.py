@@ -359,6 +359,82 @@ def zrave_flow_loss(
     )
 
 
+def zrave_pure_flow_loss(
+    predicted_velocity: Tensor,
+    pair: FlowTrainingPair,
+    history: Tensor,
+    future_mask: Tensor,
+    statistics: FlowStatistics,
+) -> FlowLossReport:
+    mask = _validate_future(
+        pair.clean_future,
+        future_mask,
+        statistics,
+    )
+    expected_shape = pair.clean_future.shape
+    for name in (
+        "noisy_future",
+        "target_velocity",
+        "normalized_future",
+    ):
+        value = getattr(pair, name)
+        if value.shape != expected_shape:
+            raise ValueError(
+                f"pair.{name} must have shape {expected_shape}"
+            )
+    if predicted_velocity.shape != expected_shape:
+        raise ValueError(
+            f"predicted_velocity must have shape {expected_shape}"
+        )
+    batch, _frames, latent_dim = expected_shape
+    if pair.flow_time.shape != (batch,):
+        raise ValueError(f"pair.flow_time must have shape ({batch},)")
+    if history.shape != (batch, 32, latent_dim):
+        raise ValueError(
+            f"history must have shape ({batch}, 32, {latent_dim})"
+        )
+    if not torch.isfinite(predicted_velocity).all():
+        raise ValueError("predicted_velocity contains non-finite values")
+
+    flow = _masked_mean(
+        (predicted_velocity.float() - pair.target_velocity).square(),
+        mask,
+    )
+    clean_normalized = pair.noisy_future + (
+        1.0 - pair.flow_time[:, None, None]
+    ) * predicted_velocity.float()
+    mean = statistics.mean.to(
+        device=predicted_velocity.device,
+        dtype=torch.float32,
+    )
+    latent_std = statistics.latent_std.to(
+        device=predicted_velocity.device,
+        dtype=torch.float32,
+    )
+    clean_estimate = clean_normalized * latent_std + mean
+    boundary = _boundary_loss(
+        clean_estimate,
+        pair.clean_future,
+        history,
+        mask,
+    )
+    statistics_loss = _statistics_loss(
+        clean_estimate,
+        pair.clean_future,
+        mask,
+        statistics,
+    )
+    total = flow + 0.10 * boundary + 0.02 * statistics_loss
+    return FlowLossReport(
+        total=total,
+        components={
+            "flow": flow,
+            "boundary": boundary,
+            "statistics": statistics_loss,
+        },
+    )
+
+
 def distributed_gradient_l2_norm(
     loss: Tensor,
     parameters: Iterable[nn.Parameter],

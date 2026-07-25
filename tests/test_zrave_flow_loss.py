@@ -10,6 +10,7 @@ from midibrave.zrave_flow_loss import (
     distributed_gradient_l2_norm,
     make_flow_training_pair,
     zrave_flow_loss,
+    zrave_pure_flow_loss,
 )
 from midibrave.zrave_flow_model import FlowStatistics
 from midibrave.zrave_pitch_probe import PitchProbeOutput
@@ -142,6 +143,26 @@ def test_loss_has_only_approved_components() -> None:
     assert "delta" not in report.components
     assert "acceleration" not in report.components
     assert torch.isfinite(report.total)
+
+
+def test_pure_loss_has_no_pitch_component() -> None:
+    arguments = _loss_fixture()
+    for name in ("midi_note", "pitch_probe", "pitch_weight"):
+        arguments.pop(name)
+
+    report = zrave_pure_flow_loss(**arguments)
+
+    assert set(report.components) == {
+        "flow",
+        "boundary",
+        "statistics",
+    }
+    torch.testing.assert_close(
+        report.total,
+        report.components["flow"]
+        + 0.10 * report.components["boundary"]
+        + 0.02 * report.components["statistics"],
+    )
 
 
 def test_auxiliary_losses_receive_raw_codec_coordinates() -> None:

@@ -169,6 +169,7 @@ class FlowModelConfig:
     heads: int = 8
     feedforward_dim: int = 1536
     dropout: float = 0.0
+    pitch_conditioning: bool = True
     note_min: int = 21
     note_max: int = 109
     condition_dropout: float = 0.10
@@ -177,6 +178,8 @@ class FlowModelConfig:
     wander_delay_frames: tuple[int, ...] = _WANDER_DELAYS
 
     def __post_init__(self) -> None:
+        if not isinstance(self.pitch_conditioning, bool):
+            raise ValueError("model.pitch_conditioning must be boolean")
         object.__setattr__(
             self,
             "wander_delay_frames",
@@ -311,13 +314,16 @@ class FlowTrainConfig:
         exact_floats = {
             "exposure_start_fraction": 0.80,
             "exposure_probability": 0.25,
-            "pitch_transition_fraction": 0.20,
         }
         for name, expected in exact_floats.items():
             if getattr(self, name) != expected:
                 raise ValueError(f"train.{name} must be {expected}")
         if self.exposure_prefix_frames != 32:
             raise ValueError("train.exposure_prefix_frames must be 32")
+        if self.pitch_transition_fraction not in {0.0, 0.20}:
+            raise ValueError(
+                "train.pitch_transition_fraction must be 0.0 or 0.20"
+            )
         if self.seed < 0:
             raise ValueError("train.seed must be non-negative")
 
@@ -338,6 +344,17 @@ class ZraveFlowConfig:
             raise ValueError("seed must be non-negative")
         if self.seed != self.train.seed:
             raise ValueError("seed and train.seed must match")
+        expected_transition_fraction = (
+            0.20 if self.model.pitch_conditioning else 0.0
+        )
+        if (
+            self.train.pitch_transition_fraction
+            != expected_transition_fraction
+        ):
+            raise ValueError(
+                "train.pitch_transition_fraction must match "
+                "model.pitch_conditioning"
+            )
 
     @classmethod
     def load(cls, path: str | Path) -> "ZraveFlowConfig":
