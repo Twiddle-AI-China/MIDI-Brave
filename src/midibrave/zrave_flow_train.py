@@ -65,6 +65,8 @@ def use_exposure_batch(
     start_fraction: float,
     probability: float,
     generator: torch.Generator,
+    *,
+    start_update: int | None = None,
 ) -> bool:
     if update < 0 or maximum_updates <= 0:
         raise ValueError("training updates are invalid")
@@ -72,7 +74,13 @@ def use_exposure_batch(
         raise ValueError("start_fraction must be in [0, 1]")
     if not 0.0 <= probability <= 1.0:
         raise ValueError("probability must be in [0, 1]")
-    threshold = math.ceil(maximum_updates * start_fraction)
+    threshold = (
+        math.ceil(maximum_updates * start_fraction)
+        if start_update is None
+        else start_update
+    )
+    if not 0 <= threshold < maximum_updates:
+        raise ValueError("exposure start is outside the training schedule")
     if update < threshold:
         return False
     draw = torch.rand(
@@ -81,6 +89,34 @@ def use_exposure_batch(
         device=generator.device,
     )
     return float(draw.item()) < probability
+
+
+def resolve_phase3_start_update(
+    *,
+    maximum_updates: int,
+    default_fraction: float,
+    resumed_update: int,
+    requested: int | None,
+    restored: int | None,
+) -> int:
+    if maximum_updates <= 0 or resumed_update < 0:
+        raise ValueError("phase3 training schedule is invalid")
+    default = math.ceil(maximum_updates * default_fraction)
+    if restored is not None:
+        if requested is not None and requested != restored:
+            raise ValueError("phase3 start conflicts with checkpoint")
+        selected = restored
+    elif requested is not None:
+        if requested != resumed_update:
+            raise ValueError(
+                "legacy checkpoint phase3 start must match resume update"
+            )
+        selected = requested
+    else:
+        selected = default
+    if not 0 <= selected < maximum_updates:
+        raise ValueError("phase3 start is outside the training schedule")
+    return selected
 
 
 def roll_exposure_history(
@@ -265,6 +301,7 @@ def save_flow_checkpoint(
     pitch_weight_controller: PitchWeightController | None,
     update: int,
     contract: dict[str, object],
+    phase3_start_update: int | None = None,
     latest_gate_report_sha256: str | None = None,
     consecutive_gate_passes: int = 0,
     checkpoint_process_group: dist.ProcessGroup | None = None,
@@ -272,6 +309,8 @@ def save_flow_checkpoint(
     _validate_checkpoint_contract(contract)
     if update < 0 or consecutive_gate_passes < 0:
         raise ValueError("checkpoint counters must be non-negative")
+    if phase3_start_update is not None and phase3_start_update < 0:
+        raise ValueError("phase3 start update must be non-negative")
     if latest_gate_report_sha256 is not None and not _SHA256.fullmatch(
         latest_gate_report_sha256
     ):
@@ -324,6 +363,8 @@ def save_flow_checkpoint(
         "latest_gate_report_sha256": latest_gate_report_sha256,
         "consecutive_gate_passes": int(consecutive_gate_passes),
     }
+    if phase3_start_update is not None:
+        payload["phase3_start_update"] = int(phase3_start_update)
     if contract.get("pitch_conditioning", True):
         if pitch_weight_controller is None:
             raise ValueError(
@@ -395,8 +436,16 @@ def load_flow_checkpoint(
         or not _SHA256.fullmatch(gate_hash)
     ):
         raise ValueError("flow checkpoint gate report hash is invalid")
+    phase3_start_update = payload.get("phase3_start_update")
+    if phase3_start_update is not None and (
+        not isinstance(phase3_start_update, int)
+        or isinstance(phase3_start_update, bool)
+        or phase3_start_update < 0
+    ):
+        raise ValueError("flow checkpoint phase3 start is invalid")
     return {
         "update": int(payload["update"]),
+        "phase3_start_update": phase3_start_update,
         "latest_gate_report_sha256": gate_hash,
         "consecutive_gate_passes": int(
             payload.get("consecutive_gate_passes", 0)
@@ -665,6 +714,7 @@ def _run_flow_update(
     device: torch.device,
     rank: int,
     force_exposure: bool | None = None,
+    exposure_start_update: int | None = None,
 ) -> FlowUpdateResult:
     generator = _default_generator(device)
     exposure = (
@@ -674,6 +724,7 @@ def _run_flow_update(
             config.train.exposure_start_fraction,
             config.train.exposure_probability,
             generator,
+            start_update=exposure_start_update,
         )
         if force_exposure is None
         else force_exposure
@@ -1354,6 +1405,7 @@ def _train(args: argparse.Namespace) -> None:
     update = 0
     latest_gate_hash: str | None = None
     consecutive_gate_passes = 0
+    restored_phase3_start: int | None = None
     if args.resume:
         restored = load_flow_checkpoint(
             args.resume,
@@ -1365,10 +1417,23 @@ def _train(args: argparse.Namespace) -> None:
             expected_contract=runtime["contract"],
         )
         update = int(restored["update"])
+        saved_phase3_start = restored["phase3_start_update"]
+        restored_phase3_start = (
+            int(saved_phase3_start)
+            if saved_phase3_start is not None
+            else None
+        )
         latest_gate_hash = restored["latest_gate_report_sha256"]
         consecutive_gate_passes = int(
             restored["consecutive_gate_passes"]
         )
+    phase3_start_update = resolve_phase3_start_update(
+        maximum_updates=runtime["maximum_updates"],
+        default_fraction=config.train.exposure_start_fraction,
+        resumed_update=update,
+        requested=args.phase3_start_update,
+        restored=restored_phase3_start,
+    )
     gate_state = GateEarlyStopState(
         required_consecutive_passes=config.train.early_stop_gate_passes,
         consecutive_passes=consecutive_gate_passes,
@@ -1396,6 +1461,7 @@ def _train(args: argparse.Namespace) -> None:
             batch_per_gpu=runtime["batch_per_gpu"],
             device=runtime["device"],
             rank=rank,
+            exposure_start_update=phase3_start_update,
         )
         update += 1
         if writer is not None and (
@@ -1462,6 +1528,7 @@ def _train(args: argparse.Namespace) -> None:
                 pitch_weight_controller=runtime["controller"],
                 update=update,
                 contract=runtime["contract"],
+                phase3_start_update=phase3_start_update,
                 latest_gate_report_sha256=latest_gate_hash,
                 consecutive_gate_passes=gate_state.consecutive_passes,
                 checkpoint_process_group=runtime[
@@ -1554,6 +1621,7 @@ def _train(args: argparse.Namespace) -> None:
                 pitch_weight_controller=runtime["controller"],
                 update=update,
                 contract=runtime["contract"],
+                phase3_start_update=phase3_start_update,
                 latest_gate_report_sha256=latest_gate_hash,
                 consecutive_gate_passes=gate_state.consecutive_passes,
                 checkpoint_process_group=runtime[
@@ -1585,6 +1653,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-per-gpu", type=int)
     parser.add_argument("--max-updates", type=int)
     parser.add_argument("--resume")
+    parser.add_argument("--phase3-start-update", type=int)
     parser.add_argument("--benchmark-report")
     parser.add_argument("--benchmark-warmup", type=int, default=20)
     parser.add_argument("--benchmark-updates", type=int, default=100)

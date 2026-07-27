@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
 
@@ -187,6 +188,59 @@ def test_pure_cli_does_not_require_pitch_probe() -> None:
     assert arguments.pitch_probe is None
 
 
+def test_pure_cli_accepts_phase3_start_update() -> None:
+    arguments = _parser().parse_args(
+        [
+            "--config",
+            str(PURE_CONFIG),
+            "--resume",
+            "step-020000.pt",
+            "--phase3-start-update",
+            "20000",
+        ]
+    )
+
+    assert arguments.phase3_start_update == 20000
+
+
+def test_legacy_checkpoint_can_enter_phase3_at_resume_update() -> None:
+    assert (
+        flow_train.resolve_phase3_start_update(
+            maximum_updates=100000,
+            default_fraction=0.8,
+            resumed_update=20000,
+            requested=20000,
+            restored=None,
+        )
+        == 20000
+    )
+
+
+def test_persisted_phase3_start_rejects_conflicting_override() -> None:
+    assert (
+        flow_train.resolve_phase3_start_update(
+            maximum_updates=100000,
+            default_fraction=0.8,
+            resumed_update=25000,
+            requested=None,
+            restored=20000,
+        )
+        == 20000
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="phase3 start conflicts with checkpoint",
+    ):
+        flow_train.resolve_phase3_start_update(
+            maximum_updates=100000,
+            default_fraction=0.8,
+            resumed_update=25000,
+            requested=80000,
+            restored=20000,
+        )
+
+
 def test_git_commit_marks_only_exact_repo_as_safe(
     monkeypatch,
     tmp_path: Path,
@@ -327,6 +381,48 @@ def test_pure_checkpoint_omits_pitch_state(tmp_path: Path) -> None:
         expected_contract=contract,
     )
     assert restored["update"] == 1
+    assert restored["phase3_start_update"] is None
+
+
+def test_pure_checkpoint_persists_phase3_start(tmp_path: Path) -> None:
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    sampler = _TinySampler(seed=5)
+    config = ZraveFlowConfig.load(PURE_CONFIG)
+    contract = build_flow_checkpoint_contract(
+        config=config,
+        world_size=1,
+        batch_per_gpu=2,
+        maximum_updates=100000,
+        config_sha256="a" * 64,
+        pack_index_sha256="b" * 64,
+        statistics_sha256="c" * 64,
+    )
+    checkpoint = tmp_path / "phase3.pt"
+
+    save_flow_checkpoint(
+        checkpoint,
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=None,
+        update=20000,
+        contract=contract,
+        phase3_start_update=20000,
+    )
+    restored = load_flow_checkpoint(
+        checkpoint,
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=None,
+        expected_contract=contract,
+    )
+
+    assert restored["update"] == 20000
+    assert restored["phase3_start_update"] == 20000
 
 
 def test_distributed_checkpoint_uses_explicit_cpu_process_group(
@@ -423,6 +519,19 @@ def test_exposure_batches_start_only_in_final_twenty_percent() -> None:
         0.8,
         1.0,
         generator,
+    )
+
+
+def test_exposure_batches_honor_resumed_phase3_start() -> None:
+    generator = torch.Generator().manual_seed(3)
+
+    assert use_exposure_batch(
+        20000,
+        100000,
+        0.8,
+        1.0,
+        generator,
+        start_update=20000,
     )
 
 
