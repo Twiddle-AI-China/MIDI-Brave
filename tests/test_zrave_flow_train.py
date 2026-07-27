@@ -330,11 +330,66 @@ def test_pure_update_reports_only_pure_losses() -> None:
     }
     assert result.pitch_metrics == {}
     assert result.pitch_weight == 0.0
+    assert result.applied
+    assert result.amp_scale == 1.0
     assert all(
         parameter.grad is not None
         for parameter in model.parameters()
         if parameter.requires_grad
     )
+
+
+def test_nonfinite_gradient_backs_off_amp_without_optimizer_step() -> None:
+    parameter = nn.Parameter(torch.tensor(2.0))
+    optimizer = torch.optim.SGD([parameter], lr=0.5)
+    scaler = torch.amp.GradScaler("cpu", init_scale=16.0)
+    optimizer.zero_grad(set_to_none=True)
+    scaler.scale(parameter.square()).backward()
+    scaler.unscale_(optimizer)
+    assert parameter.grad is not None
+    parameter.grad.fill_(float("inf"))
+    gradient_norm = torch.nn.utils.clip_grad_norm_([parameter], 1.0)
+    before = parameter.detach().clone()
+
+    applied, amp_scale = flow_train._apply_amp_optimizer_step(
+        optimizer=optimizer,
+        scaler=scaler,
+        gradient_norm=gradient_norm,
+    )
+
+    assert not applied
+    assert torch.equal(parameter.detach(), before)
+    assert parameter.grad is None
+    assert amp_scale == 8.0
+
+
+def test_eight_consecutive_nonfinite_gradients_are_fatal() -> None:
+    streak = 0
+    for _ in range(7):
+        streak = flow_train._next_nonfinite_gradient_streak(
+            streak,
+            applied=False,
+            maximum=8,
+        )
+    assert streak == 7
+    assert (
+        flow_train._next_nonfinite_gradient_streak(
+            streak,
+            applied=True,
+            maximum=8,
+        )
+        == 0
+    )
+
+    with pytest.raises(
+        FloatingPointError,
+        match="8 consecutive non-finite flow gradients",
+    ):
+        flow_train._next_nonfinite_gradient_streak(
+            streak,
+            applied=False,
+            maximum=8,
+        )
 
 
 def test_pure_checkpoint_omits_pitch_state(tmp_path: Path) -> None:

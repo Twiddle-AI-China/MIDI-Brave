@@ -681,10 +681,12 @@ class FlowUpdateResult:
     components: dict[str, float]
     pitch_weight: float
     gradient_norm: float
+    amp_scale: float
     global_valid_frames: int
     duration_seconds: float
     pitch_metrics: dict[str, float]
     exposure: bool
+    applied: bool
 
 
 def _all_rank_finite(value: Tensor) -> bool:
@@ -696,6 +698,44 @@ def _all_rank_finite(value: Tensor) -> bool:
     if dist.is_initialized():
         dist.all_reduce(flag, op=dist.ReduceOp.MAX)
     return int(flag.item()) == 0
+
+
+def _apply_amp_optimizer_step(
+    *,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    gradient_norm: Tensor,
+) -> tuple[bool, float]:
+    if _all_rank_finite(gradient_norm):
+        scaler.step(optimizer)
+        scaler.update()
+        return True, float(scaler.get_scale())
+    new_scale = max(
+        float(scaler.get_scale())
+        * float(scaler.get_backoff_factor()),
+        1.0,
+    )
+    optimizer.zero_grad(set_to_none=True)
+    scaler.update(new_scale=new_scale)
+    return False, new_scale
+
+
+def _next_nonfinite_gradient_streak(
+    current: int,
+    *,
+    applied: bool,
+    maximum: int,
+) -> int:
+    if current < 0 or maximum <= 0:
+        raise ValueError("non-finite gradient streak is invalid")
+    if applied:
+        return 0
+    updated = current + 1
+    if updated >= maximum:
+        raise FloatingPointError(
+            f"{maximum} consecutive non-finite flow gradients"
+        )
+    return updated
 
 
 def _run_flow_update(
@@ -862,10 +902,11 @@ def _run_flow_update(
         training_model.parameters(),
         config.train.gradient_clip,
     )
-    if not _all_rank_finite(gradient_norm):
-        raise FloatingPointError("non-finite flow gradient")
-    scaler.step(optimizer)
-    scaler.update()
+    applied, amp_scale = _apply_amp_optimizer_step(
+        optimizer=optimizer,
+        scaler=scaler,
+        gradient_norm=gradient_norm,
+    )
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     duration = time.perf_counter() - started
@@ -903,10 +944,12 @@ def _run_flow_update(
         },
         pitch_weight=pitch_weight,
         gradient_norm=float(gradient_norm),
+        amp_scale=amp_scale,
         global_valid_frames=global_frames,
         duration_seconds=duration,
         pitch_metrics=pitch_metrics,
         exposure=exposure,
+        applied=applied,
     )
 
 
@@ -1277,6 +1320,11 @@ def _log_update(
         update,
     )
     writer.add_scalar(
+        "health/amp_scale",
+        result.amp_scale,
+        update,
+    )
+    writer.add_scalar(
         "health/exposure_batch",
         float(result.exposure),
         update,
@@ -1294,8 +1342,9 @@ def _benchmark(args: argparse.Namespace) -> None:
     if warmup < 0 or measured <= 0 or exposure_updates < 0:
         raise ValueError("invalid benchmark update counts")
     update = 0
+    nonfinite = 0
     for _ in range(warmup):
-        _run_flow_update(
+        result = _run_flow_update(
             training_model=runtime["training_model"],
             sampler=runtime["train_sampler"],
             pitch_probe=runtime["pitch_probe"],
@@ -1311,11 +1360,13 @@ def _benchmark(args: argparse.Namespace) -> None:
             rank=rank,
             force_exposure=False,
         )
-        update += 1
+        if result.applied:
+            update += 1
+        else:
+            nonfinite += 1
     torch.cuda.reset_peak_memory_stats(device)
     durations: list[float] = []
     frames: list[int] = []
-    nonfinite = 0
     for _ in range(measured):
         result = _run_flow_update(
             training_model=runtime["training_model"],
@@ -1333,12 +1384,15 @@ def _benchmark(args: argparse.Namespace) -> None:
             rank=rank,
             force_exposure=False,
         )
-        durations.append(result.duration_seconds)
-        frames.append(result.global_valid_frames)
-        update += 1
+        if result.applied:
+            durations.append(result.duration_seconds)
+            frames.append(result.global_valid_frames)
+            update += 1
+        else:
+            nonfinite += 1
     completed_exposure = 0
     for _ in range(exposure_updates):
-        _run_flow_update(
+        result = _run_flow_update(
             training_model=runtime["training_model"],
             sampler=runtime["train_sampler"],
             pitch_probe=runtime["pitch_probe"],
@@ -1354,8 +1408,11 @@ def _benchmark(args: argparse.Namespace) -> None:
             rank=rank,
             force_exposure=True,
         )
-        completed_exposure += 1
-        update += 1
+        if result.applied:
+            completed_exposure += 1
+            update += 1
+        else:
+            nonfinite += 1
     peak = torch.cuda.max_memory_allocated(device) / (1024**2)
     total = torch.cuda.get_device_properties(device).total_memory / (1024**2)
     memory = torch.tensor(
@@ -1446,6 +1503,8 @@ def _train(args: argparse.Namespace) -> None:
         else None
     )
     stopped_early = False
+    nonfinite_gradient_skips = 0
+    nonfinite_gradient_streak = 0
     while update < runtime["maximum_updates"]:
         result = _run_flow_update(
             training_model=runtime["training_model"],
@@ -1463,6 +1522,26 @@ def _train(args: argparse.Namespace) -> None:
             rank=rank,
             exposure_start_update=phase3_start_update,
         )
+        nonfinite_gradient_streak = _next_nonfinite_gradient_streak(
+            nonfinite_gradient_streak,
+            applied=result.applied,
+            maximum=8,
+        )
+        if not result.applied:
+            nonfinite_gradient_skips += 1
+            if writer is not None:
+                writer.add_scalar(
+                    "health/nonfinite_gradient_skips",
+                    nonfinite_gradient_skips,
+                    update,
+                )
+                writer.add_scalar(
+                    "health/amp_scale",
+                    result.amp_scale,
+                    update,
+                )
+                writer.flush()
+            continue
         update += 1
         if writer is not None and (
             update == 1 or update % config.train.log_every == 0
