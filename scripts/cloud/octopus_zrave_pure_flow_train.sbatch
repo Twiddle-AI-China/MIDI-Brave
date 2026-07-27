@@ -91,6 +91,19 @@ if [[ -n "$resume_name" ]]; then
   )
 fi
 
+phase3_start=${PURE_FLOW_PHASE3_START_UPDATE:-}
+if [[ -n "$phase3_start" ]]; then
+  if [[ ! "$phase3_start" =~ ^[0-9]+$ ]]; then
+    echo "phase3 start update must be a non-negative integer" >&2
+    exit 2
+  fi
+  if [[ -z "$resume_name" ]]; then
+    echo "phase3 start update requires a resume checkpoint" >&2
+    exit 2
+  fi
+  resume_args+=(--phase3-start-update "$phase3_start")
+fi
+
 srun --kill-on-bad-exit=1 --cpu-bind=cores \
   docker run --rm \
     --gpus "\"device=${CUDA_VISIBLE_DEVICES}\"" \

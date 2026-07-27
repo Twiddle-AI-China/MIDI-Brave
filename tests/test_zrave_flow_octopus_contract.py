@@ -120,6 +120,19 @@ def test_pure_train_runs_100k_updates_from_selected_batch() -> None:
     assert "statistics.npz" in script
 
 
+def test_pure_train_forwards_phase3_start_only_with_resume() -> None:
+    script = PURE_TRAIN.read_text(encoding="utf-8")
+
+    assert "PURE_FLOW_PHASE3_START_UPDATE" in script
+    assert 'phase3_start=${PURE_FLOW_PHASE3_START_UPDATE:-}' in script
+    assert '[[ ! "$phase3_start" =~ ^[0-9]+$ ]]' in script
+    assert '[[ -z "$resume_name" ]]' in script
+    assert (
+        'resume_args+=(--phase3-start-update "$phase3_start")'
+        in script
+    )
+
+
 def test_formal_config_uses_only_approved_sources_and_output_root() -> None:
     config = ZraveFlowConfig.load(
         ROOT / "configs" / "zrave" / "octopus_flow.yaml"
