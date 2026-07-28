@@ -16,6 +16,7 @@ JOBS = (
 )
 PURE_SWEEP = CLOUD / "octopus_zrave_pure_flow_sweep.sbatch"
 PURE_TRAIN = CLOUD / "octopus_zrave_pure_flow_train.sbatch"
+PURE_AUDITION = CLOUD / "octopus_zrave_pure_flow_audition.sbatch"
 PURE_JOBS = (PURE_SWEEP, PURE_TRAIN)
 
 
@@ -131,6 +132,34 @@ def test_pure_train_forwards_phase3_start_only_with_resume() -> None:
         'resume_args+=(--phase3-start-update "$phase3_start")'
         in script
     )
+
+
+def test_pure_audition_is_explicit_one_gpu_read_only_job() -> None:
+    script = PURE_AUDITION.read_text(encoding="utf-8")
+    lowered = script.casefold()
+
+    assert "#SBATCH --partition=gpu1" in script
+    assert "#SBATCH --gres=gpu:1" in script
+    assert "srun --kill-on-bad-exit=1" in script
+    assert "docker run --rm" in script
+    assert (
+        "/srv/data-branches/nvme/datasets:/data/datasets:ro"
+        in script
+    )
+    assert (
+        "/data/midibrave-zrave-standalone:"
+        "/data/midibrave-zrave-standalone:ro"
+        in script
+    )
+    assert "ZRAVE_PURE_FLOW_AUDITION_CHECKPOINT" in script
+    assert "checkpoint must be a basename ending in .pt" in script
+    assert "octopus_pure_flow_poc.yaml" in script
+    assert "-m midibrave.zrave_pure_flow_audition" in script
+    assert "pure-flow-poc-v1/auditions" in script
+    assert "--midi" not in lowered
+    assert "midi_note" not in lowered
+    assert "pitch" not in lowered
+    assert "clap" not in lowered
 
 
 def test_formal_config_uses_only_approved_sources_and_output_root() -> None:
