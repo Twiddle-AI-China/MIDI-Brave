@@ -196,6 +196,34 @@ def test_write_qualification_case_rejects_dominant_cold_start(
         )
 
 
+def test_write_qualification_case_allows_a_naturally_silent_tail(
+    tmp_path,
+) -> None:
+    latent_hop = 2048
+    samples = 75 * latent_hop
+    phase = np.arange(samples, dtype=np.float64) / 44100.0
+    source = (0.5 * np.sin(2.0 * np.pi * 220.0 * phase)).astype(
+        np.float32
+    )
+    source[-3 * latent_hop :] = 0.0
+    packed = torch.ones(107, 16)
+
+    report = write_qualification_case(
+        tmp_path,
+        case_index=0,
+        category="Pad",
+        source=source,
+        direct=source,
+        packed=packed,
+        fresh=packed,
+        sample_rate=44100,
+        latent_hop=latent_hop,
+    )
+
+    assert report["audio_metrics"]["spectral_cosine"] > 0.99
+    assert len(report["audio_metrics"]["chunks"]) == 1
+
+
 def test_renderer_has_no_transformer_checkpoint_and_rejects_nonempty_output(
     tmp_path,
 ) -> None:

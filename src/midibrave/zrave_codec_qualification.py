@@ -289,7 +289,7 @@ def write_qualification_case(
         reconstruction,
         sample_rate,
         latent_hop=latent_hop,
-        chunk_frames=8,
+        chunk_frames=audible_frames,
     )
     gain = shared_listening_gain(reference, reconstruction)
     names = qualification_file_names(case_index, category)
