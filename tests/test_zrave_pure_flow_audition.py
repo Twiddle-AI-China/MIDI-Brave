@@ -9,6 +9,8 @@ import torch
 
 from midibrave.zrave_flow_model import FlowStatistics
 from midibrave.zrave_pure_flow_audition import (
+    audio_diagnostics,
+    audition_file_names,
     rollout_pure_flow,
     select_audition_cases,
     validate_pure_checkpoint,
@@ -187,4 +189,38 @@ def test_validate_pure_checkpoint_rejects_pitch_conditioning() -> None:
             index_hash="a" * 64,
             statistics_hash="b" * 64,
             expected_update=45000,
+        )
+
+
+def test_audition_file_names_define_six_roles_per_category() -> None:
+    names = audition_file_names(2, "Lead")
+
+    assert names == {
+        "source": "wavs/02-lead-source.wav",
+        "rave_direct": "wavs/02-lead-rave-direct.wav",
+        "seed17_short": "wavs/02-lead-seed17-short.wav",
+        "seed29_short": "wavs/02-lead-seed29-short.wav",
+        "seed17_long": "wavs/02-lead-seed17-long.wav",
+        "seed29_long": "wavs/02-lead-seed29-long.wav",
+    }
+
+
+def test_audio_diagnostics_reports_finite_mono_audio() -> None:
+    audio = torch.tensor([0.0, -0.5, 0.5, 0.0])
+
+    report = audio_diagnostics(audio, sample_rate=4)
+
+    assert report == {
+        "samples": 4,
+        "seconds": 1.0,
+        "peak": 0.5,
+        "rms": pytest.approx(2.0**-1.5),
+    }
+
+
+def test_audio_diagnostics_rejects_nonfinite_audio() -> None:
+    with pytest.raises(ValueError, match="non-finite audio"):
+        audio_diagnostics(
+            torch.tensor([0.0, float("nan")]),
+            sample_rate=44100,
         )
