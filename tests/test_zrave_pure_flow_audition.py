@@ -9,6 +9,7 @@ import torch
 
 from midibrave.zrave_flow_model import FlowStatistics
 from midibrave.zrave_pure_flow_audition import (
+    _decode_latent,
     audio_diagnostics,
     audition_file_names,
     rollout_pure_flow,
@@ -224,3 +225,29 @@ def test_audio_diagnostics_rejects_nonfinite_audio() -> None:
             torch.tensor([0.0, float("nan")]),
             sample_rate=44100,
         )
+
+
+class _ColdStartCodec(torch.nn.Module):
+    def decode(self, latent: torch.Tensor) -> torch.Tensor:
+        audio = torch.ones(
+            latent.shape[0],
+            1,
+            latent.shape[2] * 4,
+            device=latent.device,
+        )
+        audio[:, :, :4] = 99.0
+        return audio
+
+
+def test_decode_latent_crops_repeated_frame_decoder_preroll() -> None:
+    decoded = _decode_latent(
+        _ColdStartCodec(),
+        torch.arange(48, dtype=torch.float32).reshape(3, 16),
+        random_seed=17,
+        device=torch.device("cpu"),
+        latent_hop=4,
+        decoder_preroll_frames=32,
+    )
+
+    assert decoded.shape == (12,)
+    assert torch.equal(decoded, torch.ones(12))

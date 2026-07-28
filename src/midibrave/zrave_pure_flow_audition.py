@@ -13,7 +13,7 @@ import soundfile as sf
 import torch
 from torch import Tensor, nn
 
-from .zrave_codec import decode_with_seed
+from .zrave_audition import decode_prerolled_latent
 from .zrave_flow_config import ZraveFlowConfig
 from .zrave_flow_data import _load_rave_audio
 from .zrave_flow_model import (
@@ -283,16 +283,33 @@ def _decode_latent(
     *,
     random_seed: int,
     device: torch.device,
+    latent_hop: int,
+    decoder_preroll_frames: int,
 ) -> Tensor:
     if latent.ndim != 2 or latent.shape[1] != 16:
         raise ValueError("decode latent must be [frames, 16]")
+    if latent_hop <= 0 or decoder_preroll_frames <= 0:
+        raise ValueError("decoder pre-roll contract must be positive")
     layout = (
         latent.to(device=device, dtype=torch.float32)
         .transpose(0, 1)
         .unsqueeze(0)
         .contiguous()
     )
-    decoded = decode_with_seed(codec, layout, random_seed).float().reshape(-1)
+    preroll = (
+        layout[:, :, :1]
+        .expand(-1, -1, decoder_preroll_frames)
+        .contiguous()
+    )
+    decoded = torch.from_numpy(
+        decode_prerolled_latent(
+            codec,
+            preroll,
+            layout,
+            random_seed,
+            latent_hop=latent_hop,
+        )
+    ).float()
     if not torch.isfinite(decoded).all():
         raise ValueError("RAVE decoder produced non-finite audio")
     return decoded.cpu()
@@ -439,6 +456,7 @@ def render_pure_flow_audition(
     sample_rate = config.rave.sample_rate
     hop = config.rave.latent_hop
     decoder_seed = 20260728
+    decoder_preroll_frames = 32
     file_rows: list[dict[str, object]] = []
     case_rows: list[dict[str, object]] = []
     for case_index, (case, sequence) in enumerate(
@@ -464,6 +482,8 @@ def render_pure_flow_audition(
                 torch.cat((real_history, real_future), dim=0),
                 random_seed=decoder_seed,
                 device=selected_device,
+                latent_hop=hop,
+                decoder_preroll_frames=decoder_preroll_frames,
             ),
         }
         for generation_seed in _GENERATION_SEEDS:
@@ -473,12 +493,16 @@ def render_pure_flow_audition(
                 torch.cat((real_history, generated[:64]), dim=0),
                 random_seed=decoder_seed,
                 device=selected_device,
+                latent_hop=hop,
+                decoder_preroll_frames=decoder_preroll_frames,
             )
             decoded[f"seed{generation_seed}_long"] = _decode_latent(
                 codec,
                 torch.cat((real_history, generated), dim=0),
                 random_seed=decoder_seed,
                 device=selected_device,
+                latent_hop=hop,
+                decoder_preroll_frames=decoder_preroll_frames,
             )
         for role, relative_path in names.items():
             row = _write_wav(
@@ -533,6 +557,8 @@ def render_pure_flow_audition(
         "short_future_frames": 64,
         "long_future_frames": 320,
         "seed_boundary_seconds": 32 * hop / sample_rate,
+        "decoder_preroll_frames": decoder_preroll_frames,
+        "decoder_preroll_mode": "repeat_first_audible_frame",
         "temperature": 1.0,
         "wander_delay_frames": 32,
         "solver_steps": 8,
@@ -549,6 +575,8 @@ def render_pure_flow_audition(
         "two stochastic continuations.\n"
         f"The first 32 latent frames are real; generation begins at "
         f"{32 * hop / sample_rate:.6f} seconds.\n"
+        "The decoder is warmed with 32 repeats of the first audible latent "
+        "frame, then that pre-roll is cropped exactly.\n"
         "Short files contain 64 generated frames. Long files contain "
         "320 block-autoregressive generated frames.\n"
         "WAV files are unnormalized 32-bit float audio.\n",
