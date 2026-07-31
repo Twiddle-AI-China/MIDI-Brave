@@ -37,6 +37,11 @@ class _StatefulCodec(nn.Module):
         return value
 
 
+class _SingleArgumentCodec(nn.Module):
+    def encode(self, audio: torch.Tensor) -> torch.Tensor:
+        return audio[..., ::2]
+
+
 def test_reset_streaming_state_zeros_all_pad_buffers() -> None:
     codec = nn.Sequential(_StatefulCodec(), _StatefulCodec())
 
@@ -60,6 +65,15 @@ def test_posterior_mean_encoding_resets_state_and_uses_zero_temperature() -> Non
     torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
     torch.testing.assert_close(first, audio[..., ::2])
     assert codec.temperatures == [0.0, 0.0]
+
+
+def test_posterior_mean_encoding_supports_official_single_argument_export() -> None:
+    codec = _SingleArgumentCodec()
+    audio = torch.arange(8, dtype=torch.float32).reshape(1, 1, 8)
+
+    encoded = encode_posterior_mean(codec, audio)
+
+    torch.testing.assert_close(encoded, audio[..., ::2])
 
 
 def test_seeded_decode_resets_state_before_every_render() -> None:

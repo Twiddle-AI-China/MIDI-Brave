@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import torch
@@ -23,7 +24,33 @@ def reset_streaming_state(codec: Any) -> int:
 
 def encode_posterior_mean(codec: Any, audio: Tensor) -> Tensor:
     reset_streaming_state(codec)
-    return codec.encode(audio, 0.0)
+    encode = codec.encode
+    schema = getattr(encode, "schema", None)
+    if schema is not None:
+        input_count = len(
+            [argument for argument in schema.arguments if argument.name != "self"]
+        )
+    else:
+        signature = inspect.signature(encode)
+        input_count = len(
+            [
+                parameter
+                for parameter in signature.parameters.values()
+                if parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                }
+            ]
+        )
+    if input_count == 1:
+        return encode(audio)
+    if input_count == 2:
+        return encode(audio, 0.0)
+    raise TypeError(
+        "RAVE encode must accept audio or audio plus temperature, "
+        f"got {input_count} inputs"
+    )
 
 
 def decode_with_seed(
