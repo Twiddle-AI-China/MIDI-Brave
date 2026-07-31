@@ -239,3 +239,10 @@ def test_serum128_training_runs_100k_and_checkpoints_every_5k() -> None:
     assert "--max-updates 100000" in script
     assert "--nproc_per_node=8" in script
     assert "latest-selection.json" in script
+
+
+def test_serum128_prepare_keeps_stdin_open_for_inline_validation() -> None:
+    script = SERUM128_PREPARE.read_text(encoding="utf-8")
+
+    assert "docker run --rm -i" in script
+    assert 'python - "$config" <<\'PY\'' in script

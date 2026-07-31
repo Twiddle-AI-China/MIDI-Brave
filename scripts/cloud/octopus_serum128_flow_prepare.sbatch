@@ -110,7 +110,7 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores \
       --config "$config" finalize
 
 srun --kill-on-bad-exit=1 --cpu-bind=cores \
-  docker run --rm \
+  docker run --rm -i \
     --network none \
     -v "$repo_root:$container_root:ro" \
     -v "$rave_mount" \
