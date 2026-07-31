@@ -48,6 +48,21 @@ class _FakeStandaloneCodec(nn.Module):
         return values.view(-1, 1, 1).expand(-1, 16, frames).clone()
 
 
+class _Fake128Codec(_FakeStandaloneCodec):
+    latent_size = 128
+
+    def encode(self, audio: Tensor, _temperature: float) -> Tensor:
+        frames = audio.shape[-1] // 2048
+        values = torch.ones(
+            audio.shape[0],
+            1,
+            1,
+            dtype=audio.dtype,
+            device=audio.device,
+        )
+        return values.expand(-1, 128, frames).clone()
+
+
 def test_encode_device_uses_torchrun_local_rank() -> None:
     assert _resolve_encode_device(
         "cuda",
@@ -323,3 +338,44 @@ def test_encoder_clips_long_audio_to_five_seconds(tmp_path: Path) -> None:
     ) as part:
         expected_frames = int(44100 * 5.0) // 2048
         assert part["lengths"].tolist() == [expected_frames]
+
+
+def test_pack_and_seed_bank_follow_a_128d_codec_contract(
+    tmp_path: Path,
+) -> None:
+    config = _fixture_config(tmp_path, shard_records=2)
+    config = replace(
+        config,
+        model=replace(config.model, latent_dim=128),
+    )
+    audio = tmp_path / "audio" / "serum128.wav"
+    _audio(audio, code=0.3)
+    _write_jsonl(
+        Path(config.data.unified_manifest),
+        [
+            _row(
+                0,
+                audio,
+                source_name="serum_full",
+                split="train",
+                note=60,
+                preset="serum:000001",
+                category="Pad",
+                maximum_future=64,
+            )
+        ],
+    )
+
+    encode_flow_shards(
+        config,
+        rank=0,
+        world_size=1,
+        device="cpu",
+        codec=_Fake128Codec(),
+    )
+    finalize_flow_pack(config)
+
+    with np.load(Path(config.data.packed_root) / "shard-000000.npz") as shard:
+        assert shard["latents"].shape[2] == 128
+    with np.load(Path(config.data.packed_root) / "seed-bank.npz") as seeds:
+        assert seeds["history"].shape[1:] == (32, 128)

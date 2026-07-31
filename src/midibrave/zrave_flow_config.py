@@ -9,18 +9,7 @@ import yaml
 
 
 _SECTION = TypeVar("_SECTION")
-_SOURCE_NAMES = (
-    "serum_full",
-    "pianobook_pitch",
-    "dexed_surge_broad",
-)
-_SOURCE_WEIGHTS = (0.65, 0.10, 0.25)
-_SOURCE_FUTURES = (64, 64, 64)
 _WANDER_DELAYS = (16, 32, 48)
-_CODEC_SHA256 = (
-    "3ec093e132ce75d7fee3b8b734c739ebf"
-    "8711a57ee332a60bce4359e2e34073e"
-)
 
 
 def _positive(name: str, value: int | float) -> None:
@@ -118,24 +107,10 @@ class FlowDataConfig:
         if not isclose(total, 1.0, rel_tol=0.0, abs_tol=1.0e-9):
             raise ValueError("source weights must sum to 1")
         names = tuple(source.name for source in self.sources)
-        if names != _SOURCE_NAMES:
-            raise ValueError(
-                "data source names must be "
-                + ", ".join(_SOURCE_NAMES)
-                + " in that order"
-            )
-        weights = tuple(source.weight for source in self.sources)
-        if weights != _SOURCE_WEIGHTS:
-            raise ValueError(
-                "data source weights must be 0.65, 0.10, 0.25"
-            )
-        futures = tuple(
-            source.maximum_future_frames for source in self.sources
-        )
-        if futures != _SOURCE_FUTURES:
-            raise ValueError(
-                "data source maximum futures must be 64, 64, 64"
-            )
+        if not names:
+            raise ValueError("data.sources must not be empty")
+        if len(names) != len(set(names)):
+            raise ValueError("data source names must be unique")
 
 
 @dataclass(frozen=True)
@@ -150,8 +125,10 @@ class FlowRaveConfig:
             raise ValueError("rave.checkpoint is required")
         digest = self.expected_sha256.casefold()
         object.__setattr__(self, "expected_sha256", digest)
-        if digest != _CODEC_SHA256:
-            raise ValueError("rave.expected_sha256 must match the codec")
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise ValueError("rave.expected_sha256 must be a SHA-256 digest")
         if self.sample_rate != 44100:
             raise ValueError("rave.sample_rate must be 44100")
         if self.latent_hop != 2048:
@@ -186,7 +163,6 @@ class FlowModelConfig:
             tuple(self.wander_delay_frames),
         )
         exact = {
-            "latent_dim": 16,
             "context_frames": 32,
             "future_frames": 64,
             "d_model": 384,
@@ -201,6 +177,7 @@ class FlowModelConfig:
         for name, expected in exact.items():
             if getattr(self, name) != expected:
                 raise ValueError(f"model.{name} must be {expected}")
+        _positive("model.latent_dim", self.latent_dim)
         if self.dropout != 0.0:
             raise ValueError("model.dropout must be 0.0")
         if self.condition_dropout != 0.10:

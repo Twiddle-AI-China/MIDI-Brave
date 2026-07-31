@@ -603,8 +603,10 @@ def _packed_sequence(
 def _write_seed_bank(
     packed_root: Path,
     sequences: list[dict[str, object]],
+    latent_dim: int,
 ) -> dict[str, object]:
     priority = {
+        "serum_balanced": 0,
         "serum_full": 0,
         "dexed_surge_broad": 1,
         "pianobook_pitch": 2,
@@ -640,7 +642,7 @@ def _write_seed_bank(
         used[key].add(preset)
         selected.append(row)
     histories = np.zeros(
-        (len(selected), 32, 16),
+        (len(selected), 32, latent_dim),
         dtype=np.float16,
     )
     for index, row in enumerate(selected):
@@ -856,7 +858,11 @@ def finalize_flow_pack(config: ZraveFlowConfig) -> dict[str, object]:
     pitch_pairs = _build_pitch_pairs(sequences)
     pitch_pairs_path = packed_root / "pitch-pairs.npy"
     _atomic_npy(pitch_pairs_path, pitch_pairs)
-    seed_report = _write_seed_bank(packed_root, sequences)
+    seed_report = _write_seed_bank(
+        packed_root,
+        sequences,
+        config.model.latent_dim,
+    )
 
     index: dict[str, object] = {
         "schema": 1,

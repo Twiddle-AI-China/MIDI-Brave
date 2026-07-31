@@ -13,6 +13,9 @@ CONFIG = ROOT / "configs" / "zrave" / "octopus_flow.yaml"
 PURE_CONFIG = (
     ROOT / "configs" / "zrave" / "octopus_pure_flow_poc.yaml"
 )
+SERUM128_CONFIG = (
+    ROOT / "configs" / "zrave" / "octopus_serum128_pure_flow.yaml"
+)
 
 
 def test_flow_config_locks_runtime_and_data_contract() -> None:
@@ -51,6 +54,29 @@ def test_pure_flow_config_disables_pitch_conditioning() -> None:
     assert config.train.checkpoint_every == 5000
     assert config.train.pitch_transition_fraction == 0.0
     assert config.train.output_root.endswith("/pure-flow-poc-v1")
+
+
+def test_serum128_config_binds_the_balanced_rave_codec() -> None:
+    config = ZraveFlowConfig.load(SERUM128_CONFIG)
+
+    assert config.model.latent_dim == 128
+    assert config.model.pitch_conditioning is False
+    assert config.model.context_frames == 32
+    assert config.model.future_frames == 64
+    assert config.rave.checkpoint.endswith(
+        "/codec/serum-balanced-rave128-full.ts"
+    )
+    assert config.rave.expected_sha256 == (
+        "69e8a2a133151eb896842100c993c6f4904936f08ee72e430f1c9c2556b6f9b4"
+    )
+    assert [source.name for source in config.data.sources] == [
+        "serum_balanced"
+    ]
+    assert config.data.sources[0].weight == 1.0
+    assert config.data.sources[0].manifest.endswith(
+        "/midibrave-rave-serum-v2/corpus/manifest.jsonl"
+    )
+    assert config.train.output_root.endswith("/runs/pure-flow-v1")
 
 
 def test_flow_config_rejects_unknown_and_inconsistent_values(

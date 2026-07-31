@@ -18,6 +18,11 @@ PURE_SWEEP = CLOUD / "octopus_zrave_pure_flow_sweep.sbatch"
 PURE_TRAIN = CLOUD / "octopus_zrave_pure_flow_train.sbatch"
 PURE_AUDITION = CLOUD / "octopus_zrave_pure_flow_audition.sbatch"
 PURE_JOBS = (PURE_SWEEP, PURE_TRAIN)
+SERUM128_CONFIG = ROOT / "configs" / "zrave" / "octopus_serum128_pure_flow.yaml"
+SERUM128_PREPARE = CLOUD / "octopus_serum128_flow_prepare.sbatch"
+SERUM128_SWEEP = CLOUD / "octopus_serum128_flow_sweep.sbatch"
+SERUM128_TRAIN = CLOUD / "octopus_serum128_flow_train.sbatch"
+SERUM128_JOBS = (SERUM128_PREPARE, SERUM128_SWEEP, SERUM128_TRAIN)
 
 
 def test_flow_jobs_use_only_octopus_slurm_gpu_contract() -> None:
@@ -191,3 +196,46 @@ def test_formal_config_uses_only_approved_sources_and_output_root() -> None:
         config.train.output_root
         == "/data/midibrave-zrave-flow/runs/flow-v1"
     )
+
+
+def test_serum128_jobs_are_pure_zrave_and_keep_sources_read_only() -> None:
+    scripts = [path.read_text(encoding="utf-8") for path in SERUM128_JOBS]
+
+    for script in scripts:
+        lowered = script.casefold()
+        assert "#SBATCH --gres=gpu:8" in script
+        assert "srun --kill-on-bad-exit=1" in script
+        assert "docker run --rm" in script
+        assert "octopus_serum128_pure_flow.yaml" in script
+        assert (
+            "/data/midibrave-rave-serum-v2:"
+            "/data/midibrave-rave-serum-v2:ro"
+        ) in script
+        assert "/data/datasets/Timbre_A/serum-octopus-v1:/source:ro" in script
+        assert "clap" not in lowered
+        assert "midi_note" not in lowered
+        assert "--pitch-probe" not in lowered
+        assert "zhongwei" not in lowered
+    assert "latent-cosmos-rave:serum-v2-rate-v3" in scripts[0]
+    assert "3a158421567618860808d7f92d301f222b7243591a493ca53bd285cd9ad9bde7" in scripts[0]
+
+
+def test_serum128_sweep_measures_four_batches_for_100_updates() -> None:
+    script = SERUM128_SWEEP.read_text(encoding="utf-8")
+
+    assert "for batch in 64 96 128 160" in script
+    assert "--benchmark-warmup 20" in script
+    assert "--benchmark-updates 100" in script
+    assert "--batches 64 96 128 160" in script
+    assert "median_valid_latent_frames_per_second" in script
+
+
+def test_serum128_training_runs_100k_and_checkpoints_every_5k() -> None:
+    config = ZraveFlowConfig.load(SERUM128_CONFIG)
+    script = SERUM128_TRAIN.read_text(encoding="utf-8")
+
+    assert config.train.max_updates == 100000
+    assert config.train.checkpoint_every == 5000
+    assert "--max-updates 100000" in script
+    assert "--nproc_per_node=8" in script
+    assert "latest-selection.json" in script

@@ -37,6 +37,10 @@ _CATEGORY_ALIASES = {
     "arp": "Arp",
     "chord": "Chord",
     "synth": "Synth",
+    "atmosphere": "Atmosphere",
+    "drums": "Drums",
+    "fx": "FX",
+    "vocal": "Vocal",
 }
 
 
@@ -146,8 +150,8 @@ def canonical_preset_id(
     source_name: str,
     row: dict[str, Any],
 ) -> str:
-    if source_name == "serum_full":
-        raw = str(row.get("preset_id") or "")
+    if source_name in {"serum_full", "serum_balanced"}:
+        raw = str(row.get("preset_id") or row.get("preset_key") or "")
         match = re.fullmatch(
             r"(?:serum_s|xfer/serum:|serum:)(\d+)",
             raw,
@@ -394,7 +398,20 @@ def _adapt_row(
     preset_categories: dict[str, str],
 ) -> dict[str, object] | None:
     source_name = source.name
-    if source_name == "dexed_surge_broad":
+    if source_name == "serum_balanced":
+        preset_index = _number(row.get("preset_index"), "preset_index")
+        note = _number(row.get("midi_note"), "midi_note")
+        velocity = _number(row.get("midi_velocity"), "midi_velocity")
+        native_id = f"{preset_index:06d}-n{note:03d}-v{velocity:03d}"
+        audio_value = row.get("source_path")
+        duration_value = row.get("duration_seconds") or 5.0
+        category = _CATEGORY_ALIASES.get(
+            str(row.get("category") or "").strip().casefold()
+        )
+        if category is None or category not in source.allowed_categories:
+            return None
+        articulation = "steady"
+    elif source_name == "dexed_surge_broad":
         synth_id = str(row.get("canonical_synth_id") or "").casefold()
         synth = "dexed" if "dexed" in synth_id else "surge"
         native_id = (
@@ -430,7 +447,12 @@ def _adapt_row(
     if not native_id:
         raise ValueError(f"{source_name} row lacks sample_id")
     note = _number(row.get("midi_note"), "midi_note")
-    velocity = _number(row.get("velocity"), "velocity")
+    velocity = _number(
+        row.get("midi_velocity")
+        if source_name == "serum_balanced"
+        else row.get("velocity"),
+        "velocity",
+    )
     try:
         duration = float(duration_value)
     except (TypeError, ValueError) as error:
@@ -442,12 +464,19 @@ def _adapt_row(
     if not math.isfinite(duration) or duration <= 0.0:
         raise ValueError(f"duration must be finite and positive: {duration}")
     canonical = canonical_preset_id(source_name, row)
+    split = (
+        str(row.get("split") or "")
+        if source_name == "serum_balanced"
+        else preset_split(canonical, seed)
+    )
+    if split not in {"train", "validation", "test"}:
+        raise ValueError(f"invalid split: {split!r}")
     return {
         "sample_id": f"{source_name}__{native_id}",
         "source_name": source_name,
         "audio_path": _resolve_audio(source.audio_root, audio_value),
         "canonical_preset_id": canonical,
-        "split": preset_split(canonical, seed),
+        "split": split,
         "midi_note": note,
         "velocity": velocity,
         "articulation_id": articulation,

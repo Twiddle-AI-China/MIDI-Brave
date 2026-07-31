@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from midibrave.zrave_flow_config import ZraveFlowConfig
+from midibrave.zrave_flow_config import FlowSourceConfig, ZraveFlowConfig
 from midibrave.zrave_flow_manifest import (
     build_flow_manifest,
     preset_split,
@@ -317,3 +317,57 @@ def test_manifest_rejects_audio_path_escape(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="escapes audio_root"):
         build_flow_manifest(config)
+
+
+def test_manifest_adapts_serum_balanced_rows_and_preserves_split(
+    tmp_path: Path,
+) -> None:
+    config = ZraveFlowConfig.load(FORMAL_CONFIG)
+    audio_root = tmp_path / "source"
+    audio = audio_root / "wavs" / "shard-42" / "100596_C2_v54.wav"
+    _touch_audio(audio_root, "wavs/shard-42/100596_C2_v54.wav")
+    source_manifest = tmp_path / "serum-balanced.jsonl"
+    _write_jsonl(
+        source_manifest,
+        [
+            {
+                "category": "Atmosphere",
+                "link_path": "validation/Atmosphere/xfer/example.wav",
+                "midi_note": 36,
+                "midi_velocity": 54,
+                "plugin_id": "xfer/serum",
+                "preset_index": 100596,
+                "preset_key": "xfer/serum:100596",
+                "source_path": str(audio.resolve()),
+                "split": "validation",
+            }
+        ],
+    )
+    source = FlowSourceConfig(
+        name="serum_balanced",
+        kind="jsonl",
+        manifest=str(source_manifest),
+        audio_root=str(audio_root),
+        weight=1.0,
+        maximum_future_frames=64,
+        allowed_categories=("Atmosphere",),
+    )
+    data = replace(
+        config.data,
+        unified_manifest=str(tmp_path / "unified.jsonl"),
+        manifest_report=str(tmp_path / "report.json"),
+        cache_root=str(tmp_path / "cache"),
+        packed_root=str(tmp_path / "pack"),
+        sources=(source,),
+    )
+
+    report = build_flow_manifest(replace(config, data=data))
+    rows = read_flow_manifest(data.unified_manifest)
+
+    assert report.rows == 1
+    assert rows[0]["sample_id"] == "serum_balanced__100596-n036-v054"
+    assert rows[0]["canonical_preset_id"] == "serum:100596"
+    assert rows[0]["audio_path"] == str(audio.resolve())
+    assert rows[0]["split"] == "validation"
+    assert rows[0]["category"] == "Atmosphere"
+    assert rows[0]["duration_seconds"] == 5.0

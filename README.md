@@ -122,6 +122,40 @@ RAVE encoder is not required after seed-bank construction. The older
 MIDI-conditioned flow scripts remain solely for artifact compatibility and are
 not part of this POC.
 
+### Serum Balanced 128-D predictor
+
+The current paired experiment replaces the historical 16-D Freesound codec
+with the Serum Balanced RAVE trained in this repository. It is bound to the
+recoverable Phase 2 checkpoint at global step `968805` (SHA-256
+`3a158421...bde7`). The derived runtime codec keeps all 128 PCA-rotated
+posterior-mean coordinates instead of applying RAVE's post-hoc fidelity crop;
+its SHA-256 is `69e8a2a1...f9b4`.
+
+This remains a pure `z_rave` proof of concept: 32 real frames condition a
+Transformer velocity field that samples the next 64 frames with conditional
+Flow Matching. There is no MIDI, CLAP, pitch, waveform, or KL objective. The
+source checkpoint, config, corpus manifest, and Serum audio are mounted
+read-only. Derived latents and predictor artifacts live only under
+`/data/midibrave-zrave-flow-serum128`.
+
+Submit the complete Octopus chain with dependencies:
+
+```bash
+prepare=$(sbatch --parsable \
+  scripts/cloud/octopus_serum128_flow_prepare.sbatch)
+sweep=$(sbatch --parsable --dependency=afterok:"$prepare" \
+  scripts/cloud/octopus_serum128_flow_sweep.sbatch)
+train=$(sbatch --parsable --dependency=afterok:"$sweep" \
+  scripts/cloud/octopus_serum128_flow_train.sbatch)
+```
+
+Preparation encodes the exact Serum Balanced split into a new 128-D pack. The
+sweep measures per-GPU batches 64, 96, 128, and 160 for 100 updates each on
+eight V100s. Formal training selects the highest valid latent-frame throughput,
+runs 100,000 updates, and saves every 5,000 updates under
+`runs/pure-flow-v1/checkpoints`; TensorBoard events are under the adjacent
+`tensorboard/` directory.
+
 ## Predictive RAVE + CLAP runtime (v3)
 
 The v3 path restores a causal RAVE encoder during training, concatenates its
