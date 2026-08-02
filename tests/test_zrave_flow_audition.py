@@ -4,9 +4,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import soundfile as sf
 import torch
 
 from midibrave.zrave_flow_audition import (
+    _mono_audio,
     render_index_html,
     match_rms,
     rollout_pure_flow,
@@ -157,6 +159,21 @@ def test_match_rms_is_finite_peak_limited_and_handles_silence() -> None:
         match_rms(reference, np.zeros(32, dtype=np.float32)),
         np.zeros(32, dtype=np.float32),
     )
+
+
+def test_mono_audio_resamples_like_training_pipeline(tmp_path: Path) -> None:
+    source_rate = 48000
+    target_rate = 44100
+    time = np.arange(source_rate // 10, dtype=np.float32) / source_rate
+    audio = np.sin(2.0 * np.pi * 440.0 * time).astype(np.float32)
+    path = tmp_path / "source-48k.wav"
+    sf.write(path, audio, source_rate, subtype="FLOAT")
+
+    loaded = _mono_audio(path, target_rate)
+
+    assert loaded.shape == (target_rate // 10,)
+    assert loaded.dtype == np.float32
+    assert np.isfinite(loaded).all()
 
 
 def _checkpoint_payload() -> dict[str, object]:

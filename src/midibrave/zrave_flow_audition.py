@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Callable, Iterable, Sequence
 from html import escape
@@ -11,6 +12,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 import torch
+from scipy.signal import resample_poly
 from torch import Tensor
 
 from .zrave_codec import decode_with_seed
@@ -368,14 +370,21 @@ def _mono_audio(path: str | Path, sample_rate: int) -> np.ndarray:
         dtype="float32",
         always_2d=True,
     )
-    if actual_rate != sample_rate:
-        raise ValueError(
-            f"source sample rate is {actual_rate}, expected {sample_rate}"
-        )
     mono = audio.mean(axis=1, dtype=np.float32)
     if mono.size == 0 or not np.isfinite(mono).all():
         raise ValueError(f"invalid source audio: {path}")
-    return mono
+    if actual_rate != sample_rate:
+        divisor = math.gcd(actual_rate, sample_rate)
+        mono = resample_poly(
+            mono,
+            sample_rate // divisor,
+            actual_rate // divisor,
+        ).astype(np.float32)
+        expected_samples = round(audio.shape[0] * sample_rate / actual_rate)
+        mono = mono[:expected_samples]
+    if not np.isfinite(mono).all():
+        raise ValueError(f"non-finite resampled source audio: {path}")
+    return np.ascontiguousarray(mono, dtype=np.float32)
 
 
 def _audio_facts(audio: np.ndarray, sample_rate: int) -> dict[str, float | int]:
