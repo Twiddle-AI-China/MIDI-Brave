@@ -5,6 +5,7 @@ import json
 import math
 import re
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -17,11 +18,194 @@ from torch import Tensor
 
 from .zrave_codec import decode_with_seed
 from .zrave_flow_config import ZraveFlowConfig
+from .zrave_flow_exploration import (
+    exploration_controls,
+    rollout_candidate_metrics,
+)
 from .zrave_flow_model import (
     FlowStatistics,
     ZraveFlowTransformer,
     sample_pure_flow_block,
 )
+
+
+@dataclass(frozen=True)
+class ExplorationRolloutResult:
+    generated: Tensor
+    selected_candidate_indices: Tensor
+    candidate_scores: Tensor
+    candidate_motion: Tensor
+    candidate_boundary_rms: Tensor
+    candidate_norm_violation: Tensor
+
+
+def _candidate_seed(
+    generation_seed: int,
+    commit_index: int,
+    candidate_index: int,
+) -> int:
+    if generation_seed < 0 or commit_index < 0 or candidate_index < 0:
+        raise ValueError("rollout seed indices must be non-negative")
+    digest = hashlib.sha256(
+        f"{generation_seed}:{commit_index}:{candidate_index}".encode(
+            "utf-8"
+        )
+    ).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=False)
+
+
+def _sample_rollout_candidates(
+    model: Any,
+    statistics: FlowStatistics,
+    history: Tensor,
+    *,
+    generation_seed: int,
+    commit_index: int,
+    candidate_count: int,
+    temperature: float,
+    wander_delay_frames: float,
+    solver_steps: int,
+    schedule_offset_frames: int,
+    visible_history_frames: int,
+) -> Tensor:
+    candidates = [
+        sample_pure_flow_block(
+            model,
+            statistics,
+            history,
+            generation_seed=_candidate_seed(
+                generation_seed,
+                commit_index,
+                candidate_index,
+            ),
+            block_index=0,
+            temperature=temperature,
+            wander_delay_frames=wander_delay_frames,
+            solver_steps=solver_steps,
+            schedule_offset_frames=schedule_offset_frames,
+            visible_history_frames=visible_history_frames,
+        )
+        for candidate_index in range(candidate_count)
+    ]
+    return torch.stack(candidates, dim=1)
+
+
+def rollout_exploration_flow(
+    model: Any,
+    statistics: FlowStatistics,
+    history: Tensor,
+    frames: int,
+    *,
+    generation_seed: int,
+    exploration: float,
+    candidate_count: int = 4,
+    stride_frames: int = 16,
+    solver_steps: int = 8,
+    sample_candidates: Callable[..., Tensor] = _sample_rollout_candidates,
+) -> ExplorationRolloutResult:
+    if frames <= 0:
+        raise ValueError("frames must be positive")
+    if generation_seed < 0:
+        raise ValueError("generation_seed must be non-negative")
+    if candidate_count not in {1, 2, 4}:
+        raise ValueError("candidate_count must be 1, 2, or 4")
+    if stride_frames != 16:
+        raise ValueError("exploration rollout stride must be 16 frames")
+    if not math.isfinite(exploration) or not 0.0 <= exploration <= 1.0:
+        raise ValueError("exploration must be finite and in [0, 1]")
+    expected_history = (
+        history.shape[0] if history.ndim else 0,
+        int(model.context_frames),
+        int(model.latent_dim),
+    )
+    if history.ndim != 3 or tuple(history.shape) != expected_history:
+        raise ValueError(
+            f"history must have shape {expected_history}, "
+            f"got {tuple(history.shape)}"
+        )
+    statistics.validate(int(model.latent_dim))
+    control = exploration_controls(
+        torch.tensor([exploration], device=history.device)
+    )
+    temperature = float(control.temperature[0].item())
+    wander_delay = float(control.wander_delay_frames[0].item())
+    visible_history = int(control.visible_history_frames[0].item())
+    levels = torch.full(
+        (history.shape[0],),
+        exploration,
+        device=history.device,
+        dtype=history.dtype,
+    )
+
+    chunks: list[Tensor] = []
+    selected_indices: list[Tensor] = []
+    score_steps: list[Tensor] = []
+    motion_steps: list[Tensor] = []
+    boundary_steps: list[Tensor] = []
+    norm_steps: list[Tensor] = []
+    current = history
+    committed = 0
+    commit_index = 0
+    while committed < frames:
+        candidates = sample_candidates(
+            model,
+            statistics,
+            current,
+            generation_seed=generation_seed,
+            commit_index=commit_index,
+            candidate_count=candidate_count,
+            temperature=temperature,
+            wander_delay_frames=wander_delay,
+            solver_steps=solver_steps,
+            schedule_offset_frames=committed,
+            visible_history_frames=visible_history,
+        )
+        expected_candidates = (
+            history.shape[0],
+            candidate_count,
+            int(model.future_frames),
+            int(model.latent_dim),
+        )
+        if tuple(candidates.shape) != expected_candidates:
+            raise ValueError(
+                f"candidate sampler must return {expected_candidates}, "
+                f"got {tuple(candidates.shape)}"
+            )
+        metrics = rollout_candidate_metrics(
+            candidates,
+            history=current,
+            statistics=statistics,
+            exploration=levels,
+            commit_frames=stride_frames,
+        )
+        selected = metrics.scores.argmax(dim=1)
+        batch_indices = torch.arange(
+            history.shape[0],
+            device=candidates.device,
+        )
+        selected_block = candidates[batch_indices, selected]
+        take = min(stride_frames, frames - committed)
+        chunk = selected_block[:, :take]
+        chunks.append(chunk)
+        selected_indices.append(selected)
+        score_steps.append(metrics.scores)
+        motion_steps.append(metrics.motion)
+        boundary_steps.append(metrics.boundary_rms)
+        norm_steps.append(metrics.norm_violation)
+        current = torch.cat((current, chunk), dim=1)[
+            :, -int(model.context_frames) :
+        ].detach()
+        committed += take
+        commit_index += 1
+
+    return ExplorationRolloutResult(
+        generated=torch.cat(chunks, dim=1),
+        selected_candidate_indices=torch.stack(selected_indices, dim=1),
+        candidate_scores=torch.stack(score_steps, dim=1),
+        candidate_motion=torch.stack(motion_steps, dim=1),
+        candidate_boundary_rms=torch.stack(boundary_steps, dim=1),
+        candidate_norm_violation=torch.stack(norm_steps, dim=1),
+    )
 
 
 def rollout_pure_flow(
@@ -157,10 +341,16 @@ def validate_pure_checkpoint_payload(
     config_sha256: str,
     pack_index_sha256: str,
     statistics_sha256: str,
+    exploration_enabled: bool | None = None,
 ) -> int:
     if not isinstance(payload, dict) or payload.get("format") != 1:
         raise ValueError("checkpoint must use format 1")
-    if payload.get("architecture") != "zrave_pure_flow_transformer_v1":
+    expected_architecture = (
+        "zrave_pure_flow_transformer_v2"
+        if exploration_enabled is True
+        else "zrave_pure_flow_transformer_v1"
+    )
+    if payload.get("architecture") != expected_architecture:
         raise ValueError("checkpoint architecture is not pure flow")
     contract = payload.get("contract")
     if not isinstance(contract, dict):
@@ -174,8 +364,15 @@ def validate_pure_checkpoint_payload(
         "pack_index_sha256": pack_index_sha256,
         "statistics_sha256": statistics_sha256,
     }
+    if exploration_enabled is not None:
+        expected["exploration_enabled"] = exploration_enabled
     for name, value in expected.items():
-        if contract.get(name) != value:
+        actual = (
+            contract.get(name, False)
+            if name == "exploration_enabled"
+            else contract.get(name)
+        )
+        if actual != value:
             raise ValueError(f"checkpoint {name} contract mismatch")
     update = payload.get("update")
     if not isinstance(update, int) or isinstance(update, bool) or update <= 0:
@@ -204,6 +401,13 @@ def _audio_cell(title: str, payload: dict[str, Any]) -> str:
 
 def render_index_html(manifest: dict[str, Any]) -> str:
     checkpoint = manifest["checkpoint"]
+    generated_frames = int(manifest["generated_frames"])
+    commit_stride = int(manifest.get("commit_stride_frames", 64))
+    commit_count = math.ceil(generated_frames / commit_stride)
+    unit_name = "commits" if commit_stride == 16 else "blocks"
+    generated_label = (
+        f"{commit_count} × {commit_stride} generated {unit_name}"
+    )
     cards: list[str] = []
     for example in manifest["examples"]:
         takes = [
@@ -266,7 +470,7 @@ def render_index_html(manifest: dict[str, Any]) -> str:
     h1 {{ font-size: clamp(42px, 7vw, 94px); line-height: .86; letter-spacing: -.045em; }}
     .facts {{ align-self: end; color: var(--muted); font-size: 15px; line-height: 1.55; }}
     .facts strong {{ color: var(--ink); }}
-    .timeline {{ display: grid; grid-template-columns: 1fr repeat(5, 2fr); gap: 4px; margin-top: 24px; }}
+    .timeline {{ display: grid; grid-template-columns: 1fr 5fr; gap: 4px; margin-top: 24px; }}
     .timeline span {{ padding: 10px 8px; font: 12px "Cascadia Mono", monospace; text-align: center; }}
     .timeline__seed {{ background: var(--rave); color: white; }}
     .timeline__flow {{ background: var(--flow); color: white; }}
@@ -303,11 +507,9 @@ def render_index_html(manifest: dict[str, Any]) -> str:
       Compare the source, codec ceiling, then stochastic continuation.
       <div class="timeline">
         <span class="timeline__seed">32 real seed</span>
-        <span class="timeline__flow">64</span><span class="timeline__flow">64</span>
-        <span class="timeline__flow">64</span><span class="timeline__flow">64</span>
-        <span class="timeline__flow">64</span>
+        <span class="timeline__flow">{generated_frames} generated</span>
       </div>
-      <div class="legend"><span>32 real seed</span><span>5 × 64 generated blocks</span></div>
+      <div class="legend"><span>32 real seed</span><span>{generated_label}</span></div>
     </div>
   </header>
   <p class="note">Players use source-RMS-matched files for fair loudness. The package also contains untouched float WAVs under <code>raw/</code>.</p>
@@ -474,8 +676,10 @@ def render_flow_audition(
         "Keys",
         "Synth",
     ),
-    temperatures: Sequence[float] = (0.7, 1.0),
+    explorations: Sequence[float] = (0.0, 0.5, 1.0),
     generation_seeds: Sequence[int] = (17, 71),
+    candidate_count: int = 4,
+    commit_stride_frames: int = 16,
     generated_frames: int = 320,
     selection_seed: int = 20260802,
     device_name: str = "cuda",
@@ -487,10 +691,17 @@ def render_flow_audition(
         raise FileExistsError(f"audition output is not empty: {output}")
     if generated_frames <= 0:
         raise ValueError("generated_frames must be positive")
-    if not temperatures or any(value < 0.0 for value in temperatures):
-        raise ValueError("temperatures must be non-empty and non-negative")
+    if not explorations or any(
+        not math.isfinite(value) or not 0.0 <= value <= 1.0
+        for value in explorations
+    ):
+        raise ValueError("explorations must be non-empty and in [0, 1]")
     if not generation_seeds or any(value < 0 for value in generation_seeds):
         raise ValueError("generation seeds must be non-empty and non-negative")
+    if candidate_count not in {1, 2, 4}:
+        raise ValueError("candidate_count must be 1, 2, or 4")
+    if commit_stride_frames != 16:
+        raise ValueError("commit_stride_frames must be 16")
 
     config = ZraveFlowConfig.load(config_path)
     if config.model.pitch_conditioning:
@@ -511,7 +722,12 @@ def render_flow_audition(
         config_sha256=_sha256_file(config_path),
         pack_index_sha256=_sha256_file(index_path),
         statistics_sha256=_sha256_file(statistics_path),
+        exploration_enabled=config.exploration.enabled,
     )
+    checkpoint_architecture = str(payload["architecture"])
+    initialization = payload.get("initialization")
+    if initialization is not None and not isinstance(initialization, dict):
+        raise ValueError("checkpoint initialization lineage is malformed")
     checkpoint_hash = _sha256_file(checkpoint_path)
     statistics = _load_statistics(statistics_path)
     statistics.validate(config.model.latent_dim)
@@ -599,34 +815,38 @@ def render_flow_audition(
                 [latent[: config.model.context_frames] for latent in latents]
             )
         ).to(device)
-        for temperature in temperatures:
+        for exploration_index, exploration in enumerate(explorations):
             for generation_seed in generation_seeds:
-                generated = rollout_pure_flow(
+                rollout = rollout_exploration_flow(
                     model,
                     statistics,
                     history,
                     generated_frames,
                     generation_seed=generation_seed,
-                    temperature=float(temperature),
-                    wander_delay_frames=32,
+                    exploration=float(exploration),
+                    candidate_count=candidate_count,
+                    stride_frames=commit_stride_frames,
                     solver_steps=config.model.solver_steps,
                 )
-                complete = torch.cat((history, generated), dim=1)
+                complete = torch.cat((history, rollout.generated), dim=1)
                 for index, example in enumerate(examples):
                     audio = _decode_latent(
                         codec,
                         complete[index],
                         device=device,
                         random_seed=(
-                            config.seed + generation_seed * 100 + index
+                            config.seed
+                            + generation_seed * 100
+                            + exploration_index * 10
+                            + index
                         ),
                     )
-                    temperature_name = str(float(temperature)).replace(
+                    exploration_name = str(float(exploration)).replace(
                         ".", "p"
                     )
                     stem = (
                         f"{index:02d}-{_slug(str(example['category']))}"
-                        f"-flow-t{temperature_name}-s{generation_seed}"
+                        f"-flow-e{exploration_name}-s{generation_seed}"
                     )
                     rendered = _write_audio_pair(
                         output,
@@ -638,11 +858,50 @@ def render_flow_audition(
                     rendered.update(
                         {
                             "label": (
-                                f"Flow · T{float(temperature):g} · "
+                                f"Flow · E{float(exploration):g} · "
+                                f"Best of {candidate_count} · "
                                 f"Seed {generation_seed}"
                             ),
-                            "temperature": float(temperature),
+                            "exploration": float(exploration),
                             "generation_seed": int(generation_seed),
+                            "candidate_count": candidate_count,
+                            "commit_stride_frames": commit_stride_frames,
+                            "selected_candidate_indices": (
+                                rollout.selected_candidate_indices[index]
+                                .detach()
+                                .cpu()
+                                .tolist()
+                            ),
+                            "rejection_metrics": {
+                                "candidate_scores": (
+                                    rollout.candidate_scores[index]
+                                    .detach()
+                                    .float()
+                                    .cpu()
+                                    .tolist()
+                                ),
+                                "motion": (
+                                    rollout.candidate_motion[index]
+                                    .detach()
+                                    .float()
+                                    .cpu()
+                                    .tolist()
+                                ),
+                                "boundary_rms": (
+                                    rollout.candidate_boundary_rms[index]
+                                    .detach()
+                                    .float()
+                                    .cpu()
+                                    .tolist()
+                                ),
+                                "norm_violation": (
+                                    rollout.candidate_norm_violation[index]
+                                    .detach()
+                                    .float()
+                                    .cpu()
+                                    .tolist()
+                                ),
+                            },
                         }
                     )
                     example["rollouts"].append(rendered)
@@ -654,6 +913,8 @@ def render_flow_audition(
             "path": str(checkpoint_path.resolve()),
             "update": update,
             "sha256": checkpoint_hash,
+            "architecture": checkpoint_architecture,
+            "initialization": initialization,
         },
         "codec": {
             "path": str(codec_path.resolve()),
@@ -664,9 +925,10 @@ def render_flow_audition(
         "latent_hop": config.rave.latent_hop,
         "context_frames": config.model.context_frames,
         "generated_frames": generated_frames,
+        "commit_stride_frames": commit_stride_frames,
         "solver_steps": config.model.solver_steps,
-        "wander_delay_frames": 32,
-        "temperatures": [float(value) for value in temperatures],
+        "explorations": [float(value) for value in explorations],
+        "candidate_count": candidate_count,
         "generation_seeds": [int(value) for value in generation_seeds],
         "selection_seed": selection_seed,
         "examples": examples,

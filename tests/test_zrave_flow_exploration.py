@@ -3,6 +3,18 @@ from __future__ import annotations
 import pytest
 import torch
 
+from midibrave.zrave_flow_model import FlowStatistics
+
+
+def _statistics(latent_dim: int = 4) -> FlowStatistics:
+    return FlowStatistics(
+        mean=torch.zeros(latent_dim),
+        latent_std=torch.ones(latent_dim),
+        delta_std=torch.ones(latent_dim),
+        latent_norm_p01=torch.tensor(0.0),
+        latent_norm_p99=torch.tensor(1000.0),
+    )
+
 
 def test_exploration_control_endpoints() -> None:
     from midibrave.zrave_flow_exploration import exploration_controls
@@ -66,3 +78,54 @@ def test_trailing_history_mask_rejects_invalid_counts(
 
     with pytest.raises(ValueError):
         trailing_history_mask(visible, 32)
+
+
+def test_candidate_score_rejects_static_and_exploding_prefixes() -> None:
+    from midibrave.zrave_flow_exploration import (
+        score_rollout_candidates,
+    )
+
+    history = torch.zeros(1, 32, 4)
+    static = torch.zeros(1, 64, 4)
+    valid = (
+        torch.arange(1, 65, dtype=torch.float32)
+        .view(1, 64, 1)
+        .expand(-1, -1, 4)
+    )
+    exploding = valid * 10.0
+    candidates = torch.stack((static, valid, exploding), dim=1)
+
+    scores = score_rollout_candidates(
+        candidates,
+        history=history,
+        statistics=_statistics(),
+        exploration=torch.tensor([1.0]),
+        commit_frames=16,
+    )
+
+    assert scores.shape == (1, 3)
+    assert scores.argmax(dim=1).item() == 1
+
+
+def test_candidate_score_breaks_exact_ties_by_lowest_index() -> None:
+    from midibrave.zrave_flow_exploration import (
+        score_rollout_candidates,
+    )
+
+    history = torch.zeros(1, 32, 4)
+    candidate = (
+        torch.arange(1, 65, dtype=torch.float32)
+        .view(1, 64, 1)
+        .expand(-1, -1, 4)
+    )
+    candidates = torch.stack((candidate, candidate), dim=1)
+
+    scores = score_rollout_candidates(
+        candidates,
+        history=history,
+        statistics=_statistics(),
+        exploration=torch.tensor([0.5]),
+        commit_frames=16,
+    )
+
+    assert scores.argmax(dim=1).item() == 0

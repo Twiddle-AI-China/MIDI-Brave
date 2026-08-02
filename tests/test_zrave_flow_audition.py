@@ -11,10 +11,12 @@ from midibrave.zrave_flow_audition import (
     _mono_audio,
     render_index_html,
     match_rms,
+    rollout_exploration_flow,
     rollout_pure_flow,
     select_audition_rows,
     validate_pure_checkpoint_payload,
 )
+from midibrave.zrave_flow_model import FlowStatistics
 
 
 SBATCH = (
@@ -84,6 +86,126 @@ def test_rollout_pure_flow_updates_context_and_trims_final_block() -> None:
     torch.testing.assert_close(calls[0][1], history)
     torch.testing.assert_close(calls[1][1], torch.ones(1, 32, 128))
     torch.testing.assert_close(calls[2][1], torch.full((1, 32, 128), 2.0))
+
+
+def test_exploration_rollout_commits_sixteen_without_resetting_offset() -> None:
+    offsets: list[int] = []
+
+    def sample_candidates(
+        model: object,
+        statistics: object,
+        history: torch.Tensor,
+        *,
+        generation_seed: int,
+        commit_index: int,
+        candidate_count: int,
+        temperature: float,
+        wander_delay_frames: float,
+        solver_steps: int,
+        schedule_offset_frames: int,
+        visible_history_frames: int,
+    ) -> torch.Tensor:
+        del statistics, generation_seed, temperature
+        del wander_delay_frames, solver_steps, visible_history_frames
+        offsets.append(schedule_offset_frames)
+        values = torch.arange(
+            1,
+            model.future_frames + 1,
+            dtype=history.dtype,
+            device=history.device,
+        ).view(1, 1, -1, 1)
+        values = values.expand(
+            history.shape[0],
+            candidate_count,
+            -1,
+            model.latent_dim,
+        )
+        return values + float(commit_index)
+
+    statistics = FlowStatistics(
+        mean=torch.zeros(128),
+        latent_std=torch.ones(128),
+        delta_std=torch.ones(128),
+        latent_norm_p01=torch.tensor(0.0),
+        latent_norm_p99=torch.tensor(10000.0),
+    )
+    result = rollout_exploration_flow(
+        _FlowShape(),
+        statistics,
+        torch.zeros(1, 32, 128),
+        frames=48,
+        generation_seed=9,
+        exploration=1.0,
+        candidate_count=2,
+        stride_frames=16,
+        solver_steps=8,
+        sample_candidates=sample_candidates,
+    )
+
+    assert result.generated.shape == (1, 48, 128)
+    assert result.selected_candidate_indices.shape == (1, 3)
+    assert offsets == [0, 16, 32]
+
+
+def test_exploration_rollout_replays_identically() -> None:
+    calls: list[tuple[int, int]] = []
+
+    def sample_candidates(
+        model: object,
+        statistics: object,
+        history: torch.Tensor,
+        *,
+        generation_seed: int,
+        commit_index: int,
+        candidate_count: int,
+        **controls: object,
+    ) -> torch.Tensor:
+        del statistics, controls
+        calls.append((generation_seed, commit_index))
+        generator = torch.Generator(device=history.device)
+        generator.manual_seed(generation_seed + commit_index)
+        return torch.randn(
+            history.shape[0],
+            candidate_count,
+            model.future_frames,
+            model.latent_dim,
+            generator=generator,
+            device=history.device,
+        )
+
+    statistics = FlowStatistics(
+        mean=torch.zeros(128),
+        latent_std=torch.ones(128),
+        delta_std=torch.ones(128),
+        latent_norm_p01=torch.tensor(0.0),
+        latent_norm_p99=torch.tensor(10000.0),
+    )
+    arguments = (
+        _FlowShape(),
+        statistics,
+        torch.zeros(1, 32, 128),
+        32,
+    )
+    first = rollout_exploration_flow(
+        *arguments,
+        generation_seed=41,
+        exploration=0.75,
+        candidate_count=2,
+        sample_candidates=sample_candidates,
+    )
+    second = rollout_exploration_flow(
+        *arguments,
+        generation_seed=41,
+        exploration=0.75,
+        candidate_count=2,
+        sample_candidates=sample_candidates,
+    )
+
+    torch.testing.assert_close(first.generated, second.generated)
+    torch.testing.assert_close(
+        first.selected_candidate_indices,
+        second.selected_candidate_indices,
+    )
 
 
 def test_select_audition_rows_is_deterministic_and_category_ordered() -> None:
@@ -224,6 +346,43 @@ def test_validate_pure_checkpoint_payload_rejects_wrong_architecture() -> None:
         )
 
 
+def test_validate_pure_checkpoint_payload_accepts_exploration_v2() -> None:
+    payload = _checkpoint_payload()
+    payload["architecture"] = "zrave_pure_flow_transformer_v2"
+    payload["contract"]["exploration_enabled"] = True
+
+    update = validate_pure_checkpoint_payload(
+        payload,
+        latent_dim=128,
+        context_frames=32,
+        future_frames=64,
+        config_sha256="a" * 64,
+        pack_index_sha256="b" * 64,
+        statistics_sha256="c" * 64,
+        exploration_enabled=True,
+    )
+
+    assert update == 85000
+
+
+def test_validate_pure_checkpoint_payload_rejects_v2_contract_mismatch() -> None:
+    payload = _checkpoint_payload()
+    payload["architecture"] = "zrave_pure_flow_transformer_v2"
+    payload["contract"]["exploration_enabled"] = False
+
+    with pytest.raises(ValueError, match="exploration_enabled"):
+        validate_pure_checkpoint_payload(
+            payload,
+            latent_dim=128,
+            context_frames=32,
+            future_frames=64,
+            config_sha256="a" * 64,
+            pack_index_sha256="b" * 64,
+            statistics_sha256="c" * 64,
+            exploration_enabled=True,
+        )
+
+
 def test_render_index_html_labels_audio_facts_and_timeline() -> None:
     manifest = {
         "checkpoint": {"update": 85000, "sha256": "f" * 64},
@@ -255,6 +414,35 @@ def test_render_index_html_labels_audio_facts_and_timeline() -> None:
     assert "32 real seed" in html
     assert "5 × 64 generated blocks" in html
     assert "matched/pad-flow.wav" in html
+
+
+def test_render_index_html_describes_sixteen_frame_commits() -> None:
+    manifest = {
+        "checkpoint": {"update": 3000, "sha256": "f" * 64},
+        "context_frames": 32,
+        "generated_frames": 320,
+        "commit_stride_frames": 16,
+        "sample_rate": 44100,
+        "latent_hop": 2048,
+        "examples": [],
+    }
+
+    html = render_index_html(manifest)
+
+    assert "20 × 16 generated commits" in html
+
+
+def test_audition_cli_exposes_exploration_controls() -> None:
+    script = (
+        Path(__file__).parents[1]
+        / "scripts"
+        / "render_zrave_flow_audition.py"
+    ).read_text(encoding="utf-8")
+
+    assert '"--explorations"' in script
+    assert '"--candidate-count"' in script
+    assert "explorations=args.explorations" in script
+    assert "candidate_count=args.candidate_count" in script
 
 
 def test_octopus_audition_uses_one_gpu_and_read_only_inputs() -> None:
