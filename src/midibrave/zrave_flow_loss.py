@@ -75,6 +75,7 @@ def make_flow_training_pair(
     wander_delay_frames: Tensor | int,
     statistics: FlowStatistics,
     generator: torch.Generator,
+    schedule_offset_frames: Tensor | int = 0,
 ) -> FlowTrainingPair:
     mask = _validate_future(future, future_mask, statistics)
     batch, frames, latent_dim = future.shape
@@ -83,13 +84,17 @@ def make_flow_training_pair(
         wander_delay_frames,
         batch=batch,
         device=device,
-        dtype=torch.long,
+        dtype=torch.float32,
         name="wander_delay_frames",
     )
-    if not torch.all(
-        (delays == 16) | (delays == 32) | (delays == 48)
+    if (
+        not torch.isfinite(delays).all()
+        or torch.any(delays < 16)
+        or torch.any(delays > 48)
     ):
-        raise ValueError("wander_delay_frames must be 16, 32, or 48")
+        raise ValueError(
+            "wander_delay_frames must be finite and in [16, 48]"
+        )
     temperatures = _batch_vector(
         temperature,
         batch=batch,
@@ -120,6 +125,7 @@ def make_flow_training_pair(
         temperatures,
         delays,
         frames,
+        offset_frames=schedule_offset_frames,
     ).unsqueeze(-1)
     flow_time = torch.rand(
         batch,

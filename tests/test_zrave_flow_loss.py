@@ -130,6 +130,33 @@ def test_flow_loss_ignores_masked_release_tail() -> None:
         )
 
 
+def test_training_pair_absolute_offset_keeps_late_noise_hot() -> None:
+    future = torch.zeros(2, 64, 16)
+    mask = torch.ones(2, 64, dtype=torch.bool)
+    arguments = {
+        "future": future,
+        "future_mask": mask,
+        "temperature": torch.ones(2),
+        "wander_delay_frames": torch.full((2,), 32.0),
+        "statistics": _statistics(),
+    }
+    anchored = make_flow_training_pair(
+        **arguments,
+        schedule_offset_frames=0,
+        generator=torch.Generator().manual_seed(23),
+    )
+    wandering = make_flow_training_pair(
+        **arguments,
+        schedule_offset_frames=64,
+        generator=torch.Generator().manual_seed(23),
+    )
+
+    torch.testing.assert_close(
+        wandering.target_velocity[:, 0],
+        anchored.target_velocity[:, 0] / 0.15,
+    )
+
+
 def test_loss_has_only_approved_components() -> None:
     report = zrave_flow_loss(**_loss_fixture())
 

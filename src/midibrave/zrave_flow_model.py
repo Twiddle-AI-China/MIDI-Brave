@@ -859,15 +859,20 @@ def sample_pure_flow_block(
     generation_seed: int,
     block_index: int,
     temperature: float,
-    wander_delay_frames: int,
+    wander_delay_frames: float,
     solver_steps: int,
     schedule_offset_frames: int = 0,
     visible_history_frames: int = 32,
 ) -> Tensor:
     if not torch.isfinite(torch.tensor(temperature)) or temperature < 0:
         raise ValueError("temperature must be finite and non-negative")
-    if wander_delay_frames not in {16, 32, 48}:
-        raise ValueError("wander_delay_frames must be 16, 32, or 48")
+    if (
+        not torch.isfinite(torch.tensor(wander_delay_frames))
+        or not 16.0 <= wander_delay_frames <= 48.0
+    ):
+        raise ValueError(
+            "wander_delay_frames must be finite and in [16, 48]"
+        )
     if solver_steps not in {4, 8, 12}:
         raise ValueError("solver_steps must be 4, 8, or 12")
     if schedule_offset_frames < 0:
@@ -884,7 +889,7 @@ def sample_pure_flow_block(
         (batch,),
         wander_delay_frames,
         device=device,
-        dtype=torch.long,
+        dtype=torch.float32,
     )
     retention = retention_curve(
         delay,

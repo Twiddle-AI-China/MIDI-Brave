@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -30,6 +31,12 @@ from midibrave.zrave_flow_train import (
 ROOT = Path(__file__).parents[1]
 PURE_CONFIG = (
     ROOT / "configs" / "zrave" / "octopus_pure_flow_poc.yaml"
+)
+EXPLORATION_CONFIG = (
+    ROOT
+    / "configs"
+    / "zrave"
+    / "octopus_serum128_exploration_flow.yaml"
 )
 
 
@@ -110,6 +117,54 @@ def _unit_statistics() -> FlowStatistics:
         delta_std=torch.ones(16),
         latent_norm_p01=torch.tensor(0.1),
         latent_norm_p99=torch.tensor(100.0),
+    )
+
+
+def _pure_model() -> ZraveFlowTransformer:
+    return ZraveFlowTransformer(
+        statistics=_unit_statistics(),
+        latent_dim=16,
+        context_frames=32,
+        future_frames=64,
+        d_model=32,
+        context_layers=1,
+        future_layers=1,
+        heads=4,
+        feedforward_dim=64,
+        dropout=0.0,
+        pitch_conditioning=False,
+    )
+
+
+def _numbered_flow_batch(batch_size: int = 2) -> FlowBatch:
+    history = torch.arange(32).view(1, 32, 1).repeat(
+        batch_size,
+        1,
+        16,
+    ).float()
+    future = torch.arange(32, 96).view(1, 64, 1).repeat(
+        batch_size,
+        1,
+        16,
+    ).float()
+    zeros = torch.zeros(batch_size, dtype=torch.long)
+    return FlowBatch(
+        history=history,
+        future=future,
+        future_mask=torch.ones(batch_size, 64, dtype=torch.bool),
+        midi_note=zeros,
+        source_code=zeros,
+        category_code=zeros,
+        wander_delay_frames=torch.full(
+            (batch_size,),
+            32,
+            dtype=torch.long,
+        ),
+        history_midi_note=zeros,
+        pitch_transition_mask=torch.zeros(
+            batch_size,
+            dtype=torch.bool,
+        ),
     )
 
 
@@ -203,6 +258,34 @@ def test_pure_cli_accepts_phase3_start_update() -> None:
     assert arguments.phase3_start_update == 20000
 
 
+def test_pure_cli_accepts_weight_only_initializer() -> None:
+    arguments = _parser().parse_args(
+        [
+            "--config",
+            str(EXPLORATION_CONFIG),
+            "--initialize-from",
+            "step-085000.pt",
+        ]
+    )
+
+    assert arguments.initialize_from == "step-085000.pt"
+    assert arguments.resume is None
+
+
+def test_resume_and_weight_initializer_are_mutually_exclusive() -> None:
+    with pytest.raises(SystemExit):
+        _parser().parse_args(
+            [
+                "--config",
+                str(EXPLORATION_CONFIG),
+                "--resume",
+                "resume.pt",
+                "--initialize-from",
+                "initial.pt",
+            ]
+        )
+
+
 def test_legacy_checkpoint_can_enter_phase3_at_resume_update() -> None:
     assert (
         flow_train.resolve_phase3_start_update(
@@ -286,6 +369,25 @@ def test_pure_runtime_contract_has_no_pitch_hashes() -> None:
     assert "pitch_checkpoint_sha256" not in contract
     assert "pitch_qualification_sha256" not in contract
     assert contract["pitch_conditioning"] is False
+    assert contract["exploration_enabled"] is False
+
+
+def test_exploration_runtime_contract_selects_v2_architecture() -> None:
+    config = ZraveFlowConfig.load(EXPLORATION_CONFIG)
+    contract = build_flow_checkpoint_contract(
+        config=config,
+        world_size=8,
+        batch_per_gpu=128,
+        maximum_updates=20000,
+        config_sha256="a" * 64,
+        pack_index_sha256="b" * 64,
+        statistics_sha256="c" * 64,
+    )
+
+    assert contract["exploration_enabled"] is True
+    assert flow_train._checkpoint_architecture(contract) == (
+        "zrave_pure_flow_transformer_v2"
+    )
 
 
 def test_pure_update_reports_only_pure_losses() -> None:
@@ -337,6 +439,41 @@ def test_pure_update_reports_only_pure_losses() -> None:
         for parameter in model.parameters()
         if parameter.requires_grad
     )
+
+
+def test_exploration_update_reports_controls_and_temporal_loss() -> None:
+    config = ZraveFlowConfig.load(EXPLORATION_CONFIG)
+    statistics = _unit_statistics()
+    model = _pure_model()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+
+    result = _run_flow_update(
+        training_model=model,
+        sampler=_PureFlowSampler(),
+        pitch_probe=None,
+        statistics=statistics,
+        optimizer=optimizer,
+        scaler=torch.amp.GradScaler("cpu", enabled=False),
+        controller=None,
+        config=config,
+        update=0,
+        maximum_updates=100,
+        batch_per_gpu=2,
+        device=torch.device("cpu"),
+        rank=0,
+        force_exposure=False,
+    )
+
+    assert set(result.components) == {
+        "flow",
+        "boundary",
+        "statistics",
+        "temporal",
+    }
+    assert result.exposure_depth == 0
+    assert result.visible_history_frames in {8, 16, 32}
+    assert result.schedule_offset_frames in {0, 16, 32, 64, 128}
+    assert 0.0 <= result.exploration <= 1.0
 
 
 def test_nonfinite_gradient_backs_off_amp_without_optimizer_step() -> None:
@@ -437,6 +574,54 @@ def test_pure_checkpoint_omits_pitch_state(tmp_path: Path) -> None:
     )
     assert restored["update"] == 1
     assert restored["phase3_start_update"] is None
+
+
+def test_legacy_pure_checkpoint_without_exploration_flag_still_resumes(
+    tmp_path: Path,
+) -> None:
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    sampler = _TinySampler(seed=5)
+    config = ZraveFlowConfig.load(PURE_CONFIG)
+    contract = build_flow_checkpoint_contract(
+        config=config,
+        world_size=1,
+        batch_per_gpu=2,
+        maximum_updates=100,
+        config_sha256="a" * 64,
+        pack_index_sha256="b" * 64,
+        statistics_sha256="c" * 64,
+    )
+    checkpoint = tmp_path / "legacy-pure.pt"
+    save_flow_checkpoint(
+        checkpoint,
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=None,
+        update=1,
+        contract=contract,
+    )
+    payload = torch.load(
+        checkpoint,
+        map_location="cpu",
+        weights_only=False,
+    )
+    payload["contract"].pop("exploration_enabled")
+    torch.save(payload, checkpoint)
+
+    restored = load_flow_checkpoint(
+        checkpoint,
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=None,
+        expected_contract=contract,
+    )
+
+    assert restored["update"] == 1
 
 
 def test_pure_checkpoint_persists_phase3_start(tmp_path: Path) -> None:
@@ -608,6 +793,279 @@ def test_exposure_rolls_generated_prefix_into_history() -> None:
 
     assert torch.equal(rolled, generated)
     assert not rolled.requires_grad
+
+
+def test_exploration_exposure_depth_ramps_from_zero_to_three() -> None:
+    config = ZraveFlowConfig.load(EXPLORATION_CONFIG).exploration
+
+    assert flow_train.allowed_exploration_exposure_depth(999, config) == 0
+    assert flow_train.allowed_exploration_exposure_depth(1000, config) == 1
+    assert flow_train.allowed_exploration_exposure_depth(3000, config) == 2
+    assert flow_train.allowed_exploration_exposure_depth(5000, config) == 3
+
+    generator = torch.Generator().manual_seed(4)
+    for update in (999, 1000, 3000, 5000):
+        sampled = flow_train.exploration_exposure_depth(
+            update,
+            config,
+            generator,
+        )
+        assert 0 <= sampled <= flow_train.allowed_exploration_exposure_depth(
+            update,
+            config,
+        )
+
+
+def test_depth_three_exposure_keeps_final_sixteen_real_targets(
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_sample(
+        model,
+        statistics,
+        history,
+        **kwargs,
+    ) -> torch.Tensor:
+        del model, statistics
+        calls.append(kwargs)
+        value = float(len(calls) * 100)
+        return torch.full(
+            (history.shape[0], 64, history.shape[2]),
+            value,
+        )
+
+    monkeypatch.setattr(
+        flow_train,
+        "sample_pure_flow_block",
+        fake_sample,
+    )
+    batch = _numbered_flow_batch()
+
+    prepared = flow_train._prepare_exploration_exposure_batch(
+        _pure_model(),
+        batch,
+        generation_seed=7,
+        block_index=0,
+        depth=3,
+        stride_frames=16,
+        exploration=1.0,
+        schedule_offset_frames=0,
+    )
+
+    assert prepared.future_mask.sum(dim=1).tolist() == [16, 16]
+    torch.testing.assert_close(
+        prepared.future[:, :16],
+        batch.future[:, 48:64],
+    )
+    assert torch.all(prepared.history[:, :16] == 200.0)
+    assert torch.all(prepared.history[:, 16:] == 300.0)
+    assert [call["schedule_offset_frames"] for call in calls] == [
+        0,
+        16,
+        32,
+    ]
+    assert all(call["visible_history_frames"] == 8 for call in calls)
+
+
+def test_weight_only_initializer_loads_v1_model_strictly(
+    tmp_path: Path,
+) -> None:
+    torch.manual_seed(19)
+    source = _pure_model()
+    checkpoint = tmp_path / "step-085000.pt"
+    torch.save(
+        {
+            "format": 1,
+            "architecture": "zrave_pure_flow_transformer_v1",
+            "model": source.state_dict(),
+            "update": 85000,
+            "contract": {
+                "pack_index_sha256": "b" * 64,
+                "statistics_sha256": "c" * 64,
+                "latent_dim": 16,
+                "context_frames": 32,
+                "future_frames": 64,
+                "pitch_conditioning": False,
+            },
+        },
+        checkpoint,
+    )
+    target = _pure_model()
+    for parameter in target.parameters():
+        parameter.data.zero_()
+    expected_contract = {
+        "pack_index_sha256": "b" * 64,
+        "statistics_sha256": "c" * 64,
+        "latent_dim": 16,
+        "context_frames": 32,
+        "future_frames": 64,
+        "pitch_conditioning": False,
+        "exploration_enabled": True,
+    }
+
+    metadata = flow_train.load_flow_initial_weights(
+        checkpoint,
+        model=target,
+        expected_contract=expected_contract,
+    )
+
+    for name, value in source.state_dict().items():
+        torch.testing.assert_close(target.state_dict()[name], value)
+    assert metadata["source_update"] == 85000
+    assert metadata["source_architecture"] == (
+        "zrave_pure_flow_transformer_v1"
+    )
+    assert metadata["checkpoint_sha256"] == flow_train._sha256_file(
+        checkpoint
+    )
+
+    with pytest.raises(ValueError, match="pack_index_sha256"):
+        flow_train.load_flow_initial_weights(
+            checkpoint,
+            model=target,
+            expected_contract={
+                **expected_contract,
+                "pack_index_sha256": "d" * 64,
+            },
+        )
+
+
+def test_training_start_uses_initializer_without_resume_state(
+    monkeypatch,
+) -> None:
+    metadata = {
+        "source_update": 85000,
+        "source_architecture": "zrave_pure_flow_transformer_v1",
+        "checkpoint_sha256": "f" * 64,
+    }
+    observed: dict[str, object] = {}
+
+    def fake_initialize(path, *, model, expected_contract):
+        observed["path"] = path
+        observed["model"] = model
+        observed["contract"] = expected_contract
+        return metadata
+
+    monkeypatch.setattr(
+        flow_train,
+        "load_flow_initial_weights",
+        fake_initialize,
+    )
+    model = nn.Linear(1, 1)
+    contract = {"exploration_enabled": True}
+
+    state = flow_train._load_flow_training_start(
+        SimpleNamespace(
+            resume=None,
+            initialize_from="step-085000.pt",
+        ),
+        {
+            "training_model": model,
+            "contract": contract,
+        },
+    )
+
+    assert state == {
+        "update": 0,
+        "restored_phase3_start": None,
+        "latest_gate_hash": None,
+        "consecutive_gate_passes": 0,
+        "initialization": metadata,
+    }
+    assert observed == {
+        "path": "step-085000.pt",
+        "model": model,
+        "contract": contract,
+    }
+
+
+def test_checkpoint_persists_initialization_lineage(tmp_path: Path) -> None:
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    sampler = _TinySampler(seed=5)
+    config = ZraveFlowConfig.load(EXPLORATION_CONFIG)
+    contract = build_flow_checkpoint_contract(
+        config=config,
+        world_size=1,
+        batch_per_gpu=2,
+        maximum_updates=20000,
+        config_sha256="a" * 64,
+        pack_index_sha256="b" * 64,
+        statistics_sha256="c" * 64,
+    )
+    initialization = {
+        "source_update": 85000,
+        "source_architecture": "zrave_pure_flow_transformer_v1",
+        "checkpoint_sha256": "f" * 64,
+    }
+    checkpoint = tmp_path / "exploration.pt"
+
+    save_flow_checkpoint(
+        checkpoint,
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=None,
+        update=1,
+        contract=contract,
+        initialization=initialization,
+    )
+    payload = torch.load(
+        checkpoint,
+        map_location="cpu",
+        weights_only=False,
+    )
+    restored = load_flow_checkpoint(
+        checkpoint,
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=None,
+        expected_contract=contract,
+    )
+
+    assert payload["architecture"] == "zrave_pure_flow_transformer_v2"
+    assert payload["initialization"] == initialization
+    assert restored["initialization"] == initialization
+
+
+def test_exploration_update_logs_control_telemetry() -> None:
+    class _Writer:
+        def __init__(self) -> None:
+            self.values: dict[str, float] = {}
+
+        def add_scalar(self, name, value, update) -> None:
+            assert update == 7
+            self.values[name] = float(value)
+
+    writer = _Writer()
+    result = flow_train.FlowUpdateResult(
+        loss=1.0,
+        components={"flow": 0.8, "temporal": 0.2},
+        pitch_weight=0.0,
+        gradient_norm=0.5,
+        amp_scale=1024.0,
+        global_valid_frames=128,
+        duration_seconds=1.0,
+        pitch_metrics={},
+        exposure=True,
+        exposure_depth=3,
+        exploration=2.0 / 3.0,
+        visible_history_frames=16,
+        schedule_offset_frames=64,
+        applied=True,
+    )
+
+    flow_train._log_update(writer, result, 7)
+
+    assert writer.values["train/temporal"] == 0.2
+    assert writer.values["train/exploration"] == pytest.approx(2.0 / 3.0)
+    assert writer.values["train/visible_history_frames"] == 16.0
+    assert writer.values["train/schedule_offset_frames"] == 64.0
+    assert writer.values["health/exposure_depth"] == 3.0
 
 
 def test_flow_checkpoint_resume_reproduces_next_update(

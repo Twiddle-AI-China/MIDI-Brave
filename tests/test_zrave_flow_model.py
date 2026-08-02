@@ -189,6 +189,27 @@ def test_pure_forward_and_sampling_replay_seed_and_branch() -> None:
     )
 
 
+def test_pure_sampling_accepts_continuous_exploration_schedule() -> None:
+    model, statistics = _small_model(pitch_conditioning=False)
+    model.eval()
+
+    result = sample_pure_flow_block(
+        model,
+        statistics,
+        torch.randn(1, 32, 16),
+        generation_seed=31,
+        block_index=2,
+        temperature=1.1,
+        wander_delay_frames=24.0,
+        solver_steps=4,
+        schedule_offset_frames=48,
+        visible_history_frames=16,
+    )
+
+    assert result.shape == (1, 64, 16)
+    assert torch.isfinite(result).all()
+
+
 def test_masked_old_history_cannot_change_pure_velocity() -> None:
     model, _statistics = _small_model(pitch_conditioning=False)
     model.eval()

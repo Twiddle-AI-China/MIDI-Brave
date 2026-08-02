@@ -20,7 +20,7 @@ from torch import Tensor, distributed as dist, nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.tensorboard import SummaryWriter
 
-from .zrave_flow_config import ZraveFlowConfig
+from .zrave_flow_config import FlowExplorationConfig, ZraveFlowConfig
 from .zrave_flow_evaluate import (
     GateEarlyStopState,
     evaluate_flow_checkpoint,
@@ -32,6 +32,10 @@ from .zrave_flow_loss import (
     make_flow_training_pair,
     zrave_flow_loss,
     zrave_pure_flow_loss,
+)
+from .zrave_flow_exploration import (
+    exploration_controls,
+    trailing_history_mask,
 )
 from .zrave_flow_model import (
     FlowStatistics,
@@ -139,6 +143,54 @@ def roll_exposure_history(
     )[:, -context_frames:].detach()
 
 
+def allowed_exploration_exposure_depth(
+    update: int,
+    config: FlowExplorationConfig,
+) -> int:
+    if update < 0:
+        raise ValueError("update must be non-negative")
+    if not config.enabled or update < config.exposure_start_update:
+        return 0
+    elapsed = update - config.exposure_start_update
+    depth = 1 + (
+        elapsed * config.exposure_max_depth
+        // config.exposure_ramp_updates
+    )
+    return min(config.exposure_max_depth, depth)
+
+
+def exploration_exposure_depth(
+    update: int,
+    config: FlowExplorationConfig,
+    generator: torch.Generator,
+) -> int:
+    allowed = allowed_exploration_exposure_depth(update, config)
+    if allowed == 0:
+        return 0
+    elapsed = update - config.exposure_start_update
+    ramp = min(
+        1.0,
+        max(0.0, elapsed / config.exposure_ramp_updates),
+    )
+    probability = config.exposure_probability * ramp
+    draw = torch.rand(
+        (),
+        generator=generator,
+        device=generator.device,
+    )
+    if float(draw.item()) >= probability:
+        return 0
+    return int(
+        torch.randint(
+            1,
+            allowed + 1,
+            (),
+            generator=generator,
+            device=generator.device,
+        ).item()
+    )
+
+
 def _sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -214,6 +266,11 @@ def _validate_checkpoint_contract(contract: dict[str, object]) -> None:
     pitch_conditioning = contract.get("pitch_conditioning", True)
     if not isinstance(pitch_conditioning, bool):
         raise ValueError("pitch_conditioning must be boolean")
+    exploration_enabled = contract.get("exploration_enabled", False)
+    if not isinstance(exploration_enabled, bool):
+        raise ValueError("exploration_enabled must be boolean")
+    if pitch_conditioning and exploration_enabled:
+        raise ValueError("pitch conditioning cannot enable exploration v2")
     required = _BASE_CONTRACT_HASHES | {"world_size", "batch_per_gpu"}
     if pitch_conditioning:
         required |= _PITCH_CONTRACT_HASHES
@@ -263,6 +320,7 @@ def build_flow_checkpoint_contract(
         "context_frames": config.model.context_frames,
         "future_frames": config.model.future_frames,
         "pitch_conditioning": config.model.pitch_conditioning,
+        "exploration_enabled": config.exploration.enabled,
     }
     pitch_hashes = (
         pitch_checkpoint_sha256,
@@ -284,11 +342,43 @@ def build_flow_checkpoint_contract(
 
 
 def _checkpoint_architecture(contract: dict[str, object]) -> str:
-    return (
-        "zrave_conditional_flow_transformer_v1"
-        if contract.get("pitch_conditioning", True)
-        else "zrave_pure_flow_transformer_v1"
-    )
+    if contract.get("pitch_conditioning", True):
+        return "zrave_conditional_flow_transformer_v1"
+    if contract.get("exploration_enabled", False):
+        return "zrave_pure_flow_transformer_v2"
+    return "zrave_pure_flow_transformer_v1"
+
+
+def _validated_initialization(
+    value: object,
+) -> dict[str, int | str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("checkpoint initialization must be a mapping")
+    update = value.get("source_update")
+    architecture = value.get("source_architecture")
+    digest = value.get("checkpoint_sha256")
+    if (
+        not isinstance(update, int)
+        or isinstance(update, bool)
+        or update < 0
+    ):
+        raise ValueError("checkpoint initialization update is invalid")
+    if architecture not in {
+        "zrave_pure_flow_transformer_v1",
+        "zrave_pure_flow_transformer_v2",
+    }:
+        raise ValueError(
+            "checkpoint initialization architecture is invalid"
+        )
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        raise ValueError("checkpoint initialization hash is invalid")
+    return {
+        "source_update": update,
+        "source_architecture": architecture,
+        "checkpoint_sha256": digest,
+    }
 
 
 def save_flow_checkpoint(
@@ -305,6 +395,7 @@ def save_flow_checkpoint(
     latest_gate_report_sha256: str | None = None,
     consecutive_gate_passes: int = 0,
     checkpoint_process_group: dist.ProcessGroup | None = None,
+    initialization: dict[str, int | str] | None = None,
 ) -> None:
     _validate_checkpoint_contract(contract)
     if update < 0 or consecutive_gate_passes < 0:
@@ -363,6 +454,9 @@ def save_flow_checkpoint(
         "latest_gate_report_sha256": latest_gate_report_sha256,
         "consecutive_gate_passes": int(consecutive_gate_passes),
     }
+    resolved_initialization = _validated_initialization(initialization)
+    if resolved_initialization is not None:
+        payload["initialization"] = resolved_initialization
     if phase3_start_update is not None:
         payload["phase3_start_update"] = int(phase3_start_update)
     if contract.get("pitch_conditioning", True):
@@ -385,7 +479,7 @@ def load_flow_checkpoint(
     sampler: StatefulSampler,
     pitch_weight_controller: PitchWeightController | None,
     expected_contract: dict[str, object],
-) -> dict[str, int | str | None]:
+) -> dict[str, object]:
     _validate_checkpoint_contract(expected_contract)
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(payload, dict):
@@ -400,6 +494,12 @@ def load_flow_checkpoint(
     if not isinstance(actual_contract, dict):
         raise ValueError("flow checkpoint has no contract")
     for name, expected in expected_contract.items():
+        if (
+            name == "exploration_enabled"
+            and expected is False
+            and name not in actual_contract
+        ):
+            continue
         if actual_contract.get(name) != expected:
             raise ValueError(f"flow checkpoint {name} mismatch")
     _unwrapped(model).load_state_dict(payload["model"])
@@ -450,6 +550,58 @@ def load_flow_checkpoint(
         "consecutive_gate_passes": int(
             payload.get("consecutive_gate_passes", 0)
         ),
+        "initialization": _validated_initialization(
+            payload.get("initialization")
+        ),
+    }
+
+
+def load_flow_initial_weights(
+    path: str | Path,
+    *,
+    model: nn.Module,
+    expected_contract: dict[str, object],
+) -> dict[str, int | str]:
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict) or payload.get("format") != 1:
+        raise ValueError("initializer must be a format-1 flow checkpoint")
+    architecture = payload.get("architecture")
+    if architecture not in {
+        "zrave_pure_flow_transformer_v1",
+        "zrave_pure_flow_transformer_v2",
+    }:
+        raise ValueError("initializer must be a pure flow checkpoint")
+    actual_contract = payload.get("contract")
+    if not isinstance(actual_contract, dict):
+        raise ValueError("initializer has no checkpoint contract")
+    required = (
+        "pack_index_sha256",
+        "statistics_sha256",
+        "latent_dim",
+        "context_frames",
+        "future_frames",
+        "pitch_conditioning",
+    )
+    for name in required:
+        if actual_contract.get(name) != expected_contract.get(name):
+            raise ValueError(f"initializer {name} mismatch")
+    if actual_contract.get("pitch_conditioning") is not False:
+        raise ValueError("initializer must disable pitch conditioning")
+    state = payload.get("model")
+    if not isinstance(state, dict):
+        raise ValueError("initializer has no model state")
+    _unwrapped(model).load_state_dict(state, strict=True)
+    update = payload.get("update")
+    if (
+        not isinstance(update, int)
+        or isinstance(update, bool)
+        or update < 0
+    ):
+        raise ValueError("initializer update is invalid")
+    return {
+        "source_update": update,
+        "source_architecture": str(architecture),
+        "checkpoint_sha256": _sha256_file(path),
     }
 
 
@@ -625,6 +777,76 @@ def _prepare_exposure_batch(
     )
 
 
+def _prepare_exploration_exposure_batch(
+    model: ZraveFlowTransformer,
+    batch: FlowBatch,
+    *,
+    generation_seed: int,
+    block_index: int,
+    depth: int,
+    stride_frames: int,
+    exploration: float,
+    schedule_offset_frames: int,
+) -> FlowBatch:
+    if model.pitch_conditioning:
+        raise ValueError("exploration exposure requires pure flow")
+    if not 1 <= depth <= 3:
+        raise ValueError("exploration exposure depth must be in [1, 3]")
+    if stride_frames != 16:
+        raise ValueError("exploration exposure stride must be 16")
+    if schedule_offset_frames < 0:
+        raise ValueError("schedule offset must be non-negative")
+    controls = exploration_controls(
+        torch.tensor([exploration], device=batch.history.device)
+    )
+    temperature = float(controls.temperature.item())
+    wander_delay = float(controls.wander_delay_frames.item())
+    visible_history = int(
+        controls.visible_history_frames.item()
+    )
+    rolled_history = batch.history
+    for step in range(depth):
+        generated = sample_pure_flow_block(
+            model,
+            model.statistics(),
+            rolled_history,
+            generation_seed=generation_seed,
+            block_index=block_index + step,
+            temperature=temperature,
+            wander_delay_frames=wander_delay,
+            solver_steps=4,
+            schedule_offset_frames=(
+                schedule_offset_frames + step * stride_frames
+            ),
+            visible_history_frames=visible_history,
+        )[:, :stride_frames]
+        rolled_history = roll_exposure_history(
+            rolled_history,
+            generated,
+        )
+    shift = depth * stride_frames
+    valid = batch.future.shape[1] - shift
+    shifted_future = torch.zeros_like(batch.future)
+    shifted_future[:, :valid] = batch.future[:, shift:]
+    shifted_mask = torch.zeros_like(batch.future_mask)
+    shifted_mask[:, :valid] = batch.future_mask[:, shift:]
+    if not torch.all(shifted_mask[:, :valid]):
+        raise ValueError(
+            "exploration exposure batch lacks a complete shifted target"
+        )
+    return FlowBatch(
+        history=rolled_history,
+        future=shifted_future,
+        future_mask=shifted_mask,
+        midi_note=batch.midi_note,
+        source_code=batch.source_code,
+        category_code=batch.category_code,
+        wander_delay_frames=batch.wander_delay_frames,
+        history_midi_note=batch.history_midi_note,
+        pitch_transition_mask=batch.pitch_transition_mask,
+    )
+
+
 def _pitch_diagnostics(
     pair: Any,
     predicted_velocity: Tensor,
@@ -686,6 +908,10 @@ class FlowUpdateResult:
     duration_seconds: float
     pitch_metrics: dict[str, float]
     exposure: bool
+    exposure_depth: int
+    exploration: float
+    visible_history_frames: int
+    schedule_offset_frames: int
     applied: bool
 
 
@@ -757,18 +983,64 @@ def _run_flow_update(
     exposure_start_update: int | None = None,
 ) -> FlowUpdateResult:
     generator = _default_generator(device)
-    exposure = (
-        use_exposure_batch(
-            update,
-            maximum_updates,
-            config.train.exposure_start_fraction,
-            config.train.exposure_probability,
-            generator,
-            start_update=exposure_start_update,
+    exploration = 0.0
+    visible_history_frames = config.model.context_frames
+    schedule_offset_frames = 0
+    exposure_depth = 0
+    if config.exploration.enabled:
+        visibility_index = int(
+            torch.randint(
+                len(config.exploration.visible_history_frames),
+                (),
+                generator=generator,
+                device=generator.device,
+            ).item()
         )
-        if force_exposure is None
-        else force_exposure
-    )
+        visible_history_frames = (
+            config.exploration.visible_history_frames[visibility_index]
+        )
+        exploration = (
+            config.model.context_frames - visible_history_frames
+        ) / (config.model.context_frames - 8)
+        offset_index = int(
+            torch.randint(
+                len(config.exploration.schedule_offsets),
+                (),
+                generator=generator,
+                device=generator.device,
+            ).item()
+        )
+        schedule_offset_frames = (
+            config.exploration.schedule_offsets[offset_index]
+        )
+        exposure_depth = (
+            exploration_exposure_depth(
+                update,
+                config.exploration,
+                generator,
+            )
+            if force_exposure is None
+            else (
+                config.exploration.exposure_max_depth
+                if force_exposure
+                else 0
+            )
+        )
+        exposure = exposure_depth > 0
+    else:
+        exposure = (
+            use_exposure_batch(
+                update,
+                maximum_updates,
+                config.train.exposure_start_fraction,
+                config.train.exposure_probability,
+                generator,
+                start_update=exposure_start_update,
+            )
+            if force_exposure is None
+            else force_exposure
+        )
+        exposure_depth = int(exposure)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     started = time.perf_counter()
@@ -782,23 +1054,60 @@ def _run_flow_update(
         require_full_future=exposure,
     )
     if exposure:
-        batch = _prepare_exposure_batch(
-            _unwrapped(training_model),
-            batch,
-            generation_seed=config.seed + update,
-            block_index=rank,
+        if config.exploration.enabled:
+            batch = _prepare_exploration_exposure_batch(
+                _unwrapped(training_model),
+                batch,
+                generation_seed=config.seed + update,
+                block_index=rank * 4,
+                depth=exposure_depth,
+                stride_frames=(
+                    config.exploration.rollout_stride_frames
+                ),
+                exploration=exploration,
+                schedule_offset_frames=schedule_offset_frames,
+            )
+        else:
+            batch = _prepare_exposure_batch(
+                _unwrapped(training_model),
+                batch,
+                generation_seed=config.seed + update,
+                block_index=rank,
+            )
+    if config.exploration.enabled:
+        controls = exploration_controls(
+            torch.full(
+                (batch_per_gpu,),
+                exploration,
+                device=device,
+            )
         )
-    temperatures = 0.7 + 0.6 * torch.rand(
-        batch_per_gpu,
-        device=device,
-    )
+        temperatures = controls.temperature
+        wander_delays = controls.wander_delay_frames
+        history_mask = trailing_history_mask(
+            torch.full(
+                (batch_per_gpu,),
+                visible_history_frames,
+                device=device,
+                dtype=torch.long,
+            ),
+            config.model.context_frames,
+        )
+    else:
+        temperatures = 0.7 + 0.6 * torch.rand(
+            batch_per_gpu,
+            device=device,
+        )
+        wander_delays = batch.wander_delay_frames
+        history_mask = None
     pair = make_flow_training_pair(
         batch.future,
         batch.future_mask,
         temperatures,
-        batch.wander_delay_frames,
+        wander_delays,
         statistics,
         generator,
+        schedule_offset_frames=schedule_offset_frames,
     )
     next_update = update + 1
     learning_rate = _learning_rate(
@@ -808,7 +1117,11 @@ def _run_flow_update(
     )
     _set_learning_rate(optimizer, learning_rate)
     optimizer.zero_grad(set_to_none=True)
-    retention = retention_curve(batch.wander_delay_frames, 64)
+    retention = retention_curve(
+        wander_delays,
+        64,
+        offset_frames=schedule_offset_frames,
+    )
     with torch.autocast(
         device_type=device.type,
         dtype=torch.float16,
@@ -861,6 +1174,7 @@ def _run_flow_update(
                 batch.history,
                 retention=retention,
                 future_mask=batch.future_mask,
+                history_mask=history_mask,
             )
             pitch_weight = 0.0
             report = zrave_pure_flow_loss(
@@ -869,6 +1183,11 @@ def _run_flow_update(
                 batch.history,
                 batch.future_mask,
                 statistics,
+                temporal_weight=(
+                    config.exploration.temporal_loss_weight
+                    if config.exploration.enabled
+                    else 0.0
+                ),
             )
     if (
         config.model.pitch_conditioning
@@ -949,6 +1268,10 @@ def _run_flow_update(
         duration_seconds=duration,
         pitch_metrics=pitch_metrics,
         exposure=exposure,
+        exposure_depth=exposure_depth,
+        exploration=exploration,
+        visible_history_frames=visible_history_frames,
+        schedule_offset_frames=schedule_offset_frames,
         applied=applied,
     )
 
@@ -1329,6 +1652,26 @@ def _log_update(
         float(result.exposure),
         update,
     )
+    writer.add_scalar(
+        "health/exposure_depth",
+        result.exposure_depth,
+        update,
+    )
+    writer.add_scalar(
+        "train/exploration",
+        result.exploration,
+        update,
+    )
+    writer.add_scalar(
+        "train/visible_history_frames",
+        result.visible_history_frames,
+        update,
+    )
+    writer.add_scalar(
+        "train/schedule_offset_frames",
+        result.schedule_offset_frames,
+        update,
+    )
 
 
 def _benchmark(args: argparse.Namespace) -> None:
@@ -1455,15 +1798,18 @@ def _benchmark(args: argparse.Namespace) -> None:
         dist.destroy_process_group()
 
 
-def _train(args: argparse.Namespace) -> None:
-    runtime = _build_runtime(args)
-    config: ZraveFlowConfig = runtime["config"]
-    rank: int = runtime["rank"]
-    update = 0
-    latest_gate_hash: str | None = None
-    consecutive_gate_passes = 0
-    restored_phase3_start: int | None = None
-    if args.resume:
+def _load_flow_training_start(
+    args: argparse.Namespace,
+    runtime: dict[str, Any],
+) -> dict[str, object]:
+    state: dict[str, object] = {
+        "update": 0,
+        "restored_phase3_start": None,
+        "latest_gate_hash": None,
+        "consecutive_gate_passes": 0,
+        "initialization": None,
+    }
+    if getattr(args, "resume", None):
         restored = load_flow_checkpoint(
             args.resume,
             model=runtime["training_model"],
@@ -1473,23 +1819,59 @@ def _train(args: argparse.Namespace) -> None:
             pitch_weight_controller=runtime["controller"],
             expected_contract=runtime["contract"],
         )
-        update = int(restored["update"])
-        saved_phase3_start = restored["phase3_start_update"]
-        restored_phase3_start = (
-            int(saved_phase3_start)
-            if saved_phase3_start is not None
-            else None
+        state.update(
+            update=int(restored["update"]),
+            restored_phase3_start=(
+                int(restored["phase3_start_update"])
+                if restored["phase3_start_update"] is not None
+                else None
+            ),
+            latest_gate_hash=restored[
+                "latest_gate_report_sha256"
+            ],
+            consecutive_gate_passes=int(
+                restored["consecutive_gate_passes"]
+            ),
+            initialization=restored["initialization"],
         )
-        latest_gate_hash = restored["latest_gate_report_sha256"]
-        consecutive_gate_passes = int(
-            restored["consecutive_gate_passes"]
+    elif getattr(args, "initialize_from", None):
+        if not runtime["contract"].get("exploration_enabled", False):
+            raise ValueError(
+                "--initialize-from requires exploration-enabled config"
+            )
+        state["initialization"] = load_flow_initial_weights(
+            args.initialize_from,
+            model=runtime["training_model"],
+            expected_contract=runtime["contract"],
         )
+    return state
+
+
+def _train(args: argparse.Namespace) -> None:
+    runtime = _build_runtime(args)
+    config: ZraveFlowConfig = runtime["config"]
+    rank: int = runtime["rank"]
+    start = _load_flow_training_start(args, runtime)
+    update = int(start["update"])
+    latest_gate_hash = start["latest_gate_hash"]
+    consecutive_gate_passes = int(start["consecutive_gate_passes"])
+    restored_phase3_start = start["restored_phase3_start"]
+    initialization = start["initialization"]
     phase3_start_update = resolve_phase3_start_update(
         maximum_updates=runtime["maximum_updates"],
-        default_fraction=config.train.exposure_start_fraction,
+        default_fraction=(
+            config.exploration.exposure_start_update
+            / runtime["maximum_updates"]
+            if config.exploration.enabled
+            else config.train.exposure_start_fraction
+        ),
         resumed_update=update,
         requested=args.phase3_start_update,
-        restored=restored_phase3_start,
+        restored=(
+            int(restored_phase3_start)
+            if restored_phase3_start is not None
+            else None
+        ),
     )
     gate_state = GateEarlyStopState(
         required_consecutive_passes=config.train.early_stop_gate_passes,
@@ -1497,6 +1879,11 @@ def _train(args: argparse.Namespace) -> None:
     )
     output_root = Path(config.train.output_root)
     checkpoint_root = output_root / "checkpoints"
+    if rank == 0 and initialization is not None:
+        _atomic_json(
+            output_root / "initialization.json",
+            initialization,
+        )
     writer = (
         SummaryWriter(str(output_root / "tensorboard"))
         if rank == 0
@@ -1613,6 +2000,7 @@ def _train(args: argparse.Namespace) -> None:
                 checkpoint_process_group=runtime[
                     "checkpoint_process_group"
                 ],
+                initialization=initialization,
             )
             if dist.is_initialized():
                 dist.barrier()
@@ -1706,6 +2094,7 @@ def _train(args: argparse.Namespace) -> None:
                 checkpoint_process_group=runtime[
                     "checkpoint_process_group"
                 ],
+                initialization=initialization,
             )
             if dist.is_initialized():
                 dist.barrier()
@@ -1731,7 +2120,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--pitch-probe")
     parser.add_argument("--batch-per-gpu", type=int)
     parser.add_argument("--max-updates", type=int)
-    parser.add_argument("--resume")
+    checkpoint = parser.add_mutually_exclusive_group()
+    checkpoint.add_argument("--resume")
+    checkpoint.add_argument("--initialize-from")
     parser.add_argument("--phase3-start-update", type=int)
     parser.add_argument("--benchmark-report")
     parser.add_argument("--benchmark-warmup", type=int, default=20)
