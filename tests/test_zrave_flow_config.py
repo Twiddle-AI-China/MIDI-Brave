@@ -16,6 +16,12 @@ PURE_CONFIG = (
 SERUM128_CONFIG = (
     ROOT / "configs" / "zrave" / "octopus_serum128_pure_flow.yaml"
 )
+EXPLORATION_CONFIG = (
+    ROOT
+    / "configs"
+    / "zrave"
+    / "octopus_serum128_exploration_flow.yaml"
+)
 
 
 def test_flow_config_locks_runtime_and_data_contract() -> None:
@@ -54,6 +60,7 @@ def test_pure_flow_config_disables_pitch_conditioning() -> None:
     assert config.train.checkpoint_every == 5000
     assert config.train.pitch_transition_fraction == 0.0
     assert config.train.output_root.endswith("/pure-flow-poc-v1")
+    assert config.exploration.enabled is False
 
 
 def test_serum128_config_binds_the_balanced_rave_codec() -> None:
@@ -77,6 +84,24 @@ def test_serum128_config_binds_the_balanced_rave_codec() -> None:
         "/midibrave-rave-serum-v2/corpus/manifest.jsonl"
     )
     assert config.train.output_root.endswith("/runs/pure-flow-v1")
+    assert config.exploration.enabled is False
+
+
+def test_serum128_exploration_config_locks_v2_contract() -> None:
+    config = ZraveFlowConfig.load(EXPLORATION_CONFIG)
+
+    assert config.model.latent_dim == 128
+    assert config.model.pitch_conditioning is False
+    assert config.model.context_frames == 32
+    assert config.model.future_frames == 64
+    assert config.exploration.enabled is True
+    assert config.exploration.visible_history_frames == (8, 16, 32)
+    assert config.exploration.rollout_stride_frames == 16
+    assert config.exploration.exposure_max_depth == 3
+    assert config.exploration.temporal_loss_weight == 0.05
+    assert config.exploration.exposure_probability == 0.50
+    assert config.train.max_updates == 20000
+    assert config.train.output_root.endswith("/runs/exploration-v2")
 
 
 def test_flow_config_rejects_unknown_and_inconsistent_values(

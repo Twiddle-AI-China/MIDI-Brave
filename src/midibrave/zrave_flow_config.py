@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from math import isclose
 from pathlib import Path
 from typing import Any, TypeVar
@@ -306,6 +306,86 @@ class FlowTrainConfig:
 
 
 @dataclass(frozen=True)
+class FlowExplorationConfig:
+    enabled: bool = False
+    visible_history_frames: tuple[int, ...] = (8, 16, 32)
+    temperature_minimum: float = 0.7
+    temperature_maximum: float = 1.3
+    wander_delay_minimum: int = 16
+    wander_delay_maximum: int = 48
+    schedule_offsets: tuple[int, ...] = (0, 16, 32, 64, 128)
+    rollout_stride_frames: int = 16
+    candidate_count: int = 4
+    temporal_loss_weight: float = 0.05
+    exposure_start_update: int = 1000
+    exposure_ramp_updates: int = 4000
+    exposure_probability: float = 0.50
+    exposure_max_depth: int = 3
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "visible_history_frames",
+            tuple(self.visible_history_frames),
+        )
+        object.__setattr__(
+            self,
+            "schedule_offsets",
+            tuple(self.schedule_offsets),
+        )
+        if not isinstance(self.enabled, bool):
+            raise ValueError("exploration.enabled must be boolean")
+        if self.visible_history_frames != (8, 16, 32):
+            raise ValueError(
+                "exploration.visible_history_frames must be 8, 16, 32"
+            )
+        if self.schedule_offsets != (0, 16, 32, 64, 128):
+            raise ValueError(
+                "exploration.schedule_offsets must be 0, 16, 32, 64, 128"
+            )
+        if (
+            self.temperature_minimum,
+            self.temperature_maximum,
+        ) != (0.7, 1.3):
+            raise ValueError(
+                "exploration temperature range must be 0.7 through 1.3"
+            )
+        if (
+            self.wander_delay_minimum,
+            self.wander_delay_maximum,
+        ) != (16, 48):
+            raise ValueError(
+                "exploration wander delay range must be 16 through 48"
+            )
+        if self.rollout_stride_frames != 16:
+            raise ValueError(
+                "exploration.rollout_stride_frames must be 16"
+            )
+        if self.exposure_max_depth != 3:
+            raise ValueError("exploration.exposure_max_depth must be 3")
+        if self.candidate_count not in {1, 2, 4}:
+            raise ValueError(
+                "exploration.candidate_count must be 1, 2, or 4"
+            )
+        if self.temporal_loss_weight != 0.05:
+            raise ValueError(
+                "exploration.temporal_loss_weight must be 0.05"
+            )
+        if self.exposure_start_update != 1000:
+            raise ValueError(
+                "exploration.exposure_start_update must be 1000"
+            )
+        if self.exposure_ramp_updates != 4000:
+            raise ValueError(
+                "exploration.exposure_ramp_updates must be 4000"
+            )
+        if self.exposure_probability != 0.50:
+            raise ValueError(
+                "exploration.exposure_probability must be 0.50"
+            )
+
+
+@dataclass(frozen=True)
 class ZraveFlowConfig:
     seed: int
     data: FlowDataConfig
@@ -314,6 +394,9 @@ class ZraveFlowConfig:
     loss: FlowLossConfig
     optimizer: FlowOptimizerConfig
     train: FlowTrainConfig
+    exploration: FlowExplorationConfig = field(
+        default_factory=FlowExplorationConfig
+    )
     source_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -332,6 +415,10 @@ class ZraveFlowConfig:
                 "train.pitch_transition_fraction must match "
                 "model.pitch_conditioning"
             )
+        if self.exploration.enabled and self.model.pitch_conditioning:
+            raise ValueError(
+                "exploration requires model.pitch_conditioning false"
+            )
 
     @classmethod
     def load(cls, path: str | Path) -> "ZraveFlowConfig":
@@ -346,6 +433,7 @@ class ZraveFlowConfig:
             "loss",
             "optimizer",
             "train",
+            "exploration",
         }
         unknown = set(root) - allowed
         if unknown:
@@ -377,6 +465,10 @@ class ZraveFlowConfig:
             model_raw["wander_delay_frames"] = tuple(
                 model_raw["wander_delay_frames"]
             )
+        exploration_raw = dict(root.get("exploration") or {})
+        for name in ("visible_history_frames", "schedule_offsets"):
+            if name in exploration_raw:
+                exploration_raw[name] = tuple(exploration_raw[name])
         try:
             seed = int(root["seed"])
         except (KeyError, TypeError, ValueError) as error:
@@ -396,6 +488,11 @@ class ZraveFlowConfig:
                 FlowTrainConfig,
                 root.get("train"),
                 "train",
+            ),
+            exploration=_strict_section(
+                FlowExplorationConfig,
+                exploration_raw,
+                "exploration",
             ),
             source_path=source_path,
         )
