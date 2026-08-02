@@ -156,6 +156,58 @@ runs 100,000 updates, and saves every 5,000 updates under
 `runs/pure-flow-v1/checkpoints`; TensorBoard events are under the adjacent
 `tensorboard/` directory.
 
+### Exploration-aware Serum128 continuation
+
+`octopus_serum128_exploration_flow.yaml` is the next pure Z-RAVE experiment;
+it still contains no MIDI, CLAP, or audio reconstruction path. Training starts
+from the 85k pure-flow model weights but deliberately resets optimizer, AMP,
+RNG, and update state. Its objective is Flow Matching plus boundary (0.10),
+latent-statistics (0.02), and per-sample multi-scale temporal motion (0.05)
+terms. A ramped depth-0-to-3 curriculum replaces up to 48 history frames with
+the model's own 16-frame commits, so recursive errors are visible during
+training instead of only during audition.
+
+At runtime one exploration value maps to visible history (32 down to 8
+frames), sampling temperature (0.7 up to 1.3), and wander delay (48 down to 16
+frames). Each step samples four 64-frame candidates, rejects stagnant,
+boundary-jumping, or out-of-range prefixes, commits only the best first 16
+frames, and advances one absolute schedule. The model shape remains
+`[B,32,128] -> [B,64,128]`; the shorter commit is a rollout policy.
+
+Run the required 8-GPU sweep and training through SLURM:
+
+```bash
+sweep=$(sbatch --parsable \
+  scripts/cloud/octopus_serum128_exploration_sweep.sbatch)
+train=$(sbatch --parsable --dependency=afterok:"$sweep" \
+  scripts/cloud/octopus_serum128_exploration_train.sbatch)
+
+# Optional explicit overrides; automatic resume wins when a v2 checkpoint exists.
+sbatch --export=ALL,BATCH_PER_GPU=160,MAX_UPDATES=20000 \
+  scripts/cloud/octopus_serum128_exploration_train.sbatch
+```
+
+The sweep measures per-GPU batches 128, 160, 192, and 224 with 10 warm-up,
+100 timed, and five forced depth-three updates. Checkpoints are written every
+5,000 updates under `runs/exploration-v2/checkpoints`. Inspect
+`train/{flow,boundary,statistics,temporal}`, `health/exposure_depth`,
+`train/visible_history_frames`, and `train/schedule_offset_frames` in
+TensorBoard:
+
+```bash
+tensorboard \
+  --logdir /data/midibrave-zrave-flow-serum128/runs/exploration-v2/tensorboard \
+  --host 127.0.0.1 --port 6006
+
+sbatch --export=ALL,SERUM128_EXPLORATION_AUDITION_CHECKPOINT=step-020000.pt \
+  scripts/cloud/octopus_serum128_exploration_audition.sbatch
+```
+
+The audition job renders held-out Pad, Lead, Bass, Pluck, Keys, and Synth at
+exploration 0.0, 0.5, and 1.0. Its manifest records the checkpoint and 85k
+initializer hashes, selected candidate indices, motion, boundary, and latent
+range diagnostics for every 16-frame commit.
+
 ## Predictive RAVE + CLAP runtime (v3)
 
 The v3 path restores a causal RAVE encoder during training, concatenates its

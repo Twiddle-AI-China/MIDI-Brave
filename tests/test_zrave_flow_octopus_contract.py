@@ -23,6 +23,18 @@ SERUM128_PREPARE = CLOUD / "octopus_serum128_flow_prepare.sbatch"
 SERUM128_SWEEP = CLOUD / "octopus_serum128_flow_sweep.sbatch"
 SERUM128_TRAIN = CLOUD / "octopus_serum128_flow_train.sbatch"
 SERUM128_JOBS = (SERUM128_PREPARE, SERUM128_SWEEP, SERUM128_TRAIN)
+SERUM128_EXPLORATION_CONFIG = (
+    ROOT / "configs" / "zrave" / "octopus_serum128_exploration_flow.yaml"
+)
+SERUM128_EXPLORATION_SWEEP = (
+    CLOUD / "octopus_serum128_exploration_sweep.sbatch"
+)
+SERUM128_EXPLORATION_TRAIN = (
+    CLOUD / "octopus_serum128_exploration_train.sbatch"
+)
+SERUM128_EXPLORATION_AUDITION = (
+    CLOUD / "octopus_serum128_exploration_audition.sbatch"
+)
 
 
 def test_flow_jobs_use_only_octopus_slurm_gpu_contract() -> None:
@@ -246,3 +258,75 @@ def test_serum128_prepare_keeps_stdin_open_for_inline_validation() -> None:
 
     assert "docker run --rm -i" in script
     assert 'python - "$config" <<\'PY\'' in script
+
+
+def test_serum128_exploration_jobs_use_octopus_and_read_only_sources() -> None:
+    gpu8_jobs = (
+        SERUM128_EXPLORATION_SWEEP,
+        SERUM128_EXPLORATION_TRAIN,
+    )
+    scripts = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in (*gpu8_jobs, SERUM128_EXPLORATION_AUDITION)
+    }
+
+    for path in gpu8_jobs:
+        assert "#SBATCH --gres=gpu:8" in scripts[path.name]
+        assert "torchrun --standalone --nproc_per_node=8" in scripts[path.name]
+    assert "#SBATCH --gres=gpu:1" in scripts[
+        SERUM128_EXPLORATION_AUDITION.name
+    ]
+    for script in scripts.values():
+        lowered = script.casefold()
+        assert "srun --kill-on-bad-exit=1" in script
+        assert "docker run --rm" in script
+        assert "midibrave:v0.10.0-zrave-flow" in script
+        assert "octopus_serum128_exploration_flow.yaml" in script
+        assert "/data/midibrave-rave-serum-v2:ro" in script
+        assert "/data/datasets/Timbre_A/serum-octopus-v1:/source:ro" in script
+        assert "/runs/exploration-v2" in script
+        assert "clap" not in lowered
+        assert "midi_note" not in lowered
+        assert "--pitch-probe" not in lowered
+        assert "zhongwei" not in lowered
+
+
+def test_serum128_exploration_sweep_measures_required_workload() -> None:
+    script = SERUM128_EXPLORATION_SWEEP.read_text(encoding="utf-8")
+
+    assert "for batch in 128 160 192 224" in script
+    assert "--benchmark-warmup 10" in script
+    assert "--benchmark-updates 100" in script
+    assert "--benchmark-exposure-updates 5" in script
+    assert "--batches 128 160 192 224" in script
+    assert "median_valid_latent_frames_per_second" in script
+
+
+def test_serum128_exploration_train_initializes_and_checkpoints() -> None:
+    config = ZraveFlowConfig.load(SERUM128_EXPLORATION_CONFIG)
+    script = SERUM128_EXPLORATION_TRAIN.read_text(encoding="utf-8")
+
+    assert config.train.output_root.endswith("/runs/exploration-v2")
+    assert config.train.checkpoint_every == 5000
+    assert "BATCH_PER_GPU" in script
+    assert "INITIAL_CHECKPOINT" in script
+    assert "MAX_UPDATES" in script
+    assert (
+        "/runs/pure-flow-v1/checkpoints/step-085000.pt" in script
+    )
+    assert "--initialize-from" in script
+    assert 'max_updates=${MAX_UPDATES:-20000}' in script
+
+
+def test_serum128_exploration_audition_is_fixed_and_explicit() -> None:
+    script = SERUM128_EXPLORATION_AUDITION.read_text(encoding="utf-8")
+
+    assert "SERUM128_EXPLORATION_AUDITION_CHECKPOINT" in script
+    assert "--categories Pad Lead Bass Pluck Keys Synth" in script
+    assert "--explorations 0.0 0.5 1.0" in script
+    assert "--candidate-count 4" in script
+    assert "--generated-frames 320" in script
+    assert (
+        "/data/midibrave-zrave-flow-serum128:"
+        "/data/midibrave-zrave-flow-serum128:ro"
+    ) in script

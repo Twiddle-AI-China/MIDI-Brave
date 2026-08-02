@@ -1,36 +1,38 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=zrave-serum128-audition
+#SBATCH --job-name=zrave-serum128-explore-audition
 #SBATCH --partition=gpu1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
 #SBATCH --gres=gpu:1
 #SBATCH --mem=48G
-#SBATCH --time=02:00:00
-#SBATCH --output=/home/yfhuang/zrave-serum128-audition-%j.out
+#SBATCH --time=04:00:00
+#SBATCH --output=/home/yfhuang/zrave-serum128-explore-audition-%j.out
 
 set -euo pipefail
 
 repo_root=/home/yfhuang/Latent-Cosmos-Synth-midiBrave
-repo=$repo_root/MidiBrave-v2
 container_root=/workspace/Latent-Cosmos-Synth-midiBrave
 container_repo=$container_root/MidiBrave-v2
-config=$container_repo/configs/zrave/octopus_serum128_pure_flow.yaml
+config=$container_repo/configs/zrave/octopus_serum128_exploration_flow.yaml
 image=${MIDIBRAVE_IMAGE:-midibrave:v0.10.0-zrave-flow}
 flow_root=/data/midibrave-zrave-flow-serum128
-checkpoint_root=$flow_root/runs/pure-flow-v1/checkpoints
-audition_root=$flow_root/auditions
+rave_mount=/data/midibrave-rave-serum-v2:/data/midibrave-rave-serum-v2:ro
+source_mount=/data/datasets/Timbre_A/serum-octopus-v1:/source:ro
+run_root=$flow_root/runs/exploration-v2
+checkpoint_root=$run_root/checkpoints
+audition_root=$flow_root/auditions/exploration-v2
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-: "${SERUM128_FLOW_AUDITION_CHECKPOINT:?set an explicit checkpoint basename}"
-if [[ "$SERUM128_FLOW_AUDITION_CHECKPOINT" == */* \
-  || "$SERUM128_FLOW_AUDITION_CHECKPOINT" != *.pt ]]; then
+: "${SERUM128_EXPLORATION_AUDITION_CHECKPOINT:?set an explicit checkpoint basename}"
+if [[ "$SERUM128_EXPLORATION_AUDITION_CHECKPOINT" == */* \
+  || "$SERUM128_EXPLORATION_AUDITION_CHECKPOINT" != *.pt ]]; then
   echo "checkpoint must be a basename ending in .pt" >&2
   exit 2
 fi
-checkpoint=$checkpoint_root/$SERUM128_FLOW_AUDITION_CHECKPOINT
-checkpoint_stem=${SERUM128_FLOW_AUDITION_CHECKPOINT%.pt}
-audition_name=${SERUM128_FLOW_AUDITION_NAME:-serum128-flow-${checkpoint_stem}-long320}
+checkpoint=$checkpoint_root/$SERUM128_EXPLORATION_AUDITION_CHECKPOINT
+checkpoint_stem=${SERUM128_EXPLORATION_AUDITION_CHECKPOINT%.pt}
+audition_name=${SERUM128_EXPLORATION_AUDITION_NAME:-serum128-exploration-${checkpoint_stem}-long320}
 output=$audition_root/$audition_name
 
 test -f "$checkpoint"
@@ -47,8 +49,9 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores \
     --gpus "\"device=${CUDA_VISIBLE_DEVICES}\"" \
     --shm-size=16g \
     -v "$repo_root:$container_root:ro" \
+    -v "$rave_mount" \
+    -v "$source_mount" \
     -v "/data/midibrave-zrave-flow-serum128:/data/midibrave-zrave-flow-serum128:ro" \
-    -v "/data/datasets/Timbre_A/serum-octopus-v1:/source:ro" \
     -v "$output:/output" \
     -e "PYTHONPATH=$container_repo/src" \
     -e PYTHONDONTWRITEBYTECODE=1 \
@@ -60,8 +63,8 @@ srun --kill-on-bad-exit=1 --cpu-bind=cores \
       --checkpoint "$checkpoint" \
       --output /output \
       --categories Pad Lead Bass Pluck Keys Synth \
-      --explorations 0.0 1.0 \
-      --candidate-count 1 \
+      --explorations 0.0 0.5 1.0 \
+      --candidate-count 4 \
       --generation-seeds 17 71 \
       --generated-frames 320 \
       --selection-seed 20260802 \
@@ -82,15 +85,22 @@ root = Path(sys.argv[1])
 manifest = json.loads((root / "manifest.json").read_text())
 assert manifest["schema"] == 1
 assert manifest["codec"]["latent_dim"] == 128
+assert manifest["checkpoint"]["architecture"] == "zrave_pure_flow_transformer_v2"
 assert manifest["context_frames"] == 32
 assert manifest["generated_frames"] == 320
+assert manifest["commit_stride_frames"] == 16
+assert manifest["candidate_count"] == 4
+assert manifest["explorations"] == [0.0, 0.5, 1.0]
 assert len(manifest["examples"]) == 6
 paths = []
 for example in manifest["examples"]:
-    assert len(example["rollouts"]) == 4
+    assert len(example["rollouts"]) == 6
+    for rollout in example["rollouts"]:
+        assert len(rollout["selected_candidate_indices"]) == 20
+        assert len(rollout["rejection_metrics"]["motion"]) == 20
     for take in [example["source"], example["direct"], *example["rollouts"]]:
         paths.extend((take["raw_wav"], take["matched_wav"]))
-assert len(paths) == 72
+assert len(paths) == 96
 for relative in paths:
     path = root / relative
     audio, rate = sf.read(path, dtype="float32", always_2d=True)
@@ -100,6 +110,7 @@ for relative in paths:
 report = {
     "schema": 1,
     "checkpoint_update": manifest["checkpoint"]["update"],
+    "checkpoint_sha256": manifest["checkpoint"]["sha256"],
     "wav_files": len(paths),
     "all_finite": True,
     "sample_rate": 44100,
