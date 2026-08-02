@@ -6,6 +6,7 @@ import inspect
 import pytest
 import torch
 
+from midibrave.zrave_flow_exploration import trailing_history_mask
 from midibrave.zrave_flow_model import (
     FlowStatistics,
     ZraveFlowTransformer,
@@ -66,6 +67,50 @@ def test_retention_and_temperature_have_approved_endpoints() -> None:
     assert torch.allclose(temperature[:, -1], torch.ones(3))
     assert torch.all(retention[:, 1:] <= retention[:, :-1])
     assert torch.all(temperature[:, 1:] >= temperature[:, :-1])
+
+
+def test_absolute_schedule_does_not_reset_at_second_commit() -> None:
+    delay = torch.tensor([32.0])
+
+    first_temperature = temperature_curve(
+        torch.tensor([1.0]),
+        delay,
+        16,
+        offset_frames=0,
+    )
+    second_temperature = temperature_curve(
+        torch.tensor([1.0]),
+        delay,
+        16,
+        offset_frames=16,
+    )
+    second_retention = retention_curve(
+        delay,
+        16,
+        offset_frames=16,
+    )
+
+    assert second_temperature[0, 0] > first_temperature[0, 0]
+    assert second_retention[0, 0] < 1.0
+
+
+def test_zero_absolute_offset_preserves_legacy_schedule() -> None:
+    delays = torch.tensor([16.0, 32.0, 48.0])
+    temperatures = torch.tensor([0.7, 1.0, 1.3])
+
+    torch.testing.assert_close(
+        retention_curve(delays, 64, offset_frames=0),
+        retention_curve(delays, 64),
+    )
+    torch.testing.assert_close(
+        temperature_curve(
+            temperatures,
+            delays,
+            64,
+            offset_frames=0,
+        ),
+        temperature_curve(temperatures, delays, 64),
+    )
 
 
 def test_flow_forward_and_sampling_contract() -> None:
@@ -142,6 +187,75 @@ def test_pure_forward_and_sampling_replay_seed_and_branch() -> None:
         "midi" not in name
         for name, _parameter in model.named_parameters()
     )
+
+
+def test_masked_old_history_cannot_change_pure_velocity() -> None:
+    model, _statistics = _small_model(pitch_conditioning=False)
+    model.eval()
+    noisy = torch.randn(1, 64, 16)
+    history = torch.randn(1, 32, 16)
+    changed = history.clone()
+    changed[:, :24] = torch.randn_like(changed[:, :24]) * 1000.0
+    history_mask = trailing_history_mask(torch.tensor([8]), 32)
+    retention = retention_curve(torch.tensor([32.0]), 64)
+
+    first = model.forward_pure(
+        noisy,
+        torch.tensor([0.5]),
+        history,
+        retention,
+        history_mask=history_mask,
+    )
+    second = model.forward_pure(
+        noisy,
+        torch.tensor([0.5]),
+        changed,
+        retention,
+        history_mask=history_mask,
+    )
+
+    torch.testing.assert_close(first, second)
+
+
+def test_history_mask_requires_one_visible_frame_per_sample() -> None:
+    model, _statistics = _small_model(pitch_conditioning=False)
+
+    with pytest.raises(ValueError, match="visible history"):
+        model.forward_pure(
+            torch.randn(1, 64, 16),
+            torch.tensor([0.5]),
+            torch.randn(1, 32, 16),
+            retention_curve(torch.tensor([32.0]), 64),
+            history_mask=torch.zeros(1, 32, dtype=torch.bool),
+        )
+
+
+def test_history_mask_support_does_not_change_state_dict_contract() -> None:
+    model, statistics = _small_model(pitch_conditioning=False)
+    expected = {
+        name: tuple(value.shape)
+        for name, value in model.state_dict().items()
+    }
+    replacement = ZraveFlowTransformer(
+        statistics=statistics,
+        latent_dim=16,
+        context_frames=32,
+        future_frames=64,
+        d_model=32,
+        context_layers=1,
+        future_layers=1,
+        heads=4,
+        feedforward_dim=64,
+        dropout=0.0,
+        pitch_conditioning=False,
+    )
+
+    replacement.load_state_dict(model.state_dict(), strict=True)
+
+    assert {
+        name: tuple(value.shape)
+        for name, value in replacement.state_dict().items()
+    } == expected
 
 
 def test_context_and_pitch_conditions_can_drop_independently() -> None:

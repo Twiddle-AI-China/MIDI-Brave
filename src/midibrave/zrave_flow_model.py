@@ -7,6 +7,7 @@ import torch
 from torch import Tensor, nn
 
 from .zrave_flow_config import FlowModelConfig
+from .zrave_flow_exploration import trailing_history_mask
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class _FutureFlowLayer(nn.Module):
         value: Tensor,
         condition: Tensor,
         memory: Tensor,
+        memory_mask: Tensor | None,
         retention: Tensor,
         future_mask: Tensor,
     ) -> Tensor:
@@ -117,6 +119,9 @@ class _FutureFlowLayer(nn.Module):
             query,
             memory,
             memory,
+            key_padding_mask=(
+                ~memory_mask if memory_mask is not None else None
+            ),
             need_weights=False,
         )[0]
         value = value + retention.unsqueeze(-1) * cross
@@ -326,7 +331,8 @@ class ZraveFlowTransformer(nn.Module):
         history: Tensor,
         retention: Tensor,
         future_mask: Tensor | None,
-    ) -> Tensor:
+        history_mask: Tensor | None,
+    ) -> tuple[Tensor, Tensor]:
         batch = noisy_future.shape[0] if noisy_future.ndim else 0
         future_shape = (batch, self.future_frames, self.latent_dim)
         if noisy_future.ndim != 3 or noisy_future.shape != future_shape:
@@ -377,7 +383,28 @@ class ZraveFlowTransformer(nn.Module):
             resolved_mask = future_mask.to(device=device, dtype=torch.bool)
         if not torch.all(resolved_mask.any(dim=1)):
             raise ValueError("every future_mask row needs one valid frame")
-        return resolved_mask
+        if history_mask is None:
+            resolved_history_mask = torch.ones(
+                batch,
+                self.context_frames,
+                device=device,
+                dtype=torch.bool,
+            )
+        else:
+            if history_mask.shape != (batch, self.context_frames):
+                raise ValueError(
+                    "history_mask must have shape "
+                    f"({batch}, {self.context_frames})"
+                )
+            resolved_history_mask = history_mask.to(
+                device=device,
+                dtype=torch.bool,
+            )
+        if not torch.all(resolved_history_mask.any(dim=1)):
+            raise ValueError(
+                "every sample needs at least one visible history frame"
+            )
+        return resolved_mask, resolved_history_mask
 
     def _validate_forward(
         self,
@@ -388,13 +415,15 @@ class ZraveFlowTransformer(nn.Module):
         retention: Tensor,
         future_mask: Tensor | None,
         context_present: Tensor | None,
-    ) -> tuple[Tensor, Tensor]:
-        resolved_mask = self._validate_core_forward(
+        history_mask: Tensor | None,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        resolved_mask, resolved_history_mask = self._validate_core_forward(
             noisy_future,
             flow_time,
             history,
             retention,
             future_mask,
+            history_mask,
         )
         batch = noisy_future.shape[0]
         if midi_note.shape != (batch,):
@@ -432,18 +461,26 @@ class ZraveFlowTransformer(nn.Module):
                 device=device,
                 dtype=torch.bool,
             )
-        return resolved_mask, resolved_context
+        return resolved_mask, resolved_context, resolved_history_mask
 
     def _encode_history(
         self,
         history: Tensor,
+        history_mask: Tensor,
         context_present: Tensor | None = None,
     ) -> Tensor:
         normalized_history = (
             history.float() - self.latent_mean
         ) / self.latent_std
+        normalized_history = normalized_history.masked_fill(
+            ~history_mask.unsqueeze(-1),
+            0.0,
+        )
         memory = self.history_projection(normalized_history)
-        memory = self.context_encoder(memory + self.history_position)
+        memory = self.context_encoder(
+            memory + self.history_position,
+            src_key_padding_mask=~history_mask,
+        )
         if context_present is not None:
             if self.null_memory is None:
                 raise RuntimeError(
@@ -466,6 +503,7 @@ class ZraveFlowTransformer(nn.Module):
         noisy_future: Tensor,
         flow_time: Tensor,
         memory: Tensor,
+        memory_mask: Tensor,
         retention: Tensor,
         future_mask: Tensor,
         condition_offset: Tensor | None = None,
@@ -485,6 +523,7 @@ class ZraveFlowTransformer(nn.Module):
                 value,
                 condition,
                 memory,
+                memory_mask,
                 retention,
                 future_mask,
             )
@@ -503,6 +542,7 @@ class ZraveFlowTransformer(nn.Module):
         retention: Tensor | None = None,
         future_mask: Tensor | None = None,
         context_present: Tensor | None = None,
+        history_mask: Tensor | None = None,
     ) -> Tensor:
         if not self.pitch_conditioning:
             if midi_note is not None or context_present is not None:
@@ -517,6 +557,7 @@ class ZraveFlowTransformer(nn.Module):
                 history,
                 retention,
                 future_mask=future_mask,
+                history_mask=history_mask,
             )
         if midi_note is None or retention is None:
             raise ValueError(
@@ -524,7 +565,7 @@ class ZraveFlowTransformer(nn.Module):
             )
         if self.midi_embedding is None:
             raise RuntimeError("conditional model lacks MIDI embedding")
-        future_mask, context_present = self._validate_forward(
+        future_mask, context_present, history_mask = self._validate_forward(
             noisy_future,
             flow_time,
             history,
@@ -532,9 +573,14 @@ class ZraveFlowTransformer(nn.Module):
             retention,
             future_mask,
             context_present,
+            history_mask,
         )
         device = noisy_future.device
-        memory = self._encode_history(history, context_present)
+        memory = self._encode_history(
+            history,
+            history_mask,
+            context_present,
+        )
 
         notes = midi_note.to(device=device, dtype=torch.long)
         note_indices = torch.where(
@@ -546,6 +592,7 @@ class ZraveFlowTransformer(nn.Module):
             noisy_future,
             flow_time,
             memory,
+            history_mask,
             retention,
             future_mask,
             self.midi_embedding(note_indices),
@@ -558,18 +605,21 @@ class ZraveFlowTransformer(nn.Module):
         history: Tensor,
         retention: Tensor,
         future_mask: Tensor | None = None,
+        history_mask: Tensor | None = None,
     ) -> Tensor:
-        resolved_mask = self._validate_core_forward(
+        resolved_mask, resolved_history_mask = self._validate_core_forward(
             noisy_future,
             flow_time,
             history,
             retention,
             future_mask,
+            history_mask,
         )
         return self._predict_velocity(
             noisy_future,
             flow_time,
-            self._encode_history(history),
+            self._encode_history(history, resolved_history_mask),
+            resolved_history_mask,
             retention,
             resolved_mask,
         )
@@ -580,24 +630,48 @@ def _smoothstep(progress: Tensor) -> Tensor:
     return progress * progress * (3.0 - 2.0 * progress)
 
 
-def _schedule_progress(delays: Tensor, frames: int) -> Tensor:
+def _schedule_progress(
+    delays: Tensor,
+    frames: int,
+    offset_frames: Tensor | int = 0,
+) -> Tensor:
     if frames <= 1:
         raise ValueError("frames must be greater than one")
     if delays.ndim != 1 or delays.numel() == 0:
         raise ValueError("delays must be a non-empty vector")
     if not torch.isfinite(delays).all() or torch.any(delays <= 0):
         raise ValueError("delays must be finite and positive")
-    positions = torch.arange(
-        frames,
+    offsets = torch.as_tensor(
+        offset_frames,
         device=delays.device,
         dtype=torch.float32,
     )
-    progress = positions.unsqueeze(0) / delays.float().unsqueeze(1)
+    if offsets.ndim == 0:
+        offsets = offsets.expand(delays.shape[0])
+    if (
+        offsets.shape != delays.shape
+        or not torch.isfinite(offsets).all()
+        or torch.any(offsets < 0)
+    ):
+        raise ValueError(
+            "schedule offsets must be finite, non-negative, and match delays"
+        )
+    positions = offsets.unsqueeze(1) + torch.arange(
+        frames,
+        device=delays.device,
+        dtype=torch.float32,
+    ).unsqueeze(0)
+    progress = positions / delays.float().unsqueeze(1)
     return _smoothstep(progress)
 
 
-def retention_curve(delays: Tensor, frames: int) -> Tensor:
-    progress = _schedule_progress(delays, frames)
+def retention_curve(
+    delays: Tensor,
+    frames: int,
+    *,
+    offset_frames: Tensor | int = 0,
+) -> Tensor:
+    progress = _schedule_progress(delays, frames, offset_frames)
     return 1.0 - 0.85 * progress
 
 
@@ -605,8 +679,10 @@ def temperature_curve(
     temperature: Tensor,
     delays: Tensor,
     frames: int,
+    *,
+    offset_frames: Tensor | int = 0,
 ) -> Tensor:
-    progress = _schedule_progress(delays, frames)
+    progress = _schedule_progress(delays, frames, offset_frames)
     temperature = torch.as_tensor(
         temperature,
         device=delays.device,
@@ -758,6 +834,7 @@ def _pure_velocity(
     flow_time: float,
     history: Tensor,
     retention: Tensor,
+    history_mask: Tensor,
 ) -> Tensor:
     times = torch.full(
         (state.shape[0],),
@@ -770,6 +847,7 @@ def _pure_velocity(
         times,
         history,
         retention,
+        history_mask=history_mask,
     )
 
 
@@ -783,6 +861,8 @@ def sample_pure_flow_block(
     temperature: float,
     wander_delay_frames: int,
     solver_steps: int,
+    schedule_offset_frames: int = 0,
+    visible_history_frames: int = 32,
 ) -> Tensor:
     if not torch.isfinite(torch.tensor(temperature)) or temperature < 0:
         raise ValueError("temperature must be finite and non-negative")
@@ -790,6 +870,12 @@ def sample_pure_flow_block(
         raise ValueError("wander_delay_frames must be 16, 32, or 48")
     if solver_steps not in {4, 8, 12}:
         raise ValueError("solver_steps must be 4, 8, or 12")
+    if schedule_offset_frames < 0:
+        raise ValueError("schedule_offset_frames must be non-negative")
+    if not 8 <= visible_history_frames <= model.context_frames:
+        raise ValueError(
+            "visible_history_frames must be between 8 and context_frames"
+        )
     statistics.validate(model.latent_dim)
     device = next(model.parameters()).device
     history = history.to(device=device)
@@ -800,7 +886,11 @@ def sample_pure_flow_block(
         device=device,
         dtype=torch.long,
     )
-    retention = retention_curve(delay, model.future_frames)
+    retention = retention_curve(
+        delay,
+        model.future_frames,
+        offset_frames=schedule_offset_frames,
+    )
     temperatures = temperature_curve(
         torch.full(
             (batch,),
@@ -810,6 +900,16 @@ def sample_pure_flow_block(
         ),
         delay,
         model.future_frames,
+        offset_frames=schedule_offset_frames,
+    )
+    history_mask = trailing_history_mask(
+        torch.full(
+            (batch,),
+            visible_history_frames,
+            device=device,
+            dtype=torch.long,
+        ),
+        model.context_frames,
     )
     generator = torch.Generator(device=device)
     generator.manual_seed(
@@ -834,6 +934,7 @@ def sample_pure_flow_block(
                 t0,
                 history,
                 retention,
+                history_mask,
             )
             proposal = state + step * v0
             v1 = _pure_velocity(
@@ -842,6 +943,7 @@ def sample_pure_flow_block(
                 min(1.0, t0 + step),
                 history,
                 retention,
+                history_mask,
             )
             state = state + 0.5 * step * (v0 + v1)
     mean = statistics.mean.to(device=device, dtype=state.dtype)
