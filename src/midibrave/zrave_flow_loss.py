@@ -186,6 +186,74 @@ def _masked_delta_rms(values: Tensor, mask: Tensor) -> Tensor:
     return (mean_square + 1.0e-12).sqrt()
 
 
+def _per_sample_motion(
+    values: Tensor,
+    mask: Tensor,
+    scale: Tensor,
+    stride: int,
+) -> Tensor:
+    if stride <= 0 or stride >= values.shape[1]:
+        raise ValueError("motion stride is outside the sequence")
+    pair_mask = mask[:, stride:] & mask[:, :-stride]
+    delta = (
+        values[:, stride:] - values[:, :-stride]
+    ) / scale.to(device=values.device, dtype=values.dtype).view(
+        1,
+        1,
+        -1,
+    )
+    weights = pair_mask.to(dtype=delta.dtype).unsqueeze(-1)
+    count = weights.sum(dim=(1, 2)).clamp_min(1.0)
+    count = count * values.shape[-1]
+    return (
+        (delta.square() * weights).sum(dim=(1, 2)) / count
+        + 1.0e-8
+    ).sqrt()
+
+
+def _temporal_motion_loss(
+    prediction: Tensor,
+    target: Tensor,
+    mask: Tensor,
+    delta_std: Tensor,
+) -> Tensor:
+    if prediction.shape != target.shape or prediction.ndim != 3:
+        raise ValueError(
+            "temporal prediction and target must share rank-three shape"
+        )
+    if mask.shape != prediction.shape[:2]:
+        raise ValueError("temporal mask shape does not match values")
+    if delta_std.shape != (prediction.shape[-1],):
+        raise ValueError("temporal delta scale has the wrong shape")
+    losses: list[Tensor] = []
+    for stride, weight in ((1, 1.0), (4, 0.5)):
+        predicted = _per_sample_motion(
+            prediction,
+            mask,
+            delta_std,
+            stride,
+        )
+        expected = _per_sample_motion(
+            target,
+            mask,
+            delta_std,
+            stride,
+        )
+        match = functional.smooth_l1_loss(
+            predicted.log(),
+            expected.log(),
+        )
+        moving = expected > 0.25
+        floor = functional.relu(0.5 * expected - predicted)
+        floor_loss = (
+            floor.masked_select(moving).mean()
+            if torch.any(moving)
+            else floor.sum() * 0.0
+        )
+        losses.append(weight * (match + floor_loss))
+    return (losses[0] + losses[1]) / 1.5
+
+
 def _pitch_windows(
     clean_estimate: Tensor,
     future_mask: Tensor,
@@ -365,6 +433,7 @@ def zrave_pure_flow_loss(
     history: Tensor,
     future_mask: Tensor,
     statistics: FlowStatistics,
+    temporal_weight: float = 0.0,
 ) -> FlowLossReport:
     mask = _validate_future(
         pair.clean_future,
@@ -395,6 +464,10 @@ def zrave_pure_flow_loss(
         )
     if not torch.isfinite(predicted_velocity).all():
         raise ValueError("predicted_velocity contains non-finite values")
+    if not math.isfinite(temporal_weight) or temporal_weight < 0.0:
+        raise ValueError(
+            "temporal_weight must be finite and non-negative"
+        )
 
     flow = _masked_mean(
         (predicted_velocity.float() - pair.target_velocity).square(),
@@ -425,13 +498,23 @@ def zrave_pure_flow_loss(
         statistics,
     )
     total = flow + 0.10 * boundary + 0.02 * statistics_loss
+    components = {
+        "flow": flow,
+        "boundary": boundary,
+        "statistics": statistics_loss,
+    }
+    if temporal_weight > 0.0:
+        temporal = _temporal_motion_loss(
+            clean_estimate,
+            pair.clean_future,
+            mask,
+            statistics.delta_std,
+        )
+        total = total + temporal_weight * temporal
+        components["temporal"] = temporal
     return FlowLossReport(
         total=total,
-        components={
-            "flow": flow,
-            "boundary": boundary,
-            "statistics": statistics_loss,
-        },
+        components=components,
     )
 
 

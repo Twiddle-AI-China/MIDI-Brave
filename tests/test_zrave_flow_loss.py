@@ -165,6 +165,67 @@ def test_pure_loss_has_no_pitch_component() -> None:
     )
 
 
+def test_temporal_loss_detects_one_frozen_sample_inside_moving_batch() -> None:
+    from midibrave.zrave_flow_loss import _temporal_motion_loss
+
+    target = torch.zeros(2, 64, 4)
+    target[0] = torch.arange(64).view(64, 1) * 0.1
+    target[1] = torch.arange(64).view(64, 1) * 0.2
+    prediction = target.clone()
+    prediction[0] = prediction[0, :1]
+    mask = torch.ones(2, 64, dtype=torch.bool)
+
+    loss = _temporal_motion_loss(
+        prediction,
+        target,
+        mask,
+        torch.ones(4),
+    )
+
+    assert loss > 0.1
+
+
+def test_temporal_loss_does_not_force_motion_on_static_target() -> None:
+    from midibrave.zrave_flow_loss import _temporal_motion_loss
+
+    value = torch.ones(2, 64, 4)
+    mask = torch.ones(2, 64, dtype=torch.bool)
+
+    loss = _temporal_motion_loss(
+        value,
+        value,
+        mask,
+        torch.ones(4),
+    )
+
+    assert loss < 1.0e-6
+
+
+def test_exploration_pure_loss_reports_weighted_temporal_component() -> None:
+    arguments = _loss_fixture()
+    for name in ("midi_note", "pitch_probe", "pitch_weight"):
+        arguments.pop(name)
+
+    report = zrave_pure_flow_loss(
+        **arguments,
+        temporal_weight=0.05,
+    )
+
+    assert set(report.components) == {
+        "flow",
+        "boundary",
+        "statistics",
+        "temporal",
+    }
+    torch.testing.assert_close(
+        report.total,
+        report.components["flow"]
+        + 0.10 * report.components["boundary"]
+        + 0.02 * report.components["statistics"]
+        + 0.05 * report.components["temporal"],
+    )
+
+
 def test_auxiliary_losses_receive_raw_codec_coordinates() -> None:
     statistics = _statistics(mean=10.0, latent_std=2.0)
     probe = _RecordingPitchProbe()
