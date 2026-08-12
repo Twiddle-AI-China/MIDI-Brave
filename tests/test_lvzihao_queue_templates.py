@@ -230,3 +230,5 @@ def test_container_identity_is_named_for_torch_cache_initialization() -> None:
     assert "runtime_user=$(id -un)" in common
     assert '-e "USER=$runtime_user"' in common
     assert '-e "LOGNAME=$runtime_user"' in common
+    assert "run --rm --interactive" not in common
+    assert "run --rm" in common

@@ -187,7 +187,7 @@ prepare_docker_args() {
     "$LV_STATE_ROOT"
 
   DOCKER_ARGS=(
-    run --rm --interactive
+    run --rm
     --gpus "device=$CUDA_VISIBLE_DEVICES"
     --cpus "$LV_DOCKER_CPUS"
     --memory "$LV_DOCKER_MEMORY"
