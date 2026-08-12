@@ -152,7 +152,7 @@ remaining_seconds() {
 }
 
 prepare_docker_args() {
-  local docker_memory_gib allocated_memory_gib
+  local docker_memory_gib allocated_memory_gib runtime_user
   assert_persistent_work_root
   assert_single_gpu_allocation
   require_command docker
@@ -176,6 +176,9 @@ prepare_docker_args() {
     die "LV_QGPU_MEMORY_GIB must be a positive integer"
   (( docker_memory_gib <= allocated_memory_gib )) ||
     die "LV_DOCKER_MEMORY exceeds the qgpu memory request"
+  runtime_user=$(id -un)
+  [[ "$runtime_user" =~ ^[A-Za-z0-9._-]+$ ]] ||
+    die "host user name is unsafe for the container environment"
   mkdir -p \
     "$LV_WORK_ROOT/cache/huggingface" \
     "$LV_WORK_ROOT/cache/torch" \
@@ -197,6 +200,8 @@ prepare_docker_args() {
     -v "$LV_WORK_ROOT:$LV_CONTAINER_WORK_ROOT"
     -e "PYTHONPATH=$LV_CONTAINER_CODE_ROOT/src"
     -e PYTHONDONTWRITEBYTECODE=1
+    -e "USER=$runtime_user"
+    -e "LOGNAME=$runtime_user"
     -e CUDA_VISIBLE_DEVICES=0
     -e CUBLAS_WORKSPACE_CONFIG=:4096:8
     -e HF_HUB_OFFLINE=1

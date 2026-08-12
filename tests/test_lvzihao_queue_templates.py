@@ -18,6 +18,7 @@ SMOKE = LVZIHAO / "smoke.sh"
 MIDI_AUDITION = LVZIHAO / "midi_audition.sh"
 BUILD_IMAGE = LVZIHAO / "build_image.sh"
 DOCKERFILE = ROOT / "Dockerfile.lvzihao"
+COMMON = LVZIHAO / "common.sh"
 
 
 def _rows(path: Path) -> list[tuple[str, str, str, str, str]]:
@@ -221,3 +222,11 @@ def test_image_build_keeps_official_default_and_explicit_local_fallback() -> Non
     assert "ENTRYPOINT []" in dockerfile
     assert "c7391f0e1b06c723486015aa53641883cd6a46ba167cf13918d4acadc6c75d77" in documentation
     assert "LV_EXPECTED_TORCH_PREFIX=2.10" in documentation
+
+
+def test_container_identity_is_named_for_torch_cache_initialization() -> None:
+    common = COMMON.read_text(encoding="utf-8")
+
+    assert "runtime_user=$(id -un)" in common
+    assert '-e "USER=$runtime_user"' in common
+    assert '-e "LOGNAME=$runtime_user"' in common
