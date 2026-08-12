@@ -64,6 +64,109 @@ class AdaLayerNorm(nn.Module):
         )
 
 
+class MidiSequenceConditioner(nn.Module):
+    """Frame-aligned note/velocity conditioning for the flow backbone.
+
+    The final projection is deliberately zero-initialized.  A model created
+    from a pure-flow checkpoint therefore starts with identical backbone
+    behaviour while the new conditioning path learns to steer it.
+    """
+
+    def __init__(
+        self,
+        width: int,
+        *,
+        note_min: int,
+        note_max: int,
+    ) -> None:
+        super().__init__()
+        if width <= 0 or note_max < note_min:
+            raise ValueError("invalid MIDI conditioner dimensions")
+        self.note_min = int(note_min)
+        self.note_max = int(note_max)
+        note_count = self.note_max - self.note_min + 1
+        self.null_note_index = note_count
+        self.note_embedding = nn.Embedding(note_count + 1, 16)
+        self.performance = nn.Sequential(
+            nn.Linear(2, 32),
+            nn.SiLU(),
+            nn.Linear(32, 16),
+        )
+        self.projection = nn.Linear(32, width)
+        self.null_condition = nn.Parameter(torch.zeros(1, 1, width))
+        nn.init.zeros_(self.projection.weight)
+        nn.init.zeros_(self.projection.bias)
+
+    def forward(
+        self,
+        note: Tensor,
+        velocity: Tensor,
+        *,
+        condition_present: Tensor | None = None,
+    ) -> Tensor:
+        if note.ndim != 2 or velocity.shape != note.shape:
+            raise ValueError(
+                "MIDI note and velocity must share shape [batch, frames]"
+            )
+        if note.is_floating_point() and (
+            not torch.isfinite(note).all()
+            or not torch.equal(note, note.round())
+        ):
+            raise ValueError("MIDI note must contain finite integers")
+        if velocity.is_floating_point() and not torch.isfinite(
+            velocity
+        ).all():
+            raise ValueError("MIDI velocity must be finite")
+        notes = note.to(dtype=torch.long)
+        velocities = velocity.to(dtype=torch.float32)
+        valid_note = (notes == -1) | (
+            (notes >= self.note_min) & (notes <= self.note_max)
+        )
+        if not torch.all(valid_note):
+            raise ValueError(
+                "MIDI note must be -1 or in "
+                f"[{self.note_min}, {self.note_max}]"
+            )
+        if torch.any(velocities < 0) or torch.any(velocities > 127):
+            raise ValueError("MIDI velocity must be in [0, 127]")
+        note_indices = torch.where(
+            notes == -1,
+            torch.full_like(notes, self.null_note_index),
+            notes - self.note_min,
+        )
+        normalized_note = torch.where(
+            notes == -1,
+            torch.zeros_like(velocities),
+            (notes.float() - 69.0) / 48.0,
+        )
+        performance = self.performance(
+            torch.stack(
+                (normalized_note, velocities / 127.0),
+                dim=-1,
+            )
+        )
+        condition = self.projection(
+            torch.cat((self.note_embedding(note_indices), performance), dim=-1)
+        )
+        if condition_present is None:
+            return condition
+        if condition_present.shape != (note.shape[0],):
+            raise ValueError(
+                "condition_present must have shape "
+                f"({note.shape[0]},)"
+            )
+        present = condition_present.to(
+            device=condition.device,
+            dtype=torch.bool,
+        )
+        null = self.null_condition.expand(
+            note.shape[0],
+            note.shape[1],
+            -1,
+        )
+        return torch.where(present[:, None, None], condition, null)
+
+
 class _FutureFlowLayer(nn.Module):
     def __init__(
         self,
@@ -146,6 +249,7 @@ def _resolve_model_dimensions(
         "feedforward_dim": 1536,
         "dropout": 0.0,
         "pitch_conditioning": True,
+        "midi_sequence_conditioning": False,
         "note_min": 21,
         "note_max": 109,
     }
@@ -180,6 +284,7 @@ class ZraveFlowTransformer(nn.Module):
         feedforward_dim: int | None = None,
         dropout: float | None = None,
         pitch_conditioning: bool | None = None,
+        midi_sequence_conditioning: bool | None = None,
         note_min: int | None = None,
         note_max: int | None = None,
     ) -> None:
@@ -197,6 +302,7 @@ class ZraveFlowTransformer(nn.Module):
                 "feedforward_dim": feedforward_dim,
                 "dropout": dropout,
                 "pitch_conditioning": pitch_conditioning,
+                "midi_sequence_conditioning": midi_sequence_conditioning,
                 "note_min": note_min,
                 "note_max": note_max,
             },
@@ -207,6 +313,9 @@ class ZraveFlowTransformer(nn.Module):
         self.d_model = int(dimensions["d_model"])
         self.pitch_conditioning = bool(
             dimensions["pitch_conditioning"]
+        )
+        self.midi_sequence_conditioning = bool(
+            dimensions["midi_sequence_conditioning"]
         )
         self.note_min = int(dimensions["note_min"])
         self.note_max = int(dimensions["note_max"])
@@ -235,6 +344,10 @@ class ZraveFlowTransformer(nn.Module):
             raise ValueError("dropout must be in [0, 1)")
         if self.note_max < self.note_min:
             raise ValueError("invalid MIDI note range")
+        if self.midi_sequence_conditioning and not self.pitch_conditioning:
+            raise ValueError(
+                "MIDI sequence conditioning requires pitch_conditioning"
+            )
 
         self.register_buffer("latent_mean", statistics.mean.float().clone())
         self.register_buffer(
@@ -293,7 +406,16 @@ class ZraveFlowTransformer(nn.Module):
         self.null_note_index = note_count
         self.midi_embedding = (
             nn.Embedding(note_count + 1, self.d_model)
-            if self.pitch_conditioning
+            if self.pitch_conditioning and not self.midi_sequence_conditioning
+            else None
+        )
+        self.midi_sequence_conditioner = (
+            MidiSequenceConditioner(
+                self.d_model,
+                note_min=self.note_min,
+                note_max=self.note_max,
+            )
+            if self.midi_sequence_conditioning
             else None
         )
         self.future_layers = nn.ModuleList(
@@ -468,6 +590,7 @@ class ZraveFlowTransformer(nn.Module):
         history: Tensor,
         history_mask: Tensor,
         context_present: Tensor | None = None,
+        token_condition: Tensor | None = None,
     ) -> Tensor:
         normalized_history = (
             history.float() - self.latent_mean
@@ -477,6 +600,12 @@ class ZraveFlowTransformer(nn.Module):
             0.0,
         )
         memory = self.history_projection(normalized_history)
+        if token_condition is not None:
+            if token_condition.shape != memory.shape:
+                raise ValueError(
+                    "history MIDI condition must match projected history"
+                )
+            memory = memory + token_condition
         memory = self.context_encoder(
             memory + self.history_position,
             src_key_padding_mask=~history_mask,
@@ -507,6 +636,7 @@ class ZraveFlowTransformer(nn.Module):
         retention: Tensor,
         future_mask: Tensor,
         condition_offset: Tensor | None = None,
+        token_condition: Tensor | None = None,
     ) -> Tensor:
         device = noisy_future.device
         condition = self.time_embedding(
@@ -516,6 +646,12 @@ class ZraveFlowTransformer(nn.Module):
             condition = condition + condition_offset
         value = self.future_projection(noisy_future.float())
         value = value + self.future_position
+        if token_condition is not None:
+            if token_condition.shape != value.shape:
+                raise ValueError(
+                    "future MIDI condition must match projected future"
+                )
+            value = value + token_condition
         value = value.masked_fill(~future_mask.unsqueeze(-1), 0.0)
         retention = retention.to(device=device, dtype=value.dtype)
         for layer in self.future_layers:
@@ -542,10 +678,24 @@ class ZraveFlowTransformer(nn.Module):
         retention: Tensor | None = None,
         future_mask: Tensor | None = None,
         context_present: Tensor | None = None,
+        midi_present: Tensor | None = None,
         history_mask: Tensor | None = None,
+        history_midi_note: Tensor | None = None,
+        history_velocity: Tensor | None = None,
+        future_midi_note: Tensor | None = None,
+        future_velocity: Tensor | None = None,
     ) -> Tensor:
         if not self.pitch_conditioning:
-            if midi_note is not None or context_present is not None:
+            midi_inputs = (
+                midi_note,
+                context_present,
+                midi_present,
+                history_midi_note,
+                history_velocity,
+                future_midi_note,
+                future_velocity,
+            )
+            if any(value is not None for value in midi_inputs):
                 raise ValueError(
                     "pure flow forward does not accept MIDI/context dropout"
                 )
@@ -560,8 +710,83 @@ class ZraveFlowTransformer(nn.Module):
                 history_mask=history_mask,
             )
         if midi_note is None or retention is None:
-            raise ValueError(
-                "conditional flow forward requires MIDI and retention"
+            if not self.midi_sequence_conditioning or retention is None:
+                raise ValueError(
+                    "conditional flow forward requires MIDI and retention"
+                )
+        if self.midi_sequence_conditioning:
+            if self.midi_sequence_conditioner is None:
+                raise RuntimeError(
+                    "MIDI sequence model lacks its conditioner"
+                )
+            sequences = (
+                history_midi_note,
+                history_velocity,
+                future_midi_note,
+                future_velocity,
+            )
+            if any(value is None for value in sequences):
+                raise ValueError(
+                    "MIDI sequence conditioning requires history/future "
+                    "note and velocity"
+                )
+            assert history_midi_note is not None
+            assert history_velocity is not None
+            assert future_midi_note is not None
+            assert future_velocity is not None
+            resolved_mask, resolved_history_mask = (
+                self._validate_core_forward(
+                    noisy_future,
+                    flow_time,
+                    history,
+                    retention,
+                    future_mask,
+                    history_mask,
+                )
+            )
+            batch = noisy_future.shape[0]
+            if history_midi_note.shape != (batch, self.context_frames):
+                raise ValueError(
+                    "history_midi_note must have shape "
+                    f"({batch}, {self.context_frames})"
+                )
+            if future_midi_note.shape != (batch, self.future_frames):
+                raise ValueError(
+                    "future_midi_note must have shape "
+                    f"({batch}, {self.future_frames})"
+                )
+            history_condition = self.midi_sequence_conditioner(
+                history_midi_note,
+                history_velocity,
+                condition_present=midi_present,
+            )
+            future_condition = self.midi_sequence_conditioner(
+                future_midi_note,
+                future_velocity,
+                condition_present=midi_present,
+            )
+            memory = self._encode_history(
+                history,
+                resolved_history_mask,
+                context_present=context_present,
+                token_condition=history_condition,
+            )
+            valid_weights = resolved_mask.to(
+                dtype=future_condition.dtype
+            ).unsqueeze(-1)
+            pooled_condition = (
+                (future_condition * valid_weights).sum(dim=1)
+                / valid_weights.sum(dim=1).clamp_min(1.0)
+            )
+            return self._predict_velocity(
+                noisy_future,
+                flow_time,
+                memory,
+                resolved_history_mask,
+                retention,
+                resolved_mask,
+                pooled_condition,
+                future_condition,
             )
         if self.midi_embedding is None:
             raise RuntimeError("conditional model lacks MIDI embedding")
@@ -818,6 +1043,204 @@ def sample_flow_block(
                 midi_note,
                 retention,
                 pitch_guidance,
+            )
+            state = state + 0.5 * step * (v0 + v1)
+    mean = statistics.mean.to(device=device, dtype=state.dtype)
+    latent_std = statistics.latent_std.to(
+        device=device,
+        dtype=state.dtype,
+    )
+    return state * latent_std + mean
+
+
+def _midi_sequence_guided_velocity(
+    model: ZraveFlowTransformer,
+    state: Tensor,
+    flow_time: float,
+    history: Tensor,
+    history_midi_note: Tensor,
+    history_velocity: Tensor,
+    future_midi_note: Tensor,
+    future_velocity: Tensor,
+    retention: Tensor,
+    pitch_guidance: float,
+    history_mask: Tensor | None,
+) -> Tensor:
+    """Apply MIDI CFG while retaining the same latent context in both arms."""
+
+    batch = state.shape[0]
+    times = torch.full(
+        (batch,),
+        flow_time,
+        device=state.device,
+        dtype=torch.float32,
+    )
+    arguments = {
+        "retention": retention,
+        "history_mask": history_mask,
+        "history_midi_note": history_midi_note,
+        "history_velocity": history_velocity,
+        "future_midi_note": future_midi_note,
+        "future_velocity": future_velocity,
+    }
+    full = model(
+        state,
+        times,
+        history,
+        midi_present=torch.ones(
+            batch,
+            device=state.device,
+            dtype=torch.bool,
+        ),
+        **arguments,
+    )
+    no_midi = model(
+        state,
+        times,
+        history,
+        midi_present=torch.zeros(
+            batch,
+            device=state.device,
+            dtype=torch.bool,
+        ),
+        **arguments,
+    )
+    return no_midi + pitch_guidance * (full - no_midi)
+
+
+def sample_midi_sequence_flow_block(
+    model: ZraveFlowTransformer,
+    statistics: FlowStatistics,
+    history: Tensor,
+    history_midi_note: Tensor,
+    history_velocity: Tensor,
+    future_midi_note: Tensor,
+    future_velocity: Tensor,
+    *,
+    generation_seed: int,
+    block_index: int,
+    temperature: float,
+    wander_delay_frames: int,
+    pitch_guidance: float,
+    solver_steps: int,
+    history_mask: Tensor | None = None,
+    schedule_offset_frames: int = 0,
+) -> Tensor:
+    """Sample one frame-aligned MIDI-conditioned future with Heun CFG."""
+
+    if not model.midi_sequence_conditioning:
+        raise ValueError(
+            "MIDI sequence sampling requires midi_sequence_conditioning"
+        )
+    if not torch.isfinite(torch.tensor(temperature)) or temperature < 0:
+        raise ValueError("temperature must be finite and non-negative")
+    if wander_delay_frames not in {16, 32, 48}:
+        raise ValueError("wander_delay_frames must be 16, 32, or 48")
+    if not 1.0 <= pitch_guidance <= 5.0:
+        raise ValueError("pitch_guidance must be in [1, 5]")
+    if solver_steps not in {4, 8, 12}:
+        raise ValueError("solver_steps must be 4, 8, or 12")
+    if schedule_offset_frames < 0:
+        raise ValueError("schedule_offset_frames must be non-negative")
+    statistics.validate(model.latent_dim)
+    device = next(model.parameters()).device
+    history = history.to(device=device)
+    history_midi_note = history_midi_note.to(device=device)
+    history_velocity = history_velocity.to(device=device)
+    future_midi_note = future_midi_note.to(device=device)
+    future_velocity = future_velocity.to(device=device)
+    if history_mask is not None:
+        history_mask = history_mask.to(device=device, dtype=torch.bool)
+    batch = history.shape[0] if history.ndim else 0
+    if history_midi_note.shape != (batch, model.context_frames):
+        raise ValueError(
+            "history_midi_note must have shape "
+            f"({batch}, {model.context_frames})"
+        )
+    if history_velocity.shape != history_midi_note.shape:
+        raise ValueError(
+            "history_velocity must match history_midi_note"
+        )
+    if future_midi_note.shape != (batch, model.future_frames):
+        raise ValueError(
+            "future_midi_note must have shape "
+            f"({batch}, {model.future_frames})"
+        )
+    if future_velocity.shape != future_midi_note.shape:
+        raise ValueError("future_velocity must match future_midi_note")
+    if history_mask is not None and history_mask.shape != (
+        batch,
+        model.context_frames,
+    ):
+        raise ValueError(
+            "history_mask must have shape "
+            f"({batch}, {model.context_frames})"
+        )
+    delay = torch.full(
+        (batch,),
+        wander_delay_frames,
+        device=device,
+        dtype=torch.long,
+    )
+    retention = retention_curve(
+        delay,
+        model.future_frames,
+        offset_frames=schedule_offset_frames,
+    )
+    temperatures = temperature_curve(
+        torch.full(
+            (batch,),
+            temperature,
+            device=device,
+            dtype=torch.float32,
+        ),
+        delay,
+        model.future_frames,
+        offset_frames=schedule_offset_frames,
+    )
+    generator = torch.Generator(device=device)
+    generator.manual_seed(
+        derive_block_seed(generation_seed, block_index)
+    )
+    state = torch.randn(
+        batch,
+        model.future_frames,
+        model.latent_dim,
+        generator=generator,
+        device=device,
+        dtype=torch.float32,
+    )
+    state = state * temperatures.unsqueeze(-1)
+    step = 1.0 / solver_steps
+    with torch.no_grad():
+        for index in range(solver_steps):
+            t0 = index * step
+            v0 = _midi_sequence_guided_velocity(
+                model,
+                state,
+                t0,
+                history,
+                history_midi_note,
+                history_velocity,
+                future_midi_note,
+                future_velocity,
+                retention,
+                pitch_guidance,
+                history_mask,
+            )
+            proposal = state + step * v0
+            v1 = _midi_sequence_guided_velocity(
+                model,
+                proposal,
+                min(1.0, t0 + step),
+                history,
+                history_midi_note,
+                history_velocity,
+                future_midi_note,
+                future_velocity,
+                retention,
+                pitch_guidance,
+                history_mask,
             )
             state = state + 0.5 * step * (v0 + v1)
     mean = statistics.mean.to(device=device, dtype=state.dtype)

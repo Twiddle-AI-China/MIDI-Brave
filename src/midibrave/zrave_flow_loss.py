@@ -154,10 +154,19 @@ def _masked_mean(values: Tensor, mask: Tensor) -> Tensor:
     while expanded.ndim < values.ndim:
         expanded = expanded.unsqueeze(-1)
     expanded = expanded.expand_as(values)
-    selected = values.masked_select(expanded)
-    if selected.numel() == 0:
+    if values.ndim == 0:
+        return values if bool(expanded) else values * 0.0
+    flattened_values = values.reshape(values.shape[0], -1)
+    flattened_mask = expanded.reshape(values.shape[0], -1)
+    counts = flattened_mask.sum(dim=1)
+    valid = counts > 0
+    if not torch.any(valid):
         return values.sum() * 0.0
-    return selected.mean()
+    per_sample = (
+        (flattened_values * flattened_mask.to(values.dtype)).sum(dim=1)
+        / counts.clamp_min(1).to(values.dtype)
+    )
+    return per_sample.masked_select(valid).mean()
 
 
 def _masked_smooth_l1(
@@ -267,14 +276,52 @@ def _pitch_windows(
 ) -> tuple[Tensor | None, Tensor | None]:
     windows: list[Tensor] = []
     notes: list[Tensor] = []
-    for start in (0, 16, 32, 48):
-        valid = future_mask[:, start : start + 16].all(dim=1)
-        if torch.any(valid):
-            windows.append(clean_estimate[valid, start : start + 16])
-            notes.append(midi_note[valid])
+    if midi_note.shape == (clean_estimate.shape[0],):
+        note_sequence = midi_note[:, None].expand(-1, clean_estimate.shape[1])
+    elif midi_note.shape == clean_estimate.shape[:2]:
+        note_sequence = midi_note
+    else:
+        raise ValueError(
+            "midi_note must be [batch] or [batch, future_frames]"
+        )
+    for sample in range(clean_estimate.shape[0]):
+        valid_frames = int(future_mask[sample].sum().item())
+        if valid_frames <= 0:
+            continue
+        complete = 0
+        for start in range(0, valid_frames - 15, 16):
+            windows.append(clean_estimate[sample : sample + 1, start : start + 16])
+            notes.append(note_sequence[sample : sample + 1, start + 7])
+            complete += 1
+        if complete == 0:
+            partial = clean_estimate[sample, :valid_frames]
+            padding = partial[-1:].expand(16 - valid_frames, -1)
+            windows.append(torch.cat((partial, padding), dim=0).unsqueeze(0))
+            notes.append(
+                note_sequence[
+                    sample : sample + 1,
+                    min(valid_frames // 2, valid_frames - 1),
+                ]
+            )
     if not windows:
         return None, None
     return torch.cat(windows, dim=0), torch.cat(notes, dim=0)
+
+
+def _last_visible_history(history: Tensor, history_mask: Tensor | None) -> Tensor:
+    if history_mask is None:
+        return history[:, -1]
+    if history_mask.shape != history.shape[:2]:
+        raise ValueError("history_mask shape does not match history")
+    resolved = history_mask.to(device=history.device, dtype=torch.bool)
+    if not torch.all(resolved.any(dim=1)):
+        raise ValueError("every sample needs visible history")
+    indices = torch.arange(
+        history.shape[1],
+        device=history.device,
+    ).expand(history.shape[0], -1)
+    last = indices.masked_fill(~resolved, -1).max(dim=1).values
+    return history[torch.arange(history.shape[0], device=history.device), last]
 
 
 def _boundary_loss(
@@ -282,6 +329,7 @@ def _boundary_loss(
     clean_future: Tensor,
     history: Tensor,
     future_mask: Tensor,
+    history_mask: Tensor | None = None,
 ) -> Tensor:
     first_mask = future_mask[:, :8]
     frame_loss = _masked_smooth_l1(
@@ -290,8 +338,9 @@ def _boundary_loss(
         first_mask,
     )
     valid_boundary = future_mask[:, 0]
-    estimated_delta = clean_estimate[:, 0] - history[:, -1]
-    target_delta = clean_future[:, 0] - history[:, -1]
+    history_boundary = _last_visible_history(history, history_mask)
+    estimated_delta = clean_estimate[:, 0] - history_boundary
+    target_delta = clean_future[:, 0] - history_boundary
     delta_loss = _masked_smooth_l1(
         estimated_delta,
         target_delta,
@@ -337,6 +386,7 @@ def zrave_flow_loss(
     pitch_probe: nn.Module,
     statistics: FlowStatistics,
     pitch_weight: float,
+    history_mask: Tensor | None = None,
 ) -> FlowLossReport:
     mask = _validate_future(
         pair.clean_future,
@@ -365,8 +415,11 @@ def zrave_flow_loss(
         raise ValueError(
             f"history must have shape ({batch}, 32, {latent_dim})"
         )
-    if midi_note.shape != (batch,):
-        raise ValueError(f"midi_note must have shape ({batch},)")
+    if midi_note.shape not in {(batch,), (batch, expected_shape[1])}:
+        raise ValueError(
+            "midi_note must have shape "
+            f"({batch},) or ({batch}, {expected_shape[1]})"
+        )
     if not math.isfinite(pitch_weight) or pitch_weight < 0:
         raise ValueError("pitch_weight must be finite and non-negative")
     if not torch.isfinite(predicted_velocity).all():
@@ -409,6 +462,7 @@ def zrave_flow_loss(
         pair.clean_future,
         history,
         mask,
+        history_mask,
     )
     statistics_loss = _statistics_loss(
         clean_estimate,
@@ -440,6 +494,7 @@ def zrave_pure_flow_loss(
     future_mask: Tensor,
     statistics: FlowStatistics,
     temporal_weight: float = 0.0,
+    history_mask: Tensor | None = None,
 ) -> FlowLossReport:
     mask = _validate_future(
         pair.clean_future,
@@ -496,6 +551,7 @@ def zrave_pure_flow_loss(
         pair.clean_future,
         history,
         mask,
+        history_mask,
     )
     statistics_loss = _statistics_loss(
         clean_estimate,

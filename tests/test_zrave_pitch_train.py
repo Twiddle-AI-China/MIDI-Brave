@@ -162,6 +162,43 @@ def test_pitch_sampler_uses_every_source_with_valid_midi() -> None:
     assert set(sampler.last_source_codes.tolist()) == {0, 1, 2}
 
 
+def test_pitch_sampler_supports_serum128_latents() -> None:
+    sampler = PitchWindowSampler(
+        latents=torch.randn(3, 24, 128),
+        active_frames=torch.full((3,), 24),
+        notes=torch.tensor([36, 62, 82]),
+        source_codes=torch.zeros(3, dtype=torch.long),
+        split_codes=torch.zeros(3, dtype=torch.long),
+        split_code=0,
+        seed=22,
+        device="cpu",
+    )
+
+    windows, notes = sampler.sample(3)
+
+    assert windows.shape == (3, 16, 128)
+    assert sorted(notes.tolist()) == [36, 62, 82]
+
+
+def test_pitch_sampler_honors_prepacked_category_filter() -> None:
+    sampler = PitchWindowSampler(
+        latents=torch.randn(4, 24, 128),
+        active_frames=torch.full((4,), 24),
+        notes=torch.tensor([36, 36, 62, 82]),
+        source_codes=torch.zeros(4, dtype=torch.long),
+        split_codes=torch.zeros(4, dtype=torch.long),
+        split_code=0,
+        seed=23,
+        device="cpu",
+        record_eligible=torch.tensor([False, True, True, True]),
+    )
+
+    _windows, notes = sampler.sample(6)
+
+    assert sorted(set(notes.tolist())) == [36, 62, 82]
+    assert 0 not in sampler.last_record_indices.tolist()
+
+
 def test_qualified_loader_checks_pack_hash_and_freezes(
     tmp_path: Path,
 ) -> None:

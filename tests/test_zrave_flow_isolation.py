@@ -8,7 +8,7 @@ from midibrave.zrave_config import ZraveConfig
 ROOT = Path(__file__).parents[1]
 
 
-def test_flow_modules_do_not_import_conditional_or_clap_code() -> None:
+def test_flow_modules_keep_midi_local_and_do_not_import_clap_stack() -> None:
     source = "\n".join(
         path.read_text(encoding="utf-8").casefold()
         for path in (ROOT / "src" / "midibrave").glob(
@@ -18,8 +18,9 @@ def test_flow_modules_do_not_import_conditional_or_clap_code() -> None:
 
     assert "laion_clap" not in source
     assert "predictive_model" not in source
-    assert "midi_control" not in source
+    assert "predictivemidibrave" not in source
     assert "zrave_prediction_loss" not in source
+    assert "midi_sequence_conditioning" in source
 
 
 def test_legacy_standalone_config_is_unchanged() -> None:

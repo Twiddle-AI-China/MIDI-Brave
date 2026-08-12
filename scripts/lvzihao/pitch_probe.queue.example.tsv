@@ -1,0 +1,2 @@
+# id	action	config relative to MidiBrave-v2	run relative to HOST_FLOW_ROOT	spec
+serum128-pitch	pitch_train	configs/zrave/lvzihao_serum128_segment248_midi32.yaml	runs/segment248-midi32	10000

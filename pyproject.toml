@@ -27,6 +27,7 @@ midibrave-zrave-flow-data = "midibrave.zrave_flow_data:main"
 midibrave-zrave-pitch-train = "midibrave.zrave_pitch_train:main"
 midibrave-zrave-flow-train = "midibrave.zrave_flow_train:main"
 midibrave-zrave-flow-evaluate = "midibrave.zrave_flow_evaluate:main"
+midibrave-zrave-flow-gate = "midibrave.zrave_flow_gate:main"
 
 [build-system]
 requires = ["hatchling"]

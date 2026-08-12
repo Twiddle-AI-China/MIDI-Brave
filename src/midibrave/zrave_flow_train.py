@@ -269,8 +269,22 @@ def _validate_checkpoint_contract(contract: dict[str, object]) -> None:
     exploration_enabled = contract.get("exploration_enabled", False)
     if not isinstance(exploration_enabled, bool):
         raise ValueError("exploration_enabled must be boolean")
+    midi_sequence_conditioning = contract.get(
+        "midi_sequence_conditioning", False
+    )
+    if not isinstance(midi_sequence_conditioning, bool):
+        raise ValueError("midi_sequence_conditioning must be boolean")
+    segment_sampling = contract.get("segment_sampling", False)
+    if not isinstance(segment_sampling, bool):
+        raise ValueError("segment_sampling must be boolean")
+    if midi_sequence_conditioning and not pitch_conditioning:
+        raise ValueError(
+            "MIDI sequence conditioning requires pitch conditioning"
+        )
     if pitch_conditioning and exploration_enabled:
-        raise ValueError("pitch conditioning cannot enable exploration v2")
+        raise ValueError(
+            "MIDI conditioning cannot enable exploration v2 yet"
+        )
     required = _BASE_CONTRACT_HASHES | {"world_size", "batch_per_gpu"}
     if pitch_conditioning:
         required |= _PITCH_CONTRACT_HASHES
@@ -320,7 +334,11 @@ def build_flow_checkpoint_contract(
         "context_frames": config.model.context_frames,
         "future_frames": config.model.future_frames,
         "pitch_conditioning": config.model.pitch_conditioning,
+        "midi_sequence_conditioning": (
+            config.model.midi_sequence_conditioning
+        ),
         "exploration_enabled": config.exploration.enabled,
+        "segment_sampling": config.segment_sampling.enabled,
     }
     pitch_hashes = (
         pitch_checkpoint_sha256,
@@ -342,6 +360,8 @@ def build_flow_checkpoint_contract(
 
 
 def _checkpoint_architecture(contract: dict[str, object]) -> str:
+    if contract.get("midi_sequence_conditioning", False):
+        return "zrave_midi_sequence_flow_transformer_v2"
     if contract.get("pitch_conditioning", True):
         return "zrave_conditional_flow_transformer_v1"
     if contract.get("exploration_enabled", False):
@@ -495,7 +515,11 @@ def load_flow_checkpoint(
         raise ValueError("flow checkpoint has no contract")
     for name, expected in expected_contract.items():
         if (
-            name == "exploration_enabled"
+            name in {
+                "exploration_enabled",
+                "midi_sequence_conditioning",
+                "segment_sampling",
+            }
             and expected is False
             and name not in actual_contract
         ):
@@ -583,14 +607,52 @@ def load_flow_initial_weights(
         "pitch_conditioning",
     )
     for name in required:
+        if name == "pitch_conditioning":
+            continue
         if actual_contract.get(name) != expected_contract.get(name):
             raise ValueError(f"initializer {name} mismatch")
     if actual_contract.get("pitch_conditioning") is not False:
         raise ValueError("initializer must disable pitch conditioning")
+    if (
+        not expected_contract.get("midi_sequence_conditioning", False)
+        and expected_contract.get("pitch_conditioning") is not False
+    ):
+        raise ValueError(
+            "only MIDI sequence models may initialize from pure flow"
+        )
     state = payload.get("model")
     if not isinstance(state, dict):
         raise ValueError("initializer has no model state")
-    _unwrapped(model).load_state_dict(state, strict=True)
+    target = _unwrapped(model)
+    if (
+        expected_contract.get("midi_sequence_conditioning", False)
+        or expected_contract.get("segment_sampling", False)
+    ):
+        target_state = target.state_dict()
+        shared = {
+            name: value
+            for name, value in state.items()
+            if name in target_state and target_state[name].shape == value.shape
+        }
+        missing, unexpected = target.load_state_dict(shared, strict=False)
+        if unexpected:
+            raise ValueError(
+                "MIDI initializer has unexpected parameters: "
+                + ", ".join(unexpected)
+            )
+        allowed_prefixes = ("null_memory", "midi_")
+        invalid_missing = [
+            name
+            for name in missing
+            if not name.startswith(allowed_prefixes)
+        ]
+        if invalid_missing:
+            raise ValueError(
+                "MIDI initializer is missing shared parameters: "
+                + ", ".join(invalid_missing)
+            )
+    else:
+        target.load_state_dict(state, strict=True)
     update = payload.get("update")
     if (
         not isinstance(update, int)
@@ -687,6 +749,7 @@ def _future_parameters(model: nn.Module) -> tuple[nn.Parameter, ...]:
         "future_position",
         "time_embedding.",
         "midi_embedding.",
+        "midi_sequence_conditioner.",
         "future_layers.",
         "output_norm.",
         "velocity_projection.",
@@ -774,6 +837,8 @@ def _prepare_exposure_batch(
         wander_delay_frames=batch.wander_delay_frames,
         history_midi_note=batch.midi_note,
         pitch_transition_mask=batch.pitch_transition_mask,
+        velocity=batch.velocity,
+        history_velocity=batch.velocity,
     )
 
 
@@ -844,12 +909,15 @@ def _prepare_exploration_exposure_batch(
         wander_delay_frames=batch.wander_delay_frames,
         history_midi_note=batch.history_midi_note,
         pitch_transition_mask=batch.pitch_transition_mask,
+        velocity=batch.velocity,
+        history_velocity=batch.history_velocity,
     )
 
 
 def _pitch_diagnostics(
     pair: Any,
     predicted_velocity: Tensor,
+    future_mask: Tensor,
     midi_note: Tensor,
     transition_mask: Tensor,
     pitch_probe: LatentPitchProbe,
@@ -864,10 +932,37 @@ def _pitch_diagnostics(
             * statistics.latent_std.to(normalized.device)
             + statistics.mean.to(normalized.device)
         )
-        output = pitch_probe(estimate[:, :16])
+        windows: list[Tensor] = []
+        diagnostic_notes: list[Tensor] = []
+        note_sequence = (
+            midi_note[:, None].expand(-1, estimate.shape[1])
+            if midi_note.ndim == 1
+            else midi_note
+        )
+        if note_sequence.shape != estimate.shape[:2]:
+            raise ValueError("pitch diagnostic MIDI sequence shape mismatch")
+        for sample in range(estimate.shape[0]):
+            valid_frames = int(future_mask[sample].sum().item())
+            if valid_frames <= 0:
+                raise ValueError("pitch diagnostic target is empty")
+            valid = estimate[sample, : min(valid_frames, 16)]
+            if valid.shape[0] < 16:
+                valid = torch.cat(
+                    (valid, valid[-1:].expand(16 - valid.shape[0], -1)),
+                    dim=0,
+                )
+            windows.append(valid)
+            diagnostic_notes.append(
+                note_sequence[
+                    sample,
+                    min(7, valid_frames - 1),
+                ]
+            )
+        output = pitch_probe(torch.stack(windows))
+        target_notes = torch.stack(diagnostic_notes)
         predicted = output.logits.argmax(dim=-1) + pitch_probe.note_min
         cents = (
-            output.expected_midi.float() - midi_note.float()
+            output.expected_midi.float() - target_notes.float()
         ).abs() * 100.0
         values = torch.zeros(6, device=estimate.device, dtype=torch.float64)
         for offset, mask in (
@@ -876,7 +971,7 @@ def _pitch_diagnostics(
         ):
             values[offset] = mask.sum()
             values[offset + 1] = (
-                (predicted == midi_note) & mask
+                (predicted == target_notes) & mask
             ).sum()
             values[offset + 2] = cents.masked_select(mask).double().sum()
         if dist.is_initialized():
@@ -1041,6 +1136,16 @@ def _run_flow_update(
             else force_exposure
         )
         exposure_depth = int(exposure)
+    if (
+        config.segment_sampling.enabled
+        or config.model.midi_sequence_conditioning
+    ):
+        # Natural 2/4/8 targets are shorter than 64 frames, so the legacy
+        # generated-history exposure contract cannot shift them safely.
+        # Sequence MIDI also needs a condition-aware rollout before exposure
+        # can be enabled without silently dropping the requested control.
+        exposure = False
+        exposure_depth = 0
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     started = time.perf_counter()
@@ -1099,7 +1204,12 @@ def _run_flow_update(
             device=device,
         )
         wander_delays = batch.wander_delay_frames
-        history_mask = None
+        history_mask = batch.history_mask
+    schedule_offsets: Tensor | int = (
+        batch.absolute_start
+        if batch.absolute_start is not None
+        else schedule_offset_frames
+    )
     pair = make_flow_training_pair(
         batch.future,
         batch.future_mask,
@@ -1107,7 +1217,7 @@ def _run_flow_update(
         wander_delays,
         statistics,
         generator,
-        schedule_offset_frames=schedule_offset_frames,
+        schedule_offset_frames=schedule_offsets,
     )
     next_update = update + 1
     learning_rate = _learning_rate(
@@ -1120,7 +1230,7 @@ def _run_flow_update(
     retention = retention_curve(
         wander_delays,
         64,
-        offset_frames=schedule_offset_frames,
+        offset_frames=schedule_offsets,
     )
     with torch.autocast(
         device_type=device.type,
@@ -1139,20 +1249,69 @@ def _run_flow_update(
             context_present = (
                 torch.rand(batch_per_gpu, device=device) >= dropout
             )
-            conditioned_note = torch.where(
-                pitch_present,
-                batch.midi_note,
-                torch.full_like(batch.midi_note, -1),
-            )
-            predicted_velocity = training_model(
-                pair.noisy_future,
-                pair.flow_time,
-                batch.history,
-                conditioned_note,
-                retention,
-                future_mask=batch.future_mask,
-                context_present=context_present,
-            )
+            if config.model.midi_sequence_conditioning:
+                if batch.velocity is None or batch.history_velocity is None:
+                    raise ValueError(
+                        "MIDI sequence batch is missing velocity metadata"
+                    )
+                history_notes = (
+                    batch.history_midi_sequence
+                    if batch.history_midi_sequence is not None
+                    else batch.history_midi_note[:, None].expand(
+                        -1, config.model.context_frames
+                    )
+                )
+                history_velocities = (
+                    batch.history_velocity_sequence
+                    if batch.history_velocity_sequence is not None
+                    else batch.history_velocity[:, None].expand(
+                        -1, config.model.context_frames
+                    )
+                )
+                future_notes = (
+                    batch.future_midi_sequence
+                    if batch.future_midi_sequence is not None
+                    else batch.midi_note[:, None].expand(
+                        -1, config.model.future_frames
+                    )
+                )
+                future_velocities = (
+                    batch.future_velocity_sequence
+                    if batch.future_velocity_sequence is not None
+                    else batch.velocity[:, None].expand(
+                        -1, config.model.future_frames
+                    )
+                )
+                predicted_velocity = training_model(
+                    pair.noisy_future,
+                    pair.flow_time,
+                    batch.history,
+                    retention=retention,
+                    future_mask=batch.future_mask,
+                    context_present=context_present,
+                    midi_present=pitch_present,
+                    history_mask=history_mask,
+                    history_midi_note=history_notes,
+                    history_velocity=history_velocities,
+                    future_midi_note=future_notes,
+                    future_velocity=future_velocities,
+                )
+            else:
+                conditioned_note = torch.where(
+                    pitch_present,
+                    batch.midi_note,
+                    torch.full_like(batch.midi_note, -1),
+                )
+                predicted_velocity = training_model(
+                    pair.noisy_future,
+                    pair.flow_time,
+                    batch.history,
+                    conditioned_note,
+                    retention,
+                    future_mask=batch.future_mask,
+                    context_present=context_present,
+                    history_mask=history_mask,
+                )
             pitch_weight = _effective_pitch_weight(
                 controller,
                 next_update,
@@ -1162,10 +1321,15 @@ def _run_flow_update(
                 pair,
                 batch.history,
                 batch.future_mask,
-                batch.midi_note,
+                (
+                    batch.future_midi_sequence
+                    if batch.future_midi_sequence is not None
+                    else batch.midi_note
+                ),
                 pitch_probe,
                 statistics,
                 pitch_weight,
+                history_mask=history_mask,
             )
         else:
             predicted_velocity = training_model(
@@ -1188,6 +1352,7 @@ def _run_flow_update(
                     if config.exploration.enabled
                     else 0.0
                 ),
+                history_mask=history_mask,
             )
     if (
         config.model.pitch_conditioning
@@ -1247,7 +1412,12 @@ def _run_flow_update(
         _pitch_diagnostics(
             pair,
             predicted_velocity,
-            batch.midi_note,
+            batch.future_mask,
+            (
+                batch.future_midi_sequence
+                if batch.future_midi_sequence is not None
+                else batch.midi_note
+            ),
             batch.pitch_transition_mask,
             pitch_probe,
             statistics,
@@ -1271,7 +1441,11 @@ def _run_flow_update(
         exposure_depth=exposure_depth,
         exploration=exploration,
         visible_history_frames=visible_history_frames,
-        schedule_offset_frames=schedule_offset_frames,
+        schedule_offset_frames=(
+            int(batch.absolute_start.float().mean().item())
+            if batch.absolute_start is not None
+            else schedule_offset_frames
+        ),
         applied=applied,
     )
 
@@ -1302,25 +1476,89 @@ def _validation_snapshot(
         batch.wander_delay_frames,
         statistics,
         _default_generator(device),
+        schedule_offset_frames=(
+            batch.absolute_start
+            if batch.absolute_start is not None
+            else 0
+        ),
     )
     with torch.autocast(device_type="cuda", dtype=torch.float16):
-        velocity = model(
-            pair.noisy_future,
-            pair.flow_time,
-            batch.history,
-            batch.midi_note,
-            retention_curve(batch.wander_delay_frames, 64),
-            future_mask=batch.future_mask,
-        )
+        if config.model.midi_sequence_conditioning:
+            if batch.velocity is None or batch.history_velocity is None:
+                raise ValueError(
+                    "MIDI validation batch lacks velocity metadata"
+                )
+            history_notes = (
+                batch.history_midi_sequence
+                if batch.history_midi_sequence is not None
+                else batch.history_midi_note[:, None].expand(
+                    -1, config.model.context_frames
+                )
+            )
+            history_velocities = (
+                batch.history_velocity_sequence
+                if batch.history_velocity_sequence is not None
+                else batch.history_velocity[:, None].expand(
+                    -1, config.model.context_frames
+                )
+            )
+            future_notes = (
+                batch.future_midi_sequence
+                if batch.future_midi_sequence is not None
+                else batch.midi_note[:, None].expand(
+                    -1, config.model.future_frames
+                )
+            )
+            future_velocities = (
+                batch.future_velocity_sequence
+                if batch.future_velocity_sequence is not None
+                else batch.velocity[:, None].expand(
+                    -1, config.model.future_frames
+                )
+            )
+            velocity = model(
+                pair.noisy_future,
+                pair.flow_time,
+                batch.history,
+                retention=retention_curve(
+                    batch.wander_delay_frames,
+                    64,
+                    offset_frames=(
+                        batch.absolute_start
+                        if batch.absolute_start is not None
+                        else 0
+                    ),
+                ),
+                future_mask=batch.future_mask,
+                history_mask=batch.history_mask,
+                history_midi_note=history_notes,
+                history_velocity=history_velocities,
+                future_midi_note=future_notes,
+                future_velocity=future_velocities,
+            )
+        else:
+            velocity = model(
+                pair.noisy_future,
+                pair.flow_time,
+                batch.history,
+                batch.midi_note,
+                retention_curve(batch.wander_delay_frames, 64),
+                future_mask=batch.future_mask,
+            )
         report = zrave_flow_loss(
             velocity,
             pair,
             batch.history,
             batch.future_mask,
-            batch.midi_note,
+            (
+                batch.future_midi_sequence
+                if batch.future_midi_sequence is not None
+                else batch.midi_note
+            ),
             pitch_probe,
             statistics,
             pitch_weight=0.30,
+            history_mask=batch.history_mask,
         )
     values = torch.tensor(
         [
@@ -1421,6 +1659,7 @@ def summarize_flow_benchmark(
     pack_index_sha256: str,
     pitch_checkpoint_sha256: str | None,
     git_commit: str,
+    require_exposure_safety: bool = True,
 ) -> dict[str, object]:
     for name, digest in (
         ("config_sha256", config_sha256),
@@ -1448,7 +1687,11 @@ def summarize_flow_benchmark(
         and (durations > 0).all()
         and np.isfinite(frames).all()
         and (frames > 0).all()
-        and exposure_safety_updates == 5
+        and (
+            exposure_safety_updates == 5
+            if require_exposure_safety
+            else exposure_safety_updates == 0
+        )
         and nonfinite_updates == 0
         and math.isfinite(peak_memory_mib)
         and 0.0 < peak_memory_mib < total_memory_mib
@@ -1488,6 +1731,7 @@ def summarize_flow_benchmark(
         "peak_memory_mib": float(peak_memory_mib),
         "total_memory_mib": float(total_memory_mib),
         "nonfinite_updates": int(nonfinite_updates),
+        "exposure_safety_required": bool(require_exposure_safety),
         "config_sha256": config_sha256,
         "pack_index_sha256": pack_index_sha256,
         "git_commit": git_commit,
@@ -1679,9 +1923,21 @@ def _benchmark(args: argparse.Namespace) -> None:
     config: ZraveFlowConfig = runtime["config"]
     rank: int = runtime["rank"]
     device: torch.device = runtime["device"]
+    if args.initialize_from:
+        load_flow_initial_weights(
+            args.initialize_from,
+            model=runtime["training_model"],
+            expected_contract=runtime["contract"],
+        )
     warmup = int(args.benchmark_warmup)
     measured = int(args.benchmark_updates)
     exposure_updates = int(args.benchmark_exposure_updates)
+    exposure_supported = not (
+        config.segment_sampling.enabled
+        or config.model.midi_sequence_conditioning
+    )
+    if not exposure_supported:
+        exposure_updates = 0
     if warmup < 0 or measured <= 0 or exposure_updates < 0:
         raise ValueError("invalid benchmark update counts")
     update = 0
@@ -1790,6 +2046,7 @@ def _benchmark(args: argparse.Namespace) -> None:
             else None
         ),
         git_commit=_git_commit(commit_root),
+        require_exposure_safety=exposure_supported,
     )
     if rank == 0:
         _atomic_json(Path(args.benchmark_report), report)
@@ -1835,9 +2092,16 @@ def _load_flow_training_start(
             initialization=restored["initialization"],
         )
     elif getattr(args, "initialize_from", None):
-        if not runtime["contract"].get("exploration_enabled", False):
+        derived = (
+            runtime["contract"].get("exploration_enabled", False)
+            or runtime["contract"].get("segment_sampling", False)
+            or runtime["contract"].get(
+                "midi_sequence_conditioning", False
+            )
+        )
+        if not derived:
             raise ValueError(
-                "--initialize-from requires exploration-enabled config"
+                "--initialize-from requires a derived flow config"
             )
         state["initialization"] = load_flow_initial_weights(
             args.initialize_from,
@@ -2004,7 +2268,10 @@ def _train(args: argparse.Namespace) -> None:
             )
             if dist.is_initialized():
                 dist.barrier()
-            if not config.model.pitch_conditioning:
+            if (
+                not config.model.pitch_conditioning
+                or config.model.midi_sequence_conditioning
+            ):
                 if rank == 0 and final_due:
                     _atomic_copy(
                         checkpoint,

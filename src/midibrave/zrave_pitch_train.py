@@ -55,13 +55,21 @@ class PitchWindowSampler:
         split_code: int,
         seed: int,
         device: str | torch.device,
+        record_eligible: Tensor | None = None,
     ) -> None:
-        if latents.ndim != 3 or latents.shape[-1] != 16:
-            raise ValueError("latents must have shape [records, frames, 16]")
+        if latents.ndim != 3 or latents.shape[-1] <= 0:
+            raise ValueError(
+                "latents must have shape [records, frames, latent_dim]"
+            )
         records = latents.shape[0]
         metadata = (active_frames, notes, source_codes, split_codes)
         if any(value.shape != (records,) for value in metadata):
             raise ValueError("pitch sampler metadata length mismatch")
+        if (
+            record_eligible is not None
+            and record_eligible.shape != (records,)
+        ):
+            raise ValueError("pitch sampler eligibility length mismatch")
         self.device = torch.device(device)
         self.latents = latents.to(self.device)
         self.active_frames = active_frames.cpu().long()
@@ -78,6 +86,8 @@ class PitchWindowSampler:
             & (self.notes >= 21)
             & (self.notes <= 109)
         )
+        if record_eligible is not None:
+            eligible_mask &= record_eligible.cpu().bool()
         self.eligible = torch.nonzero(
             eligible_mask,
             as_tuple=False,
@@ -123,6 +133,7 @@ class PitchWindowSampler:
             split_code=split_codes[split],
             seed=seed,
             device=device,
+            record_eligible=packed.record_eligible,
         )
 
     def sample(self, batch_size: int) -> tuple[Tensor, Tensor]:
@@ -164,7 +175,7 @@ class PitchWindowSampler:
         windows = torch.empty(
             batch_size,
             16,
-            16,
+            self.latents.shape[-1],
             device=self.device,
             dtype=torch.float32,
         )

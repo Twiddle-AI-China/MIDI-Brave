@@ -624,6 +624,51 @@ def test_legacy_pure_checkpoint_without_exploration_flag_still_resumes(
     assert restored["update"] == 1
 
 
+def test_legacy_pure_checkpoint_without_new_false_flags_still_resumes(
+    tmp_path: Path,
+) -> None:
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    sampler = _TinySampler(seed=6)
+    config = ZraveFlowConfig.load(PURE_CONFIG)
+    contract = build_flow_checkpoint_contract(
+        config=config,
+        world_size=1,
+        batch_per_gpu=2,
+        maximum_updates=100,
+        config_sha256="a" * 64,
+        pack_index_sha256="b" * 64,
+        statistics_sha256="c" * 64,
+    )
+    checkpoint = tmp_path / "legacy-new-flags.pt"
+    save_flow_checkpoint(
+        checkpoint,
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=None,
+        update=1,
+        contract=contract,
+    )
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload["contract"].pop("midi_sequence_conditioning")
+    payload["contract"].pop("segment_sampling")
+    torch.save(payload, checkpoint)
+
+    restored = load_flow_checkpoint(
+        checkpoint,
+        model=model,
+        optimizer=optimizer,
+        scaler=None,
+        sampler=sampler,
+        pitch_weight_controller=None,
+        expected_contract=contract,
+    )
+
+    assert restored["update"] == 1
+
+
 def test_pure_checkpoint_persists_phase3_start(tmp_path: Path) -> None:
     model = nn.Linear(1, 1)
     optimizer = torch.optim.AdamW(model.parameters())
@@ -931,6 +976,71 @@ def test_weight_only_initializer_loads_v1_model_strictly(
         )
 
 
+def test_midi_sequence_initializer_loads_shared_pure_backbone(
+    tmp_path: Path,
+) -> None:
+    source = _pure_model()
+    checkpoint = tmp_path / "pure.pt"
+    torch.save(
+        {
+            "format": 1,
+            "architecture": "zrave_pure_flow_transformer_v1",
+            "model": source.state_dict(),
+            "update": 85000,
+            "contract": {
+                "pack_index_sha256": "b" * 64,
+                "statistics_sha256": "c" * 64,
+                "latent_dim": 16,
+                "context_frames": 32,
+                "future_frames": 64,
+                "pitch_conditioning": False,
+            },
+        },
+        checkpoint,
+    )
+    target = ZraveFlowTransformer(
+        statistics=_unit_statistics(),
+        latent_dim=16,
+        context_frames=32,
+        future_frames=64,
+        d_model=32,
+        context_layers=1,
+        future_layers=1,
+        heads=4,
+        feedforward_dim=64,
+        dropout=0.0,
+        pitch_conditioning=True,
+        midi_sequence_conditioning=True,
+    )
+
+    metadata = flow_train.load_flow_initial_weights(
+        checkpoint,
+        model=target,
+        expected_contract={
+            "pack_index_sha256": "b" * 64,
+            "statistics_sha256": "c" * 64,
+            "latent_dim": 16,
+            "context_frames": 32,
+            "future_frames": 64,
+            "pitch_conditioning": True,
+            "midi_sequence_conditioning": True,
+            "segment_sampling": True,
+        },
+    )
+
+    for name, value in source.state_dict().items():
+        if (
+            name in target.state_dict()
+            and target.state_dict()[name].shape == value.shape
+        ):
+            torch.testing.assert_close(target.state_dict()[name], value)
+    assert metadata["source_update"] == 85000
+    assert target.midi_sequence_conditioner is not None
+    assert torch.count_nonzero(
+        target.midi_sequence_conditioner.projection.weight
+    ) == 0
+
+
 def test_training_start_uses_initializer_without_resume_state(
     monkeypatch,
 ) -> None:
@@ -1110,6 +1220,28 @@ def test_benchmark_reports_valid_frame_throughput_and_exposure() -> None:
         report["median_valid_latent_frames_per_second"]
         == 16384.0
     )
+
+
+def test_segment_benchmark_is_valid_without_legacy_exposure() -> None:
+    report = summarize_flow_benchmark(
+        batch_per_gpu=8,
+        world_size=1,
+        durations_seconds=[1.0] * 10,
+        global_valid_frames=[1024] * 10,
+        exposure_safety_updates=0,
+        peak_memory_mib=1000.0,
+        total_memory_mib=16000.0,
+        nonfinite_updates=0,
+        config_sha256="a" * 64,
+        pack_index_sha256="b" * 64,
+        pitch_checkpoint_sha256=None,
+        git_commit="d" * 40,
+        require_exposure_safety=False,
+    )
+
+    assert report["status"] == "ok"
+    assert report["exposure_safety_updates"] == 0
+    assert report["exposure_safety_required"] is False
 
 
 def test_flow_checkpoint_restores_only_explicit_gate_state(

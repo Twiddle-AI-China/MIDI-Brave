@@ -192,6 +192,69 @@ def test_pure_loss_has_no_pitch_component() -> None:
     )
 
 
+def test_masked_mean_weights_variable_length_segments_per_sample() -> None:
+    from midibrave.zrave_flow_loss import _masked_mean
+
+    values = torch.zeros(2, 64, 1)
+    values[0, :54] = 1.0
+    values[1, :13] = 3.0
+    mask = torch.zeros(2, 64, dtype=torch.bool)
+    mask[0, :54] = True
+    mask[1, :13] = True
+
+    result = _masked_mean(values, mask)
+
+    torch.testing.assert_close(result, torch.tensor(2.0))
+
+
+def test_boundary_uses_last_visible_history_frame() -> None:
+    from midibrave.zrave_flow_loss import _boundary_loss
+
+    history = torch.zeros(1, 32, 2)
+    history[:, 5] = 3.0
+    history[:, -1] = 1000.0
+    history_mask = torch.zeros(1, 32, dtype=torch.bool)
+    history_mask[:, :6] = True
+    target = torch.full((1, 64, 2), 4.0)
+    mask = torch.ones(1, 64, dtype=torch.bool)
+
+    loss = _boundary_loss(target, target, history, mask, history_mask)
+
+    torch.testing.assert_close(loss, torch.tensor(0.0))
+
+
+def test_short_segment_is_padded_for_pitch_supervision() -> None:
+    from midibrave.zrave_flow_loss import _pitch_windows
+
+    values = torch.arange(13).view(1, 13, 1).expand(-1, -1, 4).float()
+    estimate = torch.zeros(1, 64, 4)
+    estimate[:, :13] = values
+    mask = torch.zeros(1, 64, dtype=torch.bool)
+    mask[:, :13] = True
+
+    windows, notes = _pitch_windows(estimate, mask, torch.tensor([62]))
+
+    assert windows is not None and notes is not None
+    assert windows.shape == (1, 16, 4)
+    assert notes.tolist() == [62]
+    assert torch.all(windows[:, 13:] == 12)
+
+
+def test_pitch_windows_follow_framewise_midi_event_labels() -> None:
+    from midibrave.zrave_flow_loss import _pitch_windows
+
+    estimate = torch.randn(1, 64, 4)
+    mask = torch.ones(1, 64, dtype=torch.bool)
+    notes = torch.full((1, 64), 62)
+    notes[:, 20:] = 82
+
+    windows, labels = _pitch_windows(estimate, mask, notes)
+
+    assert windows is not None and labels is not None
+    assert windows.shape == (4, 16, 4)
+    assert labels.tolist() == [62, 82, 82, 82]
+
+
 def test_temporal_loss_detects_one_frozen_sample_inside_moving_batch() -> None:
     from midibrave.zrave_flow_loss import _temporal_motion_loss
 

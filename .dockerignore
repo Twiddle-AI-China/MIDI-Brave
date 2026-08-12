@@ -4,6 +4,7 @@
 !src/
 !src/**
 !Dockerfile.phase1-autotune
+!Dockerfile.lvzihao
 !configs/
 !configs/**
 !scripts/

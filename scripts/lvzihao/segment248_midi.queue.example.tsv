@@ -1,0 +1,10 @@
+# Requires global LV_INITIALIZE_FROM and LV_PITCH_PROBE; see docs/LVZIHAO_TRAINING.md.
+# id	action	config relative to MidiBrave-v2	run relative to HOST_FLOW_ROOT	spec
+segment248-midi-pitch	pitch_train	configs/zrave/lvzihao_serum128_segment248_midi32.yaml	runs/segment248-midi32	10000
+segment248-midi-smoke	smoke	configs/zrave/lvzihao_serum128_segment248_midi32.yaml	runs/segment248-midi32	-
+segment248-midi-sweep	sweep	configs/zrave/lvzihao_serum128_segment248_midi32.yaml	runs/segment248-midi32	1,2,4,8
+segment248-midi-train	train	configs/zrave/lvzihao_serum128_segment248_midi32.yaml	runs/segment248-midi32	20000
+segment248-midi-audition-005000	midi_audition	configs/zrave/lvzihao_serum128_segment248_midi32.yaml	runs/segment248-midi32	step-005000.pt
+segment248-midi-audition-010000	midi_audition	configs/zrave/lvzihao_serum128_segment248_midi32.yaml	runs/segment248-midi32	step-010000.pt
+segment248-midi-audition-015000	midi_audition	configs/zrave/lvzihao_serum128_segment248_midi32.yaml	runs/segment248-midi32	step-015000.pt
+segment248-midi-audition-020000	midi_audition	configs/zrave/lvzihao_serum128_segment248_midi32.yaml	runs/segment248-midi32	step-020000.pt

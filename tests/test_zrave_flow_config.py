@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from midibrave.zrave_flow_config import ZraveFlowConfig
+from midibrave.zrave_flow_config import (
+    FlowSegmentSamplingConfig,
+    ZraveFlowConfig,
+)
 
 
 ROOT = Path(__file__).parents[1]
@@ -21,6 +24,12 @@ EXPLORATION_CONFIG = (
     / "configs"
     / "zrave"
     / "octopus_serum128_exploration_flow.yaml"
+)
+SEGMENT_PURE_CONFIG = (
+    ROOT / "configs" / "zrave" / "lvzihao_serum128_segment248_pure.yaml"
+)
+SEGMENT_MIDI_CONFIG = (
+    ROOT / "configs" / "zrave" / "lvzihao_serum128_segment248_midi32.yaml"
 )
 
 
@@ -48,6 +57,10 @@ def test_flow_config_locks_runtime_and_data_contract() -> None:
     ]
     assert config.train.checkpoint_every == 5000
     assert config.train.pitch_transition_fraction == 0.20
+    assert config.model.midi_sequence_conditioning is False
+    assert config.segment_sampling.enabled is False
+    assert config.segment_sampling.divisions == (2, 4, 8)
+    assert config.segment_sampling.include_first is False
 
 
 def test_pure_flow_config_disables_pitch_conditioning() -> None:
@@ -144,3 +157,94 @@ def test_flow_config_rejects_unknown_nested_keys(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unknown model config keys"):
         ZraveFlowConfig.load(bad)
+
+
+def test_segment_sampling_config_loads_as_an_opt_in_task(
+    tmp_path: Path,
+) -> None:
+    bad = tmp_path / "segment.yaml"
+    bad.write_text(
+        PURE_CONFIG.read_text(encoding="utf-8")
+        + "\nsegment_sampling:\n"
+        + "  enabled: true\n"
+        + "  divisions: [2, 8]\n"
+        + "  include_first: false\n",
+        encoding="utf-8",
+    )
+
+    config = ZraveFlowConfig.load(bad)
+
+    assert config.segment_sampling.enabled is True
+    assert config.segment_sampling.divisions == (2, 8)
+    assert config.segment_sampling.include_first is False
+
+
+def test_lvzihao_segment_configs_define_separate_weight_families() -> None:
+    pure = ZraveFlowConfig.load(SEGMENT_PURE_CONFIG)
+    midi = ZraveFlowConfig.load(SEGMENT_MIDI_CONFIG)
+
+    assert pure.segment_sampling.enabled
+    assert pure.model.pitch_conditioning is False
+    assert len(pure.data.sources[0].allowed_categories) == 12
+    assert pure.train.output_root.endswith("/runs/segment248-pure")
+    assert midi.segment_sampling.enabled
+    assert midi.model.pitch_conditioning is True
+    assert midi.model.midi_sequence_conditioning is True
+    assert midi.data.sources[0].allowed_categories == (
+        "Arp",
+        "Bass",
+        "Chord",
+        "Keys",
+        "Lead",
+        "Pad",
+        "Pluck",
+        "Synth",
+    )
+    assert midi.train.output_root.endswith("/runs/segment248-midi32")
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ({"divisions": (4, 2)}, "ordered, unique subset"),
+        ({"divisions": (2, 2)}, "ordered, unique subset"),
+        ({"divisions": (2, 3)}, "ordered, unique subset"),
+        ({"include_first": True}, "beginning-of-sequence"),
+    ],
+)
+def test_segment_sampling_rejects_ambiguous_or_noncausal_contracts(
+    values: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        FlowSegmentSamplingConfig(**values)
+
+
+def test_midi_sequence_conditioning_requires_pitch_conditioning() -> None:
+    config = ZraveFlowConfig.load(PURE_CONFIG)
+
+    with pytest.raises(ValueError, match="requires pitch_conditioning"):
+        replace(config.model, midi_sequence_conditioning=True)
+
+
+def test_exploration_rejects_midi_until_rollout_is_condition_aware() -> None:
+    config = ZraveFlowConfig.load(EXPLORATION_CONFIG)
+    train = replace(config.train, pitch_transition_fraction=0.20)
+
+    with pytest.raises(ValueError, match="MIDI conditioning"):
+        replace(
+            config,
+            model=replace(config.model, pitch_conditioning=True),
+            train=train,
+        )
+
+    with pytest.raises(ValueError, match="MIDI conditioning"):
+        replace(
+            config,
+            model=replace(
+                config.model,
+                pitch_conditioning=True,
+                midi_sequence_conditioning=True,
+            ),
+            train=train,
+        )

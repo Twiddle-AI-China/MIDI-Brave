@@ -147,6 +147,7 @@ class FlowModelConfig:
     feedforward_dim: int = 1536
     dropout: float = 0.0
     pitch_conditioning: bool = True
+    midi_sequence_conditioning: bool = False
     note_min: int = 21
     note_max: int = 109
     condition_dropout: float = 0.10
@@ -157,6 +158,15 @@ class FlowModelConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.pitch_conditioning, bool):
             raise ValueError("model.pitch_conditioning must be boolean")
+        if not isinstance(self.midi_sequence_conditioning, bool):
+            raise ValueError(
+                "model.midi_sequence_conditioning must be boolean"
+            )
+        if self.midi_sequence_conditioning and not self.pitch_conditioning:
+            raise ValueError(
+                "model.midi_sequence_conditioning requires "
+                "pitch_conditioning"
+            )
         object.__setattr__(
             self,
             "wander_delay_frames",
@@ -386,6 +396,44 @@ class FlowExplorationConfig:
 
 
 @dataclass(frozen=True)
+class FlowSegmentSamplingConfig:
+    """Optional causal task that predicts balanced latent partitions.
+
+    Segment zero has no preceding latent context.  It is intentionally not a
+    valid target until the model has an explicit beginning-of-sequence
+    contract; silently filling its history from the target would leak future
+    information.
+    """
+
+    enabled: bool = False
+    divisions: tuple[int, ...] = (2, 4, 8)
+    include_first: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "divisions", tuple(self.divisions))
+        if not isinstance(self.enabled, bool):
+            raise ValueError("segment_sampling.enabled must be boolean")
+        if not isinstance(self.include_first, bool):
+            raise ValueError(
+                "segment_sampling.include_first must be boolean"
+            )
+        if (
+            not self.divisions
+            or tuple(sorted(set(self.divisions))) != self.divisions
+            or any(value not in {2, 4, 8} for value in self.divisions)
+        ):
+            raise ValueError(
+                "segment_sampling.divisions must be an ordered, unique "
+                "subset of 2, 4, 8"
+            )
+        if self.include_first:
+            raise ValueError(
+                "segment_sampling.include_first requires an explicit "
+                "beginning-of-sequence history contract"
+            )
+
+
+@dataclass(frozen=True)
 class ZraveFlowConfig:
     seed: int
     data: FlowDataConfig
@@ -396,6 +444,9 @@ class ZraveFlowConfig:
     train: FlowTrainConfig
     exploration: FlowExplorationConfig = field(
         default_factory=FlowExplorationConfig
+    )
+    segment_sampling: FlowSegmentSamplingConfig = field(
+        default_factory=FlowSegmentSamplingConfig
     )
     source_path: Path | None = None
 
@@ -417,7 +468,11 @@ class ZraveFlowConfig:
             )
         if self.exploration.enabled and self.model.pitch_conditioning:
             raise ValueError(
-                "exploration requires model.pitch_conditioning false"
+                "exploration with MIDI conditioning is not yet supported"
+            )
+        if self.exploration.enabled and self.segment_sampling.enabled:
+            raise ValueError(
+                "segment sampling cannot use generated-history exposure"
             )
 
     @classmethod
@@ -434,6 +489,7 @@ class ZraveFlowConfig:
             "optimizer",
             "train",
             "exploration",
+            "segment_sampling",
         }
         unknown = set(root) - allowed
         if unknown:
@@ -469,6 +525,11 @@ class ZraveFlowConfig:
         for name in ("visible_history_frames", "schedule_offsets"):
             if name in exploration_raw:
                 exploration_raw[name] = tuple(exploration_raw[name])
+        segment_sampling_raw = dict(root.get("segment_sampling") or {})
+        if "divisions" in segment_sampling_raw:
+            segment_sampling_raw["divisions"] = tuple(
+                segment_sampling_raw["divisions"]
+            )
         try:
             seed = int(root["seed"])
         except (KeyError, TypeError, ValueError) as error:
@@ -493,6 +554,11 @@ class ZraveFlowConfig:
                 FlowExplorationConfig,
                 exploration_raw,
                 "exploration",
+            ),
+            segment_sampling=_strict_section(
+                FlowSegmentSamplingConfig,
+                segment_sampling_raw,
+                "segment_sampling",
             ),
             source_path=source_path,
         )

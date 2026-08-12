@@ -1,0 +1,5 @@
+# BASELINE-ONLY: inspect the imported Octopus run; never resume/train it here.
+# id	action	config relative to MidiBrave-v2	run relative to HOST_FLOW_ROOT	spec
+serum128-smoke	smoke	configs/zrave/octopus_serum128_pure_flow.yaml	runs/pure-flow-v1	-
+serum128-sweep	sweep	configs/zrave/octopus_serum128_pure_flow.yaml	runs/pure-flow-v1	4,8,12,16,24,32
+serum128-audition	audition	configs/zrave/octopus_serum128_pure_flow.yaml	runs/pure-flow-v1	latest
