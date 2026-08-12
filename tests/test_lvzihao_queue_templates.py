@@ -16,6 +16,8 @@ TRAIN = LVZIHAO / "train.sh"
 AUDITION = LVZIHAO / "audition.sh"
 SMOKE = LVZIHAO / "smoke.sh"
 MIDI_AUDITION = LVZIHAO / "midi_audition.sh"
+BUILD_IMAGE = LVZIHAO / "build_image.sh"
+DOCKERFILE = ROOT / "Dockerfile.lvzihao"
 
 
 def _rows(path: Path) -> list[tuple[str, str, str, str, str]]:
@@ -202,3 +204,16 @@ def test_midi_audition_strict_contract_and_gate() -> None:
     assert "does not yet" in script
     assert "midi_audition)" in runner
     assert '"$script_dir/midi_audition.sh"' in runner
+
+
+def test_image_build_keeps_official_default_and_explicit_local_fallback() -> None:
+    build = BUILD_IMAGE.read_text(encoding="utf-8")
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    documentation = DOC.read_text(encoding="utf-8")
+
+    assert "pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime@sha256:" in build
+    assert '"EXPECTED_TORCH_PREFIX=$LV_EXPECTED_TORCH_PREFIX"' in build
+    assert "EXPECTED_TORCH_PREFIX=2.9.1" in dockerfile
+    assert "uv pip install --python" in dockerfile
+    assert "c7391f0e1b06c723486015aa53641883cd6a46ba167cf13918d4acadc6c75d77" in documentation
+    assert "LV_EXPECTED_TORCH_PREFIX=2.10" in documentation

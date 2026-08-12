@@ -1,5 +1,6 @@
 ARG BASE_IMAGE=pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime@sha256:7b324d212a4450795b49edba9949b7cdc72429148a64e974334bfe5774d51385
 FROM ${BASE_IMAGE}
+ARG EXPECTED_TORCH_PREFIX=2.9.1
 
 LABEL org.opencontainers.image.title="MidiBrave lvzihao trainer" \
       org.opencontainers.image.description="Single-GPU Blackwell runtime for MidiBrave Z-RAVE experiments"
@@ -9,7 +10,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTORCH_KERNEL_CACHE_PATH=/tmp/torch-kernels
+    PYTORCH_KERNEL_CACHE_PATH=/tmp/torch-kernels \
+    EXPECTED_TORCH_PREFIX=${EXPECTED_TORCH_PREFIX} \
+    PATH=/app/.venv/bin:${PATH}
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -20,24 +23,30 @@ WORKDIR /workspace/MidiBrave
 
 # Keep the CUDA-enabled torch stack supplied by the base image. These are the
 # userspace packages needed by the Z-RAVE path and the existing MIDI/CLAP code.
-RUN python -m pip install \
-      numpy==1.26.4 \
-      soundfile==0.12.1 \
-      scipy==1.17.0 \
-      PyYAML==6.0.2 \
-      tensorboard==2.21.0 \
-      pytest==8.3.5 \
-      librosa==0.11.0 \
-      resampy==0.4.3 \
-      torchlibrosa==0.1.0 \
-      ftfy==6.3.1 \
-      braceexpand==0.1.7 \
-      webdataset==1.0.2 \
-      wget==3.2 \
-      progressbar==2.5 && \
-    python -m pip install --no-deps \
-      torchcrepe==0.0.24 \
-      laion-clap==1.1.7
+RUN if python -m pip --version >/dev/null 2>&1; then \
+      install_command="python -m pip install"; \
+    else \
+      command -v uv >/dev/null; \
+      install_command="uv pip install --python $(command -v python)"; \
+    fi && \
+    $install_command \
+        numpy==1.26.4 \
+        soundfile==0.12.1 \
+        scipy==1.17.0 \
+        PyYAML==6.0.2 \
+        tensorboard==2.21.0 \
+        pytest==8.3.5 \
+        librosa==0.11.0 \
+        resampy==0.4.3 \
+        torchlibrosa==0.1.0 \
+        ftfy==6.3.1 \
+        braceexpand==0.1.7 \
+        webdataset==1.0.2 \
+        wget==3.2 \
+        progressbar==2.5 && \
+    $install_command --no-deps \
+        torchcrepe==0.0.24 \
+        laion-clap==1.1.7
 
 COPY pyproject.toml README.md ./
 COPY src ./src
@@ -46,13 +55,21 @@ COPY scripts ./scripts
 COPY tests ./tests
 COPY training_profiles ./training_profiles
 
-RUN python -m pip install --no-deps . && \
+RUN if python -m pip --version >/dev/null 2>&1; then \
+      python -m pip install --no-deps .; \
+    else \
+      uv pip install --python "$(command -v python)" --no-deps .; \
+    fi && \
     python - <<'PY'
+import os
 import sys
 import torch
 
 assert sys.version_info[:2] == (3, 11), sys.version
-assert torch.__version__.startswith("2.9.1"), torch.__version__
+assert torch.__version__.startswith(os.environ["EXPECTED_TORCH_PREFIX"]), (
+    torch.__version__,
+    os.environ["EXPECTED_TORCH_PREFIX"],
+)
 assert torch.version.cuda == "12.8", torch.version.cuda
 PY
 

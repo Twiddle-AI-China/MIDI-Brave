@@ -65,6 +65,22 @@ cd /home/twiddle/Developer/Latent-Cosmos-Synth-rave-midi-integration/repo/MidiBr
 bash scripts/lvzihao/build_image.sh
 ```
 
+If Docker Hub is unreachable but the already-audited local ACE-Step CUDA 12.8
+image is present, the build script supports this explicit, digest-pinned
+offline-base fallback:
+
+```bash
+LV_BASE_IMAGE=ghcr.io/ace-step/ace-step-1.5@sha256:c7391f0e1b06c723486015aa53641883cd6a46ba167cf13918d4acadc6c75d77 \
+LV_EXPECTED_TORCH_PREFIX=2.10 \
+bash scripts/lvzihao/build_image.sh
+```
+
+That fallback reuses only the base image's Python 3.11 / Torch 2.10 / CUDA
+12.8 userspace and installs the pinned MidiBrave dependencies into the derived
+image. It is not interchangeable silently: record the resulting image ID in a
+new queue contract and require the qgpu smoke to prove `sm_120`, CUDA matmul,
+the real pack path, and weight-only initialization before training.
+
 Copy `scripts/lvzihao/env.example` outside the checkout, adjust only the input
 paths, and source it. Do not add credentials:
 
