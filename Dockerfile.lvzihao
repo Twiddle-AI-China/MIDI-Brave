@@ -10,9 +10,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
+    UV_HTTP_TIMEOUT=300 \
     PYTORCH_KERNEL_CACHE_PATH=/tmp/torch-kernels \
     EXPECTED_TORCH_PREFIX=${EXPECTED_TORCH_PREFIX} \
-    PATH=/app/.venv/bin:${PATH}
+    PATH=/app/.venv/bin:${PATH} \
+    PYTHONPATH=/workspace/MidiBrave/src
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -21,8 +23,8 @@ RUN apt-get update && \
 
 WORKDIR /workspace/MidiBrave
 
-# Keep the CUDA-enabled torch stack supplied by the base image. These are the
-# userspace packages needed by the Z-RAVE path and the existing MIDI/CLAP code.
+# Keep the CUDA-enabled torch stack supplied by the base image. Install only
+# the userspace packages imported by the Z-RAVE flow/pitch/audition path.
 RUN if python -m pip --version >/dev/null 2>&1; then \
       install_command="python -m pip install"; \
     else \
@@ -34,19 +36,7 @@ RUN if python -m pip --version >/dev/null 2>&1; then \
         soundfile==0.12.1 \
         scipy==1.17.0 \
         PyYAML==6.0.2 \
-        tensorboard==2.21.0 \
-        pytest==8.3.5 \
-        librosa==0.11.0 \
-        resampy==0.4.3 \
-        torchlibrosa==0.1.0 \
-        ftfy==6.3.1 \
-        braceexpand==0.1.7 \
-        webdataset==1.0.2 \
-        wget==3.2 \
-        progressbar==2.5 && \
-    $install_command --no-deps \
-        torchcrepe==0.0.24 \
-        laion-clap==1.1.7
+        tensorboard==2.20.0
 
 COPY pyproject.toml README.md ./
 COPY src ./src
@@ -55,15 +45,19 @@ COPY scripts ./scripts
 COPY tests ./tests
 COPY training_profiles ./training_profiles
 
-RUN if python -m pip --version >/dev/null 2>&1; then \
-      python -m pip install --no-deps .; \
-    else \
-      uv pip install --python "$(command -v python)" --no-deps .; \
-    fi && \
-    python - <<'PY'
+RUN python - <<'PY'
 import os
 import sys
 import torch
+import yaml
+import numpy
+import scipy
+import soundfile
+import tensorboard
+
+from midibrave import zrave_flow_audition
+from midibrave import zrave_flow_train
+from midibrave import zrave_pitch_train
 
 assert sys.version_info[:2] == (3, 11), sys.version
 assert torch.__version__.startswith(os.environ["EXPECTED_TORCH_PREFIX"]), (
@@ -71,6 +65,9 @@ assert torch.__version__.startswith(os.environ["EXPECTED_TORCH_PREFIX"]), (
     os.environ["EXPECTED_TORCH_PREFIX"],
 )
 assert torch.version.cuda == "12.8", torch.version.cuda
+assert zrave_flow_audition is not None
+assert zrave_flow_train is not None
+assert zrave_pitch_train is not None
 PY
 
 CMD ["/bin/bash"]
