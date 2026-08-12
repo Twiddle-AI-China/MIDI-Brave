@@ -70,4 +70,5 @@ assert zrave_flow_train is not None
 assert zrave_pitch_train is not None
 PY
 
+ENTRYPOINT []
 CMD ["/bin/bash"]
