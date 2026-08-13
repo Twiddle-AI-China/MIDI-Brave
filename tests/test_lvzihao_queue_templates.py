@@ -5,7 +5,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).parents[1]
 LVZIHAO = ROOT / "scripts" / "lvzihao"
 PURE_QUEUE = LVZIHAO / "segment248_pure.queue.example.tsv"
@@ -18,12 +17,17 @@ SMOKE = LVZIHAO / "smoke.sh"
 MIDI_AUDITION = LVZIHAO / "midi_audition.sh"
 BUILD_IMAGE = LVZIHAO / "build_image.sh"
 DOCKERFILE = ROOT / "Dockerfile.lvzihao"
+AUDIO_EVAL_BUILD = LVZIHAO / "build_audio_eval_image.sh"
+AUDIO_EVAL_DOCKERFILE = ROOT / "Dockerfile.lvzihao-audio-eval"
 COMMON = LVZIHAO / "common.sh"
 
 
 def _rows(path: Path) -> list[tuple[str, str, str, str, str]]:
     values: list[tuple[str, str, str, str, str]] = []
-    for row in csv.reader(path.read_text(encoding="utf-8").splitlines(), delimiter="\t"):
+    for row in csv.reader(
+        path.read_text(encoding="utf-8").splitlines(),
+        delimiter="\t",
+    ):
         if not row or row[0].startswith("#"):
             continue
         assert len(row) == 5
@@ -132,9 +136,7 @@ def test_queue_configs_bind_the_declared_run_and_conditioning() -> None:
     )
     for queue, run, pitch, sequence in cases:
         config_relative = _rows(queue)[0][2]
-        payload = yaml.safe_load(
-            (ROOT / config_relative).read_text(encoding="utf-8")
-        )
+        payload = yaml.safe_load((ROOT / config_relative).read_text(encoding="utf-8"))
         assert payload["train"]["output_root"] == (
             "/data/midibrave-zrave-flow-serum128/" + run
         )
@@ -177,6 +179,8 @@ def test_pure_audition_requires_the_long_rollout_gate() -> None:
     assert '--output "$partial_container/gate.json"' in script
     assert "--fail-on-reject" in script
     assert 'gate.get("passed") is True' in script
+    assert '"$partial/qualification.json"' in script
+    assert '"qualification_status": "qualified" if hard and passed' in script
 
 
 def test_smoke_covers_transition_and_weight_initializer() -> None:
@@ -195,16 +199,33 @@ def test_midi_audition_strict_contract_and_gate() -> None:
     assert "LV_PITCH_PROBE is required" in script
     assert "LV_INITIALIZE_FROM is required" in script
     assert 'checkpoint_sha=$(sha256sum "$checkpoint"' in script
-    assert 'initializer_sha=$(sha256sum "$LV_INITIALIZE_FROM"' in script
+    assert 'verify_initializer_environment "$LV_INITIALIZE_FROM"' in script
+    assert "initializer_sha=$INITIALIZER_SHA256" in script
     assert "render_zrave_midi_flow_audition.py" in script
     assert '--expected-checkpoint-sha256 "$checkpoint_sha"' in script
     assert '--expected-initializer-sha256 "$initializer_sha"' in script
     assert "python -m midibrave.zrave_flow_gate" in script
     assert '--output "$partial_container/gate.json"' in script
+    assert "python -m midibrave.zrave_midi_adherence_gate" in script
+    assert "python -m midibrave.zrave_decoded_audio_midi_gate" in script
+    assert '--output "$partial_container/decoded-audio-midi-gate.json"' in script
+    assert 'export LV_IMAGE="$LV_AUDIO_EVAL_IMAGE"' in script
+    assert '"$LV_CREPE_MODEL_SHA256"' in script
     assert "--fail-on-reject" in script
-    assert "does not yet" in script
     assert "midi_audition)" in runner
     assert '"$script_dir/midi_audition.sh"' in runner
+    assert '"$partial/qualification.json"' in script
+    assert '"midi_adherence_calibrated": False' in script
+    assert '"provisional_gates_passed_uncalibrated"' in script
+
+
+def test_allocation_runner_records_die_failures_as_blocked() -> None:
+    runner = (LVZIHAO / "allocation_runner.sh").read_text(encoding="utf-8")
+
+    assert "trap write_blocked_on_exit EXIT" in runner
+    assert "status != 0 && status != 75" in runner
+    assert "current_experiment_id=$experiment_id" in runner
+    assert 'mv -- "$temporary" "$queue_state/blocked.txt"' in runner
 
 
 def test_image_build_keeps_official_default_and_explicit_local_fallback() -> None:
@@ -220,8 +241,27 @@ def test_image_build_keeps_official_default_and_explicit_local_fallback() -> Non
     assert "torchcrepe" not in dockerfile
     assert "laion-clap" not in dockerfile
     assert "ENTRYPOINT []" in dockerfile
-    assert "c7391f0e1b06c723486015aa53641883cd6a46ba167cf13918d4acadc6c75d77" in documentation
+    assert (
+        "c7391f0e1b06c723486015aa53641883cd6a46ba167cf13918d4acadc6c75d77"
+        in documentation
+    )
     assert "LV_EXPECTED_TORCH_PREFIX=2.10" in documentation
+
+
+def test_decoded_audio_eval_image_is_separate_offline_and_asset_pinned() -> None:
+    build = AUDIO_EVAL_BUILD.read_text(encoding="utf-8")
+    dockerfile = AUDIO_EVAL_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "BASE_IMAGE=midibrave:lvzihao-cu128-v1" in dockerfile
+    assert "torchcrepe==0.0.24" in dockerfile
+    assert "librosa==0.11.0" in dockerfile
+    assert (
+        "d4993eea36ed1a0ad9ac549c740dae5265b049ce72004f00c2f59e01c0be8432" in dockerfile
+    )
+    assert "torchcrepe.predict" in dockerfile
+    assert "curl " not in dockerfile
+    assert "wget " not in dockerfile
+    assert "LV_AUDIO_EVAL_IMAGE:=midibrave:lvzihao-cu128-audio-eval-v1" in build
 
 
 def test_container_identity_is_named_for_torch_cache_initialization() -> None:

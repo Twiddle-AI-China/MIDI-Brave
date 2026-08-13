@@ -7,6 +7,7 @@ from types import MethodType
 import pytest
 import torch
 
+from midibrave.zrave_flow_config import FlowModelConfig
 from midibrave.zrave_flow_exploration import trailing_history_mask
 from midibrave.zrave_flow_model import (
     FlowStatistics,
@@ -49,6 +50,51 @@ def _small_model(
         pitch_conditioning=pitch_conditioning,
     )
     return model, statistics
+
+
+@pytest.mark.parametrize(
+    ("profile", "dimensions", "expected_parameters"),
+    [
+        ("standard", (384, 4, 8, 8, 1536), 33_443_840),
+        ("small", (256, 3, 6, 8, 1024), 11_240_064),
+        ("tiny", (128, 2, 4, 4, 512), 1_927_168),
+    ],
+)
+def test_named_pure_profiles_build_expected_backbones(
+    profile: str,
+    dimensions: tuple[int, int, int, int, int],
+    expected_parameters: int,
+) -> None:
+    statistics = FlowStatistics(
+        mean=torch.zeros(128),
+        latent_std=torch.ones(128),
+        delta_std=torch.ones(128),
+        latent_norm_p01=torch.tensor(0.5),
+        latent_norm_p99=torch.tensor(80.0),
+    )
+    config = FlowModelConfig(
+        latent_dim=128,
+        profile=profile,
+        d_model=dimensions[0],
+        context_layers=dimensions[1],
+        future_layers=dimensions[2],
+        heads=dimensions[3],
+        feedforward_dim=dimensions[4],
+        pitch_conditioning=False,
+    )
+
+    model = ZraveFlowTransformer(config, statistics)
+
+    assert sum(parameter.numel() for parameter in model.parameters()) == (
+        expected_parameters
+    )
+    output = model.forward_pure(
+        torch.randn(1, 64, 128),
+        torch.tensor([0.5]),
+        torch.randn(1, 32, 128),
+        retention_curve(torch.tensor([32]), 64),
+    )
+    assert output.shape == (1, 64, 128)
 
 
 def test_retention_and_temperature_have_approved_endpoints() -> None:
@@ -185,10 +231,7 @@ def test_pure_forward_and_sampling_replay_seed_and_branch() -> None:
     assert first.shape == (1, 64, 16)
     assert torch.equal(first, replay)
     assert not torch.equal(first, branch)
-    assert all(
-        "midi" not in name
-        for name, _parameter in model.named_parameters()
-    )
+    assert all("midi" not in name for name, _parameter in model.named_parameters())
 
 
 def test_pure_sampling_accepts_continuous_exploration_schedule() -> None:
@@ -255,10 +298,7 @@ def test_history_mask_requires_one_visible_frame_per_sample() -> None:
 
 def test_history_mask_support_does_not_change_state_dict_contract() -> None:
     model, statistics = _small_model(pitch_conditioning=False)
-    expected = {
-        name: tuple(value.shape)
-        for name, value in model.state_dict().items()
-    }
+    expected = {name: tuple(value.shape) for name, value in model.state_dict().items()}
     replacement = ZraveFlowTransformer(
         statistics=statistics,
         latent_dim=16,
@@ -276,8 +316,7 @@ def test_history_mask_support_does_not_change_state_dict_contract() -> None:
     replacement.load_state_dict(model.state_dict(), strict=True)
 
     assert {
-        name: tuple(value.shape)
-        for name, value in replacement.state_dict().items()
+        name: tuple(value.shape) for name, value in replacement.state_dict().items()
     } == expected
 
 
@@ -337,10 +376,7 @@ def test_frame_aligned_midi_conditioning_starts_as_pure_backbone() -> None:
     }
     missing, unexpected = conditioned.load_state_dict(shared, strict=False)
     assert not unexpected
-    assert all(
-        name.startswith(("null_memory", "midi_"))
-        for name in missing
-    )
+    assert all(name.startswith(("null_memory", "midi_")) for name in missing)
     conditioned.eval()
     pure.eval()
     history = torch.randn(2, 32, 16)

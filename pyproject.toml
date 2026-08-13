@@ -28,6 +28,10 @@ midibrave-zrave-pitch-train = "midibrave.zrave_pitch_train:main"
 midibrave-zrave-flow-train = "midibrave.zrave_flow_train:main"
 midibrave-zrave-flow-evaluate = "midibrave.zrave_flow_evaluate:main"
 midibrave-zrave-flow-gate = "midibrave.zrave_flow_gate:main"
+midibrave-zrave-clap-monitor = "midibrave.zrave_clap_monitor:main"
+midibrave-zrave-midi-adherence-gate = "midibrave.zrave_midi_adherence_gate:main"
+midibrave-zrave-decoded-audio-midi-gate = "midibrave.zrave_decoded_audio_midi_gate:main"
+midibrave-zrave-timbre-taxonomy = "midibrave.zrave_timbre_taxonomy:main"
 
 [build-system]
 requires = ["hatchling"]

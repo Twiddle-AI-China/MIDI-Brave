@@ -1,0 +1,4 @@
+# Optional report-only queue. Use the dedicated CLAP image, exact authoritative
+# checkpoint, and offline roberta-base cache. Never append this to a train queue.
+# id	action	config	run	spec (existing audition id)
+clap-pad-010000	clap_report	-	-	tinycat-v1-pad-audition-010000

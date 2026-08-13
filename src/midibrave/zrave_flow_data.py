@@ -8,7 +8,7 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 import soundfile as sf
@@ -129,10 +129,7 @@ def _atomic_jsonl(
     temporary = path.with_name(path.name + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         for row in rows:
-            handle.write(
-                json.dumps(row, sort_keys=True, separators=(",", ":"))
-                + "\n"
-            )
+            handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
     temporary.replace(path)
 
 
@@ -171,9 +168,7 @@ def _load_and_validate_codec(
             raise FileNotFoundError(f"missing RAVE checkpoint: {checkpoint}")
         codec_hash = _sha256_file(checkpoint)
         if codec_hash != config.rave.expected_sha256:
-            raise ValueError(
-                f"RAVE checkpoint SHA-256 mismatch: {codec_hash}"
-            )
+            raise ValueError(f"RAVE checkpoint SHA-256 mismatch: {codec_hash}")
         codec = torch.jit.load(str(checkpoint), map_location=device)
     else:
         codec_hash = config.rave.expected_sha256
@@ -227,13 +222,7 @@ def _active_latent_frames(
         if end <= start:
             continue
         rms = float(
-            np.sqrt(
-                np.mean(
-                    np.square(
-                        audio[start:end].astype(np.float64, copy=False)
-                    )
-                )
-            )
+            np.sqrt(np.mean(np.square(audio[start:end].astype(np.float64, copy=False))))
         )
         if math.isfinite(rms) and rms > threshold:
             active = frame
@@ -317,11 +306,7 @@ def _write_part(
     metadata_records: list[dict[str, object]] = []
     for local_index, record in enumerate(records):
         metadata_records.append(
-            {
-                key: value
-                for key, value in record.items()
-                if key != "latent"
-            }
+            {key: value for key, value in record.items() if key != "latent"}
             | {"local_index": local_index}
         )
     _atomic_json(
@@ -331,9 +316,7 @@ def _write_part(
             "rank": rank,
             "part_index": part_index,
             "codec_sha256": codec_hash,
-            "manifest_sha256": _sha256_file(
-                config.data.unified_manifest
-            ),
+            "manifest_sha256": _sha256_file(config.data.unified_manifest),
             "npz_sha256": _sha256_file(npz_path),
             "records": metadata_records,
         },
@@ -354,9 +337,7 @@ def encode_flow_shards(
     source_vocab = [source.name for source in config.data.sources]
     source_codes = {name: index for index, name in enumerate(source_vocab)}
     category_vocab = sorted({str(row["category"]) for row in rows})
-    category_codes = {
-        name: index for index, name in enumerate(category_vocab)
-    }
+    category_codes = {name: index for index, name in enumerate(category_vocab)}
     model, codec_hash = _load_and_validate_codec(
         config,
         device,
@@ -394,20 +375,14 @@ def encode_flow_shards(
                 usable = len(audio) - len(audio) % config.rave.latent_hop
                 if usable < config.rave.latent_hop:
                     raise ValueError("audio is shorter than one latent hop")
-                tensor = (
-                    torch.from_numpy(audio[:usable])
-                    .view(1, 1, -1)
-                    .to(device)
-                )
+                tensor = torch.from_numpy(audio[:usable]).view(1, 1, -1).to(device)
                 encoded = encode_posterior_mean(model, tensor)
                 if (
                     encoded.ndim != 3
                     or encoded.shape[0] != 1
                     or encoded.shape[1] != config.model.latent_dim
                 ):
-                    raise ValueError(
-                        f"invalid encoded shape: {tuple(encoded.shape)}"
-                    )
+                    raise ValueError(f"invalid encoded shape: {tuple(encoded.shape)}")
                 if not torch.isfinite(encoded).all():
                     raise ValueError("encoded latent is non-finite")
                 latent = encoded[0].transpose(0, 1).float().cpu().numpy()
@@ -418,9 +393,7 @@ def encode_flow_shards(
                     encoded_frames=latent.shape[0],
                 )
                 if active_frames < config.model.context_frames + 1:
-                    raise ValueError(
-                        f"only {active_frames} active latent frames"
-                    )
+                    raise ValueError(f"only {active_frames} active latent frames")
                 split = str(row["split"])
                 if split not in _SPLIT_CODES:
                     raise ValueError(f"invalid split: {split}")
@@ -435,17 +408,13 @@ def encode_flow_shards(
                         "source_code": source_codes[source_name],
                         "category": category,
                         "category_code": category_codes[category],
-                        "canonical_preset_id": str(
-                            row["canonical_preset_id"]
-                        ),
+                        "canonical_preset_id": str(row["canonical_preset_id"]),
                         "split": split,
                         "split_code": _SPLIT_CODES[split],
                         "midi_note": int(row["midi_note"]),
                         "velocity": int(row["velocity"]),
                         "articulation_id": str(row["articulation_id"]),
-                        "maximum_future_frames": int(
-                            row["maximum_future_frames"]
-                        ),
+                        "maximum_future_frames": int(row["maximum_future_frames"]),
                         "length": int(latent.shape[0]),
                         "active_frames": active_frames,
                     }
@@ -675,9 +644,7 @@ def _write_seed_bank(
     payload: dict[str, object] = {
         "schema": 1,
         "records": len(selected),
-        "missing_notes": [
-            note for note in range(21, 110) if note not in present_notes
-        ],
+        "missing_notes": [note for note in range(21, 110) if note not in present_notes],
         "entries": [
             {
                 "index": index,
@@ -723,9 +690,7 @@ def finalize_flow_pack(config: ZraveFlowConfig) -> dict[str, object]:
         source_parts: dict[str, dict[str, np.ndarray]] = {}
         for part_path in sorted({str(row["part_npz"]) for row in chunk}):
             with np.load(part_path, allow_pickle=False) as part:
-                source_parts[part_path] = {
-                    key: part[key].copy() for key in part.files
-                }
+                source_parts[part_path] = {key: part[key].copy() for key in part.files}
         maximum_length = max(int(row["length"]) for row in chunk)
         count = len(chunk)
         latents = np.zeros(
@@ -736,9 +701,7 @@ def finalize_flow_pack(config: ZraveFlowConfig) -> dict[str, object]:
             part = source_parts[str(descriptor["part_npz"])]
             local_index = int(descriptor["local_index"])
             length = int(descriptor["length"])
-            sequence = part["latents"][local_index, :length].astype(
-                np.float32
-            )
+            sequence = part["latents"][local_index, :length].astype(np.float32)
             latents[row_index, :length] = sequence.astype(np.float16)
             active = int(descriptor["active_frames"])
             if descriptor["split"] == "train":
@@ -846,15 +809,12 @@ def finalize_flow_pack(config: ZraveFlowConfig) -> dict[str, object]:
         latent_norm_p99=np.asarray(latent_norm_p99, dtype=np.float32),
         source_vocab=np.asarray(source_vocab),
         category_vocab=np.asarray(category_vocab),
-        rave_checkpoint_sha256=np.asarray(
-            config.rave.expected_sha256
-        ),
-        manifest_sha256=np.asarray(
-            _sha256_file(config.data.unified_manifest)
-        ),
+        rave_checkpoint_sha256=np.asarray(config.rave.expected_sha256),
+        manifest_sha256=np.asarray(_sha256_file(config.data.unified_manifest)),
         norm_samples_per_sequence=np.asarray(8, dtype=np.int16),
     )
-    _atomic_jsonl(packed_root / "sequences.jsonl", sequences)
+    sequences_path = packed_root / "sequences.jsonl"
+    _atomic_jsonl(sequences_path, sequences)
     pitch_pairs = _build_pitch_pairs(sequences)
     pitch_pairs_path = packed_root / "pitch-pairs.npy"
     _atomic_npy(pitch_pairs_path, pitch_pairs)
@@ -876,12 +836,9 @@ def finalize_flow_pack(config: ZraveFlowConfig) -> dict[str, object]:
         "config_sha256": _sha256_json(config.as_dict()),
         "statistics_sha256": _sha256_file(statistics_path),
         "pitch_pairs_sha256": _sha256_file(pitch_pairs_path),
-        "seed_bank_npz_sha256": _sha256_file(
-            packed_root / "seed-bank.npz"
-        ),
-        "seed_bank_json_sha256": _sha256_file(
-            packed_root / "seed-bank.json"
-        ),
+        "sequences_sha256": _sha256_file(sequences_path),
+        "seed_bank_npz_sha256": _sha256_file(packed_root / "seed-bank.npz"),
+        "seed_bank_json_sha256": _sha256_file(packed_root / "seed-bank.json"),
         "source_vocab": source_vocab,
         "category_vocab": category_vocab,
         "shard_sha256": shard_hashes,

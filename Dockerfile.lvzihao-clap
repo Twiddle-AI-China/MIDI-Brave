@@ -1,0 +1,54 @@
+ARG BASE_IMAGE=midibrave:lvzihao-cu128-v1
+FROM ${BASE_IMAGE}
+ARG EXPECTED_TORCH_PREFIX=2.9.1
+ARG EXPECTED_TORCHAUDIO_PREFIX=2.9.1
+ARG EXPECTED_TORCHVISION_PREFIX=0.24.1
+
+LABEL org.opencontainers.image.title="MidiBrave lvzihao CLAP monitor" \
+      org.opencontainers.image.description="Optional frozen-CLAP report runtime; never used by training queues"
+
+RUN if python -m pip --version >/dev/null 2>&1; then \
+      install_command="python -m pip install"; \
+    else \
+      command -v uv >/dev/null; \
+      install_command="uv pip install --python $(command -v python)"; \
+    fi && \
+    $install_command \
+      laion-clap==1.1.7 \
+      transformers==5.13.0 \
+      torchlibrosa==0.1.0 \
+      librosa==0.11.0 \
+      ftfy==6.3.1 \
+      braceexpand==0.1.7 \
+      webdataset==1.0.2 \
+      wget==3.2 \
+      progressbar==2.5 \
+      resampy==0.4.3
+
+RUN python - <<PY
+import importlib.metadata
+import torch
+import torchaudio
+import torchvision
+
+expected = {
+    "laion-clap": "1.1.7",
+    "transformers": "5.13.0",
+    "torchlibrosa": "0.1.0",
+    "librosa": "0.11.0",
+    "ftfy": "6.3.1",
+}
+observed = {name: importlib.metadata.version(name) for name in expected}
+assert observed == expected, (observed, expected)
+assert torch.__version__.startswith("${EXPECTED_TORCH_PREFIX}"), torch.__version__
+assert torchaudio.__version__.startswith("${EXPECTED_TORCHAUDIO_PREFIX}"), (
+    torchaudio.__version__
+)
+assert torchvision.__version__.startswith("${EXPECTED_TORCHVISION_PREFIX}"), (
+    torchvision.__version__
+)
+assert torch.version.cuda == "12.8", torch.version.cuda
+PY
+
+ENTRYPOINT []
+CMD ["/bin/bash"]

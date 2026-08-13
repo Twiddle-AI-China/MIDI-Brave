@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from .zrave_flow_config import ZraveFlowConfig
+from .zrave_flow_config import ZraveFlowConfig, load_preset_allowlist
 
 
 @dataclass(frozen=True)
@@ -96,10 +96,7 @@ def build_different_note_pair_graph(
     for index, row in enumerate(rows):
         missing = required - set(row)
         if missing:
-            raise ValueError(
-                "pitch pair row is missing: "
-                + ", ".join(sorted(missing))
-            )
+            raise ValueError("pitch pair row is missing: " + ", ".join(sorted(missing)))
         key = (
             str(row["source_name"]),
             str(row["split"]),
@@ -107,18 +104,12 @@ def build_different_note_pair_graph(
             int(row["velocity"]),
             str(row["articulation_id"]),
         )
-        buckets[key].append(
-            (index, int(row["midi_note"]), str(row["sample_id"]))
-        )
+        buckets[key].append((index, int(row["midi_note"]), str(row["sample_id"])))
 
     result = torch.full((len(rows),), -1, dtype=torch.long)
     for members in buckets.values():
         for index, note, _sample_id in members:
-            candidates = [
-                candidate
-                for candidate in members
-                if candidate[1] != note
-            ]
+            candidates = [candidate for candidate in members if candidate[1] != note]
             if candidates:
                 partner, _partner_note, _partner_id = min(
                     candidates,
@@ -131,6 +122,152 @@ def build_different_note_pair_graph(
                 )
                 result[index] = partner
     return result
+
+
+def _load_sequence_rows(path: Path, records: int) -> list[dict[str, Any]]:
+    if not path.is_file():
+        raise ValueError(f"pack sequence metadata is missing: {path}")
+    rows: list[dict[str, Any]] = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"invalid pack sequence metadata at line {line_number}"
+            ) from error
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"pack sequence metadata line {line_number} must be an object"
+            )
+        rows.append(value)
+    if len(rows) != records:
+        raise ValueError("pack sequence metadata length does not match shards")
+    return rows
+
+
+def _validated_preset_ids(
+    rows: list[dict[str, Any]],
+    combined: dict[str, np.ndarray],
+    source_vocab: tuple[str, ...],
+    category_vocab: tuple[str, ...],
+) -> np.ndarray:
+    """Validate sequence/shard alignment and preset-level split isolation."""
+
+    split_codes = {"train": 0, "validation": 1, "test": 2}
+    preset_splits: dict[tuple[str, str], str] = {}
+    preset_ids: list[str] = []
+    for index, row in enumerate(rows):
+        required = {
+            "packed_index",
+            "source_name",
+            "source_code",
+            "category",
+            "category_code",
+            "canonical_preset_id",
+            "split",
+            "split_code",
+            "midi_note",
+            "velocity",
+            "maximum_future_frames",
+            "length",
+            "active_frames",
+        }
+        missing = required - set(row)
+        if missing:
+            raise ValueError(
+                "pack sequence metadata is missing at record "
+                f"{index}: {', '.join(sorted(missing))}"
+            )
+        try:
+            packed_index = int(row["packed_index"])
+            source_code = int(row["source_code"])
+            category_code = int(row["category_code"])
+            row_split_code = int(row["split_code"])
+            midi_note = int(row["midi_note"])
+            velocity = int(row["velocity"])
+            maximum_future = int(row["maximum_future_frames"])
+            length = int(row["length"])
+            active_frames = int(row["active_frames"])
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"invalid pack sequence codes at record {index}"
+            ) from error
+        source_name = str(row["source_name"])
+        category = str(row["category"])
+        split = str(row["split"])
+        preset_id = str(row["canonical_preset_id"]).strip()
+        if not preset_id:
+            raise ValueError(f"empty canonical preset ID at packed record {index}")
+        if packed_index != index:
+            raise ValueError(f"pack sequence index mismatch at record {index}")
+        if not 0 <= source_code < len(source_vocab) or (
+            source_name != source_vocab[source_code]
+        ):
+            raise ValueError(f"pack sequence source mismatch at record {index}")
+        if source_code != int(combined["source_codes"][index]):
+            raise ValueError(f"pack sequence/shard source mismatch at record {index}")
+        if not 0 <= category_code < len(category_vocab) or (
+            category != category_vocab[category_code]
+        ):
+            raise ValueError(f"pack sequence category mismatch at record {index}")
+        if category_code != int(combined["category_codes"][index]):
+            raise ValueError(f"pack sequence/shard category mismatch at record {index}")
+        if split not in split_codes or row_split_code != split_codes[split]:
+            raise ValueError(f"pack sequence split code mismatch at record {index}")
+        if row_split_code != int(combined["split_codes"][index]):
+            raise ValueError(f"pack sequence/shard split mismatch at record {index}")
+        aligned_metadata = {
+            "note": (midi_note, int(combined["notes"][index])),
+            "velocity": (velocity, int(combined["velocities"][index])),
+            "maximum future": (
+                maximum_future,
+                int(combined["maximum_future_frames"][index]),
+            ),
+            "length": (length, int(combined["lengths"][index])),
+            "active frames": (
+                active_frames,
+                int(combined["active_frames"][index]),
+            ),
+        }
+        for name, (observed, expected) in aligned_metadata.items():
+            if observed != expected:
+                raise ValueError(
+                    f"pack sequence/shard {name} mismatch at record {index}"
+                )
+        key = (source_name, preset_id)
+        previous_split = preset_splits.setdefault(key, split)
+        if previous_split != split:
+            raise ValueError(
+                "canonical preset split mismatch: "
+                f"{source_name}/{preset_id} occurs in both "
+                f"{previous_split} and {split}"
+            )
+        preset_ids.append(preset_id)
+    return np.asarray(preset_ids, dtype=object)
+
+
+def _compact_pitch_pairs(
+    pitch_pairs: Tensor,
+    keep_indices: np.ndarray,
+    records: int,
+) -> Tensor:
+    pairs = pitch_pairs.to("cpu", dtype=torch.long).numpy()
+    if pairs.ndim != 1 or len(pairs) != records:
+        raise ValueError("pitch pair metadata length mismatch")
+    valid = pairs >= 0
+    if np.any(pairs[valid] >= records):
+        raise ValueError("pitch pair index is out of range")
+    old_to_new = np.full(records, -1, dtype=np.int64)
+    old_to_new[keep_indices] = np.arange(len(keep_indices))
+    selected = pairs[keep_indices].copy()
+    selected_valid = selected >= 0
+    selected[selected_valid] = old_to_new[selected[selected_valid]]
+    return torch.from_numpy(selected)
 
 
 class GpuFlowSampler:
@@ -197,8 +334,7 @@ class GpuFlowSampler:
             or any(value not in {2, 4, 8} for value in segment_divisions)
         ):
             raise ValueError(
-                "segment_divisions must be an ordered, unique subset "
-                "of 2, 4, 8"
+                "segment_divisions must be an ordered, unique subset of 2, 4, 8"
             )
         if segment_include_first:
             raise ValueError(
@@ -270,22 +406,14 @@ class GpuFlowSampler:
         if index["rave_checkpoint_sha256"] != config.rave.expected_sha256:
             raise ValueError("pack codec hash does not match config")
         source_vocab = tuple(str(value) for value in index["source_vocab"])
-        configured_sources = tuple(
-            source.name for source in config.data.sources
-        )
+        configured_sources = tuple(source.name for source in config.data.sources)
         if source_vocab != configured_sources:
-            raise ValueError(
-                "pack source vocabulary does not match configured sources"
-            )
-        category_vocab = tuple(
-            str(value) for value in index["category_vocab"]
-        )
+            raise ValueError("pack source vocabulary does not match configured sources")
+        category_vocab = tuple(str(value) for value in index["category_vocab"])
         category_codes_by_name = {
             name: code for code, name in enumerate(category_vocab)
         }
-        shard_paths = [
-            root / name for name in sorted(index["shard_sha256"])
-        ]
+        shard_paths = [root / name for name in sorted(index["shard_sha256"])]
         loaded: list[dict[str, np.ndarray]] = []
         maximum_length = 0
         for path in shard_paths:
@@ -313,9 +441,7 @@ class GpuFlowSampler:
             "category_codes",
             "maximum_future_frames",
         )
-        combined: dict[str, list[np.ndarray]] = {
-            name: [] for name in names
-        }
+        combined: dict[str, list[np.ndarray]] = {name: [] for name in names}
         offset = 0
         for values in loaded:
             count, frames, _channels = values["latents"].shape
@@ -323,52 +449,107 @@ class GpuFlowSampler:
             for name in names:
                 combined[name].append(values[name])
             offset += count
+        combined_arrays = {
+            name: np.concatenate(parts) for name, parts in combined.items()
+        }
         pitch_path = root / "pitch-pairs.npy"
         if _sha256_file(pitch_path) != index["pitch_pairs_sha256"]:
             raise ValueError("pitch-pairs hash mismatch")
-        pitch_pairs = torch.from_numpy(
-            np.load(pitch_path, allow_pickle=False)
-        )
+        pitch_pairs = torch.from_numpy(np.load(pitch_path, allow_pickle=False))
+        if pitch_pairs.ndim != 1 or pitch_pairs.numel() != records:
+            raise ValueError("pitch pair metadata length mismatch")
         sequence_path = root / "sequences.jsonl"
-        if sequence_path.exists() and not bool(torch.any(pitch_pairs >= 0)):
-            rows = [
-                json.loads(line)
-                for line in sequence_path.read_text(
-                    encoding="utf-8"
-                ).splitlines()
-                if line.strip()
-            ]
-            if len(rows) != records:
-                raise ValueError(
-                    "pack sequence metadata length does not match shards"
-                )
-            pitch_pairs = build_different_note_pair_graph(rows)
-        combined_arrays = {
-            name: np.concatenate(parts)
-            for name, parts in combined.items()
-        }
+        has_allowlists = any(
+            source.preset_allowlist is not None for source in config.data.sources
+        )
+        has_record_filters = has_allowlists or any(
+            source.allowed_categories for source in config.data.sources
+        )
+        rebuild_pitch_pairs = not bool(torch.any(pitch_pairs >= 0))
+        sequence_rows: list[dict[str, Any]] | None = None
+        preset_ids: np.ndarray | None = None
+        if has_allowlists or (rebuild_pitch_pairs and sequence_path.exists()):
+            sequence_rows = _load_sequence_rows(sequence_path, records)
+        if sequence_rows is not None:
+            assert sequence_rows is not None
+            preset_ids = _validated_preset_ids(
+                sequence_rows,
+                combined_arrays,
+                source_vocab,
+                category_vocab,
+            )
         record_eligible = np.ones(records, dtype=np.bool_)
         for source_code, source in enumerate(config.data.sources):
-            if not source.allowed_categories:
-                continue
-            unknown = set(source.allowed_categories) - set(category_vocab)
-            if unknown:
-                raise ValueError(
-                    "configured categories are absent from pack: "
-                    + ", ".join(sorted(unknown))
-                )
-            allowed_codes = np.asarray(
-                [
-                    category_codes_by_name[name]
-                    for name in source.allowed_categories
-                ],
-                dtype=combined_arrays["category_codes"].dtype,
-            )
             source_rows = combined_arrays["source_codes"] == source_code
-            record_eligible[source_rows] = np.isin(
-                combined_arrays["category_codes"][source_rows],
-                allowed_codes,
+            if source.allowed_categories:
+                unknown = set(source.allowed_categories) - set(category_vocab)
+                if unknown:
+                    raise ValueError(
+                        "configured categories are absent from pack: "
+                        + ", ".join(sorted(unknown))
+                    )
+                allowed_codes = np.asarray(
+                    [
+                        category_codes_by_name[name]
+                        for name in source.allowed_categories
+                    ],
+                    dtype=combined_arrays["category_codes"].dtype,
+                )
+                record_eligible[source_rows] &= np.isin(
+                    combined_arrays["category_codes"][source_rows],
+                    allowed_codes,
+                )
+            if source.preset_allowlist is None:
+                continue
+            assert preset_ids is not None
+            allowed_preset_ids = set(load_preset_allowlist(source.preset_allowlist))
+            available_preset_ids = set(preset_ids[source_rows].tolist())
+            missing_preset_ids = allowed_preset_ids - available_preset_ids
+            if missing_preset_ids:
+                preview = ", ".join(sorted(missing_preset_ids)[:8])
+                suffix = " ..." if len(missing_preset_ids) > 8 else ""
+                raise ValueError(
+                    f"source {source.name} preset allowlist IDs are "
+                    f"absent from pack: {preview}{suffix}"
+                )
+            record_eligible[source_rows] &= np.isin(
+                preset_ids[source_rows],
+                np.asarray(sorted(allowed_preset_ids), dtype=object),
             )
+            selected_split_rows = (
+                source_rows
+                & record_eligible
+                & (combined_arrays["split_codes"] == split_codes[split])
+            )
+            if not bool(np.any(selected_split_rows)):
+                raise ValueError(
+                    f"source {source.name} preset allowlist has no "
+                    f"eligible {split} records after category filtering"
+                )
+        if has_record_filters:
+            keep_indices = np.flatnonzero(record_eligible)
+            if keep_indices.size == 0:
+                raise ValueError(
+                    "configured record filters leave no eligible packed records"
+                )
+            latents = latents[keep_indices]
+            combined_arrays = {
+                name: values[keep_indices] for name, values in combined_arrays.items()
+            }
+            if rebuild_pitch_pairs:
+                assert sequence_rows is not None
+                filtered_rows = [sequence_rows[int(index)] for index in keep_indices]
+                pitch_pairs = build_different_note_pair_graph(filtered_rows)
+            else:
+                pitch_pairs = _compact_pitch_pairs(
+                    pitch_pairs,
+                    keep_indices,
+                    records,
+                )
+            records = len(keep_indices)
+            record_eligible = np.ones(records, dtype=np.bool_)
+        elif rebuild_pitch_pairs and sequence_rows is not None:
+            pitch_pairs = build_different_note_pair_graph(sequence_rows)
         return cls(
             latents=torch.from_numpy(latents),
             **{
@@ -377,15 +558,11 @@ class GpuFlowSampler:
             },
             pitch_pairs=pitch_pairs,
             record_eligible=torch.from_numpy(record_eligible),
-            source_weights=tuple(
-                source.weight for source in config.data.sources
-            ),
+            source_weights=tuple(source.weight for source in config.data.sources),
             context_frames=config.model.context_frames,
             future_frames=config.model.future_frames,
             wander_delays=config.model.wander_delay_frames,
-            pitch_transition_fraction=(
-                config.train.pitch_transition_fraction
-            ),
+            pitch_transition_fraction=(config.train.pitch_transition_fraction),
             seed=seed,
             device=device,
             allowed_split_code=split_codes[split],
@@ -411,9 +588,7 @@ class GpuFlowSampler:
             raise ValueError("invalid sampler state")
         self.generator.set_state(state["generator_state"].cpu())
         credit = state.get("transition_credit")
-        self.transition_credit = (
-            0.0 if credit is None else float(credit.item())
-        )
+        self.transition_credit = 0.0 if credit is None else float(credit.item())
         if not 0.0 <= self.transition_credit < 1.0:
             raise ValueError("invalid sampler transition credit")
 
@@ -426,9 +601,7 @@ class GpuFlowSampler:
         if self.allowed_split_code is not None:
             mask &= self.split_codes == self.allowed_split_code
         if require_full_future:
-            mask &= self.active_frames >= (
-                self.context_frames + self.future_frames
-            )
+            mask &= self.active_frames >= (self.context_frames + self.future_frames)
             mask &= self.maximum_future_frames >= self.future_frames
         else:
             mask &= self.active_frames >= self.context_frames + 1
@@ -587,14 +760,10 @@ class GpuFlowSampler:
             )
             for division, segment_index in self._segment_tasks()
         ]
-        task_pools = [
-            item for item in task_pools if item[2].numel()
-        ]
+        task_pools = [item for item in task_pools if item[2].numel()]
         if not task_pools:
             kind = "transition " if transition else ""
-            raise ValueError(
-                f"requested {kind}segment bucket has no eligible rows"
-            )
+            raise ValueError(f"requested {kind}segment bucket has no eligible rows")
         task_counts = _largest_remainder(
             count,
             tuple(1.0 for _ in task_pools),
@@ -606,12 +775,8 @@ class GpuFlowSampler:
         for (division, segment_index, pool), task_count in counted_tasks:
             if not task_count:
                 continue
-            selected.append(
-                self._draw_balanced_pool(source, pool, task_count)
-            )
-            divisions.append(
-                torch.full((task_count,), division, dtype=torch.long)
-            )
+            selected.append(self._draw_balanced_pool(source, pool, task_count))
+            divisions.append(torch.full((task_count,), division, dtype=torch.long))
             indices.append(
                 torch.full(
                     (task_count,),
@@ -661,9 +826,7 @@ class GpuFlowSampler:
                 dtype=torch.long,
             )
             if eligible_slots.numel() < transition_count:
-                raise ValueError(
-                    "balanced segment tasks lack pitch-transition slots"
-                )
+                raise ValueError("balanced segment tasks lack pitch-transition slots")
             chosen = eligible_slots[
                 torch.randperm(
                     eligible_slots.numel(),
@@ -692,9 +855,7 @@ class GpuFlowSampler:
             rows = torch.stack(
                 [
                     self._draw(
-                        pool[
-                            self.category_codes[pool] == category
-                        ],
+                        pool[self.category_codes[pool] == category],
                         1,
                     )[0]
                     for pool, category in zip(
@@ -735,9 +896,7 @@ class GpuFlowSampler:
             for pool in pools
         ]
         base, remainder = divmod(len(pools), len(categories))
-        extra_choices = list(
-            itertools.combinations(range(len(categories)), remainder)
-        )
+        extra_choices = list(itertools.combinations(range(len(categories)), remainder))
         choice_order = torch.randperm(
             len(extra_choices),
             generator=self.generator,
@@ -798,10 +957,7 @@ class GpuFlowSampler:
         pool = self._eligible(source, require_full_future)
         if source == 0 and count:
             category_values = sorted(
-                {
-                    int(value)
-                    for value in self.category_codes[pool].tolist()
-                }
+                {int(value) for value in self.category_codes[pool].tolist()}
             )
             category_counts = _largest_remainder(
                 count,
@@ -822,9 +978,7 @@ class GpuFlowSampler:
             )
             return selected, torch.zeros(count, dtype=torch.bool)
         if transition_count:
-            transition_pool = pool[
-                self.pitch_pairs[pool] >= 0
-            ]
+            transition_pool = pool[self.pitch_pairs[pool] >= 0]
             partner = self.pitch_pairs[transition_pool]
             transition_pool = transition_pool[
                 self.active_frames[partner] >= self.context_frames
@@ -888,8 +1042,7 @@ class GpuFlowSampler:
             transition_total = 0
         else:
             expected_transitions = (
-                self.transition_credit
-                + batch_size * self.pitch_transition_fraction
+                self.transition_credit + batch_size * self.pitch_transition_fraction
             )
             transition_total = math.floor(expected_transitions + 1.0e-12)
             self.transition_credit = expected_transitions - transition_total
@@ -914,28 +1067,20 @@ class GpuFlowSampler:
                 for source, (count, eligible) in enumerate(
                     zip(source_counts, eligible_by_source, strict=True)
                 )
-                if count
-                and torch.any(self.pitch_pairs[eligible] >= 0)
+                if count and torch.any(self.pitch_pairs[eligible] >= 0)
             ]
         transition_capacity = sum(
             source_counts[source] for source in transition_sources
         )
         if transition_total > transition_capacity:
-            raise ValueError(
-                "not enough pitch-paired source slots for transitions"
-            )
+            raise ValueError("not enough pitch-paired source slots for transitions")
         transition_by_source: dict[int, int] = {}
         if transition_total:
             allocated = _largest_remainder(
                 transition_total,
-                tuple(
-                    float(source_counts[source])
-                    for source in transition_sources
-                ),
+                tuple(float(source_counts[source]) for source in transition_sources),
             )
-            transition_by_source = dict(
-                zip(transition_sources, allocated, strict=True)
-            )
+            transition_by_source = dict(zip(transition_sources, allocated, strict=True))
 
         selected_parts: list[Tensor] = []
         transition_parts: list[Tensor] = []
@@ -966,14 +1111,10 @@ class GpuFlowSampler:
         selected = torch.cat(selected_parts)
         transitions = torch.cat(transition_parts)
         segment_division = (
-            torch.cat(division_parts)
-            if self.segment_sampling_enabled
-            else None
+            torch.cat(division_parts) if self.segment_sampling_enabled else None
         )
         segment_index = (
-            torch.cat(segment_index_parts)
-            if self.segment_sampling_enabled
-            else None
+            torch.cat(segment_index_parts) if self.segment_sampling_enabled else None
         )
         permutation = torch.randperm(
             batch_size,
@@ -1051,9 +1192,7 @@ class GpuFlowSampler:
             device=self.device,
         )
         history_indices = selected.clone()
-        history_indices[transitions] = self.pitch_pairs[
-            selected[transitions]
-        ]
+        history_indices[transitions] = self.pitch_pairs[selected[transitions]]
         for batch_index in range(batch_size):
             target = int(selected[batch_index])
             history_index = int(history_indices[batch_index])
@@ -1071,18 +1210,12 @@ class GpuFlowSampler:
                 if not 1 <= valid_future <= self.future_frames:
                     raise ValueError("sampled segment does not fit future")
                 if valid_future > maximum_valid_future:
-                    raise ValueError(
-                        "sampled segment exceeds maximum_valid_future"
-                    )
+                    raise ValueError("sampled segment exceeds maximum_valid_future")
                 if require_full_future and valid_future != self.future_frames:
-                    raise ValueError(
-                        "full-future sampler selected a short segment"
-                    )
+                    raise ValueError("full-future sampler selected a short segment")
                 history_frames = min(self.context_frames, target_start)
                 if history_frames <= 0:
-                    raise ValueError(
-                        "causal segment has no preceding history"
-                    )
+                    raise ValueError("causal segment has no preceding history")
                 history_start = target_start - history_frames
                 history[batch_index, -history_frames:] = self.latents[
                     history_index,
@@ -1092,9 +1225,9 @@ class GpuFlowSampler:
                 history_midi_sequence[batch_index, -history_frames:] = int(
                     self.notes[history_index]
                 )
-                history_velocity_sequence[
-                    batch_index, -history_frames:
-                ] = int(self.velocities[history_index])
+                history_velocity_sequence[batch_index, -history_frames:] = int(
+                    self.velocities[history_index]
+                )
                 if bool(transitions[batch_index]):
                     event = int(
                         torch.randint(
@@ -1115,27 +1248,27 @@ class GpuFlowSampler:
                     future_midi_sequence[batch_index, :event] = int(
                         self.notes[history_index]
                     )
-                    future_midi_sequence[
-                        batch_index, event:valid_future
-                    ] = int(self.notes[target])
+                    future_midi_sequence[batch_index, event:valid_future] = int(
+                        self.notes[target]
+                    )
                     future_velocity_sequence[batch_index, :event] = int(
                         self.velocities[history_index]
                     )
-                    future_velocity_sequence[
-                        batch_index, event:valid_future
-                    ] = int(self.velocities[target])
+                    future_velocity_sequence[batch_index, event:valid_future] = int(
+                        self.velocities[target]
+                    )
                     midi_event_frame[batch_index] = event
                 else:
                     future[batch_index, :valid_future] = self.latents[
                         target,
                         target_start:target_end,
                     ].float()
-                    future_midi_sequence[
-                        batch_index, :valid_future
-                    ] = int(self.notes[target])
-                    future_velocity_sequence[
-                        batch_index, :valid_future
-                    ] = int(self.velocities[target])
+                    future_midi_sequence[batch_index, :valid_future] = int(
+                        self.notes[target]
+                    )
+                    future_velocity_sequence[batch_index, :valid_future] = int(
+                        self.velocities[target]
+                    )
                 future_mask[batch_index, :valid_future] = True
                 absolute_start[batch_index] = target_start
                 continue
@@ -1149,11 +1282,8 @@ class GpuFlowSampler:
             if valid_future <= 0:
                 raise ValueError("sampled row has no valid future")
             maximum_start = min(
-                int(self.active_frames[target])
-                - self.context_frames
-                - valid_future,
-                int(self.active_frames[history_index])
-                - self.context_frames,
+                int(self.active_frames[target]) - self.context_frames - valid_future,
+                int(self.active_frames[history_index]) - self.context_frames,
             )
             if maximum_start < 0:
                 raise ValueError("pitch partner has insufficient active frames")
@@ -1168,22 +1298,15 @@ class GpuFlowSampler:
                 history_index,
                 start : start + self.context_frames,
             ].float()
-            history_midi_sequence[batch_index] = int(
-                self.notes[history_index]
-            )
-            history_velocity_sequence[batch_index] = int(
-                self.velocities[history_index]
-            )
+            history_midi_sequence[batch_index] = int(self.notes[history_index])
+            history_velocity_sequence[batch_index] = int(self.velocities[history_index])
             future[batch_index, :valid_future] = self.latents[
                 target,
-                start
-                + self.context_frames : start
+                start + self.context_frames : start
                 + self.context_frames
                 + valid_future,
             ].float()
-            future_midi_sequence[batch_index, :valid_future] = int(
-                self.notes[target]
-            )
+            future_midi_sequence[batch_index, :valid_future] = int(self.notes[target])
             future_velocity_sequence[batch_index, :valid_future] = int(
                 self.velocities[target]
             )
@@ -1208,9 +1331,7 @@ class GpuFlowSampler:
             history_midi_note=self.notes[history_indices].to(self.device),
             pitch_transition_mask=transitions.to(self.device),
             velocity=self.velocities[selected].to(self.device),
-            history_velocity=self.velocities[history_indices].to(
-                self.device
-            ),
+            history_velocity=self.velocities[history_indices].to(self.device),
             history_mask=history_mask,
             segment_division=(
                 segment_division.to(self.device)
@@ -1218,9 +1339,7 @@ class GpuFlowSampler:
                 else None
             ),
             segment_index=(
-                segment_index.to(self.device)
-                if segment_index is not None
-                else None
+                segment_index.to(self.device) if segment_index is not None else None
             ),
             absolute_start=absolute_start,
             history_midi_sequence=history_midi_sequence,

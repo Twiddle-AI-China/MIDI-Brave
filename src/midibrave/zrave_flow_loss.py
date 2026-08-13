@@ -33,17 +33,13 @@ def _validate_future(
     statistics: FlowStatistics,
 ) -> Tensor:
     if future.ndim != 3:
-        raise ValueError(
-            "future must have shape [batch, frames, latent_dim]"
-        )
+        raise ValueError("future must have shape [batch, frames, latent_dim]")
     batch, frames, latent_dim = future.shape
     if frames != 64:
         raise ValueError("future must contain 64 frames")
     statistics.validate(latent_dim)
     if future_mask.shape != (batch, frames):
-        raise ValueError(
-            f"future_mask must have shape ({batch}, {frames})"
-        )
+        raise ValueError(f"future_mask must have shape ({batch}, {frames})")
     if not torch.isfinite(future).all():
         raise ValueError("future contains non-finite values")
     mask = future_mask.to(device=future.device, dtype=torch.bool)
@@ -92,9 +88,7 @@ def make_flow_training_pair(
         or torch.any(delays < 16)
         or torch.any(delays > 48)
     ):
-        raise ValueError(
-            "wander_delay_frames must be finite and in [16, 48]"
-        )
+        raise ValueError("wander_delay_frames must be finite and in [16, 48]")
     temperatures = _batch_vector(
         temperature,
         batch=batch,
@@ -102,9 +96,7 @@ def make_flow_training_pair(
         dtype=torch.float32,
         name="temperature",
     )
-    if not torch.isfinite(temperatures).all() or torch.any(
-        temperatures < 0
-    ):
+    if not torch.isfinite(temperatures).all() or torch.any(temperatures < 0):
         raise ValueError("temperature must be finite and non-negative")
     mean = statistics.mean.to(device=device, dtype=torch.float32)
     latent_std = statistics.latent_std.to(
@@ -134,10 +126,7 @@ def make_flow_training_pair(
         generator=generator,
     )
     interpolation = flow_time[:, None, None]
-    noisy_future = (
-        (1.0 - interpolation) * noise
-        + interpolation * normalized_future
-    )
+    noisy_future = (1.0 - interpolation) * noise + interpolation * normalized_future
     target_velocity = normalized_future - noise
     invalid = ~mask.unsqueeze(-1)
     return FlowTrainingPair(
@@ -162,10 +151,9 @@ def _masked_mean(values: Tensor, mask: Tensor) -> Tensor:
     valid = counts > 0
     if not torch.any(valid):
         return values.sum() * 0.0
-    per_sample = (
-        (flattened_values * flattened_mask.to(values.dtype)).sum(dim=1)
-        / counts.clamp_min(1).to(values.dtype)
-    )
+    per_sample = (flattened_values * flattened_mask.to(values.dtype)).sum(
+        dim=1
+    ) / counts.clamp_min(1).to(values.dtype)
     return per_sample.masked_select(valid).mean()
 
 
@@ -186,9 +174,7 @@ def _masked_channel_std(values: Tensor, mask: Tensor) -> Tensor:
     weights = mask.to(dtype=values.dtype).unsqueeze(-1)
     count = weights.sum().clamp_min(1.0)
     mean = (values * weights).sum(dim=(0, 1)) / count
-    variance = (
-        (values - mean).square() * weights
-    ).sum(dim=(0, 1)) / count
+    variance = ((values - mean).square() * weights).sum(dim=(0, 1)) / count
     return variance.clamp_min(0.0).sqrt()
 
 
@@ -210,9 +196,9 @@ def _per_sample_motion(
     if stride <= 0 or stride >= values.shape[1]:
         raise ValueError("motion stride is outside the sequence")
     pair_mask = mask[:, stride:] & mask[:, :-stride]
-    delta = (
-        values[:, stride:] - values[:, :-stride]
-    ) / scale.to(device=values.device, dtype=values.dtype).view(
+    delta = (values[:, stride:] - values[:, :-stride]) / scale.to(
+        device=values.device, dtype=values.dtype
+    ).view(
         1,
         1,
         -1,
@@ -220,10 +206,7 @@ def _per_sample_motion(
     weights = pair_mask.to(dtype=delta.dtype).unsqueeze(-1)
     count = weights.sum(dim=(1, 2)).clamp_min(1.0)
     count = count * values.shape[-1]
-    return (
-        (delta.square() * weights).sum(dim=(1, 2)) / count
-        + 1.0e-8
-    ).sqrt()
+    return ((delta.square() * weights).sum(dim=(1, 2)) / count + 1.0e-8).sqrt()
 
 
 def _temporal_motion_loss(
@@ -233,9 +216,7 @@ def _temporal_motion_loss(
     delta_std: Tensor,
 ) -> Tensor:
     if prediction.shape != target.shape or prediction.ndim != 3:
-        raise ValueError(
-            "temporal prediction and target must share rank-three shape"
-        )
+        raise ValueError("temporal prediction and target must share rank-three shape")
     if mask.shape != prediction.shape[:2]:
         raise ValueError("temporal mask shape does not match values")
     if delta_std.shape != (prediction.shape[-1],):
@@ -281,28 +262,36 @@ def _pitch_windows(
     elif midi_note.shape == clean_estimate.shape[:2]:
         note_sequence = midi_note
     else:
-        raise ValueError(
-            "midi_note must be [batch] or [batch, future_frames]"
-        )
+        raise ValueError("midi_note must be [batch] or [batch, future_frames]")
     for sample in range(clean_estimate.shape[0]):
         valid_frames = int(future_mask[sample].sum().item())
         if valid_frames <= 0:
             continue
-        complete = 0
-        for start in range(0, valid_frames - 15, 16):
-            windows.append(clean_estimate[sample : sample + 1, start : start + 16])
-            notes.append(note_sequence[sample : sample + 1, start + 7])
-            complete += 1
-        if complete == 0:
-            partial = clean_estimate[sample, :valid_frames]
-            padding = partial[-1:].expand(16 - valid_frames, -1)
-            windows.append(torch.cat((partial, padding), dim=0).unsqueeze(0))
-            notes.append(
-                note_sequence[
-                    sample : sample + 1,
-                    min(valid_frames // 2, valid_frames - 1),
-                ]
-            )
+        sample_notes = note_sequence[sample, :valid_frames]
+        run_start = 0
+        while run_start < valid_frames:
+            run_note = sample_notes[run_start]
+            run_end = run_start + 1
+            while run_end < valid_frames and bool(sample_notes[run_end] == run_note):
+                run_end += 1
+            run_length = run_end - run_start
+            complete_starts = range(run_start, run_end - 15, 16)
+            emitted = False
+            for start in complete_starts:
+                windows.append(
+                    clean_estimate[
+                        sample : sample + 1,
+                        start : start + 16,
+                    ]
+                )
+                notes.append(run_note.reshape(1))
+                emitted = True
+            if not emitted:
+                partial = clean_estimate[sample, run_start:run_end]
+                padding = partial[-1:].expand(16 - run_length, -1)
+                windows.append(torch.cat((partial, padding), dim=0).unsqueeze(0))
+                notes.append(run_note.reshape(1))
+            run_start = run_end
     if not windows:
         return None, None
     return torch.cat(windows, dim=0), torch.cat(notes, dim=0)
@@ -401,24 +390,17 @@ def zrave_flow_loss(
     ):
         value = getattr(pair, name)
         if value.shape != expected_shape:
-            raise ValueError(
-                f"pair.{name} must have shape {expected_shape}"
-            )
+            raise ValueError(f"pair.{name} must have shape {expected_shape}")
     if predicted_velocity.shape != expected_shape:
-        raise ValueError(
-            f"predicted_velocity must have shape {expected_shape}"
-        )
+        raise ValueError(f"predicted_velocity must have shape {expected_shape}")
     batch, _frames, latent_dim = expected_shape
     if pair.flow_time.shape != (batch,):
         raise ValueError(f"pair.flow_time must have shape ({batch},)")
     if history.shape != (batch, 32, latent_dim):
-        raise ValueError(
-            f"history must have shape ({batch}, 32, {latent_dim})"
-        )
+        raise ValueError(f"history must have shape ({batch}, 32, {latent_dim})")
     if midi_note.shape not in {(batch,), (batch, expected_shape[1])}:
         raise ValueError(
-            "midi_note must have shape "
-            f"({batch},) or ({batch}, {expected_shape[1]})"
+            f"midi_note must have shape ({batch},) or ({batch}, {expected_shape[1]})"
         )
     if not math.isfinite(pitch_weight) or pitch_weight < 0:
         raise ValueError("pitch_weight must be finite and non-negative")
@@ -429,9 +411,10 @@ def zrave_flow_loss(
         (predicted_velocity.float() - pair.target_velocity).square(),
         mask,
     )
-    clean_normalized = pair.noisy_future + (
-        1.0 - pair.flow_time[:, None, None]
-    ) * predicted_velocity.float()
+    clean_normalized = (
+        pair.noisy_future
+        + (1.0 - pair.flow_time[:, None, None]) * predicted_velocity.float()
+    )
     mean = statistics.mean.to(
         device=predicted_velocity.device,
         dtype=torch.float32,
@@ -470,12 +453,7 @@ def zrave_flow_loss(
         mask,
         statistics,
     )
-    total = (
-        flow
-        + pitch_weight * pitch
-        + 0.10 * boundary
-        + 0.02 * statistics_loss
-    )
+    total = flow + pitch_weight * pitch + 0.10 * boundary + 0.02 * statistics_loss
     return FlowLossReport(
         total=total,
         components={
@@ -509,34 +487,27 @@ def zrave_pure_flow_loss(
     ):
         value = getattr(pair, name)
         if value.shape != expected_shape:
-            raise ValueError(
-                f"pair.{name} must have shape {expected_shape}"
-            )
+            raise ValueError(f"pair.{name} must have shape {expected_shape}")
     if predicted_velocity.shape != expected_shape:
-        raise ValueError(
-            f"predicted_velocity must have shape {expected_shape}"
-        )
+        raise ValueError(f"predicted_velocity must have shape {expected_shape}")
     batch, _frames, latent_dim = expected_shape
     if pair.flow_time.shape != (batch,):
         raise ValueError(f"pair.flow_time must have shape ({batch},)")
     if history.shape != (batch, 32, latent_dim):
-        raise ValueError(
-            f"history must have shape ({batch}, 32, {latent_dim})"
-        )
+        raise ValueError(f"history must have shape ({batch}, 32, {latent_dim})")
     if not torch.isfinite(predicted_velocity).all():
         raise ValueError("predicted_velocity contains non-finite values")
     if not math.isfinite(temporal_weight) or temporal_weight < 0.0:
-        raise ValueError(
-            "temporal_weight must be finite and non-negative"
-        )
+        raise ValueError("temporal_weight must be finite and non-negative")
 
     flow = _masked_mean(
         (predicted_velocity.float() - pair.target_velocity).square(),
         mask,
     )
-    clean_normalized = pair.noisy_future + (
-        1.0 - pair.flow_time[:, None, None]
-    ) * predicted_velocity.float()
+    clean_normalized = (
+        pair.noisy_future
+        + (1.0 - pair.flow_time[:, None, None]) * predicted_velocity.float()
+    )
     mean = statistics.mean.to(
         device=predicted_velocity.device,
         dtype=torch.float32,
@@ -586,11 +557,7 @@ def distributed_gradient_l2_norm(
     *,
     retain_graph: bool = True,
 ) -> float:
-    selected = tuple(
-        parameter
-        for parameter in parameters
-        if parameter.requires_grad
-    )
+    selected = tuple(parameter for parameter in parameters if parameter.requires_grad)
     if not selected:
         raise ValueError("at least one trainable parameter is required")
     gradients = torch.autograd.grad(
@@ -680,17 +647,9 @@ class PitchWeightController:
             self.ema_initialized = True
         else:
             keep = self.ema_decay
-            self.ema_flow_norm = (
-                keep * self.ema_flow_norm + (1.0 - keep) * flow_norm
-            )
-            self.ema_pitch_norm = (
-                keep * self.ema_pitch_norm + (1.0 - keep) * pitch_norm
-            )
-        observed = (
-            self.ema_pitch_norm
-            * self.value
-            / max(self.ema_flow_norm, 1.0e-12)
-        )
+            self.ema_flow_norm = keep * self.ema_flow_norm + (1.0 - keep) * flow_norm
+            self.ema_pitch_norm = keep * self.ema_pitch_norm + (1.0 - keep) * pitch_norm
+        observed = self.ema_pitch_norm * self.value / max(self.ema_flow_norm, 1.0e-12)
         candidate = self.value
         if observed > self.target_maximum:
             candidate *= self.target_maximum / max(observed, 1.0e-12)
@@ -712,8 +671,7 @@ class PitchWeightController:
         source_rank: int = 0,
     ) -> float:
         distributed = (
-            torch.distributed.is_available()
-            and torch.distributed.is_initialized()
+            torch.distributed.is_available() and torch.distributed.is_initialized()
         )
         if not distributed:
             return self.update(flow_norm, pitch_norm, update)
@@ -766,10 +724,7 @@ class PitchWeightController:
         flow_norm = float(state["ema_flow_norm"])
         pitch_norm = float(state["ema_pitch_norm"])
         initialized = bool(state["ema_initialized"])
-        if not all(
-            math.isfinite(item)
-            for item in (value, flow_norm, pitch_norm)
-        ):
+        if not all(math.isfinite(item) for item in (value, flow_norm, pitch_norm)):
             raise ValueError("controller state contains non-finite values")
         if not 0.0 <= value <= self.maximum:
             raise ValueError("controller state weight is out of range")

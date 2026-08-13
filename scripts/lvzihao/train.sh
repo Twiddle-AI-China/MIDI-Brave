@@ -52,20 +52,53 @@ elif [[ -f "$checkpoint_host/final.pt" ]]; then
 fi
 
 initialize_args=()
+expected_initializer_args=()
 segment_enabled=$(awk '$1 == "enabled:" {print $2; exit}' "$host_config")
-if (
-  [[ "$segment_enabled" == true ]] &&
-  ((${#resume_args[@]} == 0)) &&
-  [[ -z "${LV_INITIALIZE_FROM:-}" ]]
-); then
-  die "new segment runs require LV_INITIALIZE_FROM for weight-only initialization"
+model_profile=$(awk '$1 == "profile:" {print $2; exit}' "$host_config")
+model_profile=${model_profile:-standard}
+pitch_conditioning=$(awk '$1 == "pitch_conditioning:" {print $2; exit}' "$host_config")
+pitch_conditioning=${pitch_conditioning:-true}
+if [[ "$model_profile" != standard && "$pitch_conditioning" == false ]]; then
+  [[ -z "${LV_INITIALIZE_FROM:-}" ]] ||
+    die "non-standard pure profiles train from scratch; unset LV_INITIALIZE_FROM"
+fi
+if ((${#resume_args[@]} == 0)) && [[ -z "${LV_INITIALIZE_FROM:-}" ]]; then
+  if [[ "$model_profile" == standard && "$segment_enabled" == true ]]; then
+    die "new segment runs require LV_INITIALIZE_FROM for weight-only initialization"
+  fi
+  if [[ "$model_profile" != standard && "$pitch_conditioning" == true ]]; then
+    die "non-standard MIDI runs require a same-profile pure LV_INITIALIZE_FROM"
+  fi
 fi
 if [[ -n "${LV_INITIALIZE_FROM:-}" && ${#resume_args[@]} -eq 0 ]]; then
-  require_file "$LV_INITIALIZE_FROM"
+  verify_initializer_environment "$LV_INITIALIZE_FROM"
   initialize_container=$(
     host_path_to_container_work_path "$LV_INITIALIZE_FROM"
   )
   initialize_args=(--initialize-from "$initialize_container")
+elif [[ -n "${LV_INITIALIZE_FROM:-}" ]]; then
+  # A resumed run no longer reloads the initializer, but its immutable
+  # same-family lineage is still checked on every allocation.
+  verify_initializer_environment "$LV_INITIALIZE_FROM"
+fi
+if [[ -n "${LV_INITIALIZE_FROM:-}" ]]; then
+  expected_initializer_sha256=${LV_EXPECTED_INITIALIZER_SHA256:-$INITIALIZER_SHA256}
+  expected_initializer_update=${LV_INITIALIZER_UPDATE:-}
+  if [[ -z "$expected_initializer_update" ]]; then
+    initializer_basename=$(basename -- "$LV_INITIALIZE_FROM")
+    [[ "$initializer_basename" =~ ^step-([0-9]+)\.pt$ ]] ||
+      die "LV_INITIALIZER_UPDATE is required unless initializer is step-N.pt"
+    expected_initializer_update=$((10#${BASH_REMATCH[1]}))
+  fi
+  [[ "$expected_initializer_update" =~ ^[1-9][0-9]*$ ]] ||
+    die "LV_INITIALIZER_UPDATE must be a positive integer"
+  expected_initializer_args=(
+    --expected-initializer-sha256 "$expected_initializer_sha256"
+    --expected-initializer-update "$expected_initializer_update"
+  )
+elif [[ -n "${LV_EXPECTED_INITIALIZER_SHA256:-}" ]] ||
+  [[ -n "${LV_INITIALIZER_UPDATE:-}" ]]; then
+  die "initializer SHA/update require LV_INITIALIZE_FROM"
 fi
 optional_pitch_probe_args
 
@@ -81,6 +114,7 @@ run_timed_gpu_container \
     --max-updates "$max_updates" \
     "${resume_args[@]}" \
     "${initialize_args[@]}" \
+    "${expected_initializer_args[@]}" \
     "${PITCH_PROBE_ARGS[@]}"
 status=$?
 set -e

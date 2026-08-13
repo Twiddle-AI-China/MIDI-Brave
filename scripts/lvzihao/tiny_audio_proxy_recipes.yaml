@@ -1,0 +1,38 @@
+schema: 1
+template: configs/zrave/lvzihao_serum128_tiny_category_template.yaml
+config_output_dir: configs/zrave/generated/lvzihao_tiny_audio_proxies_v1
+queue_output: scripts/lvzihao/tiny_audio_proxies_v1.queue.tsv
+run_root: runs/tiny-audio-proxies-v1
+experiment_prefix: tinyaudioproxy-v1
+initialization: scratch
+maximum_updates: 10000
+checkpoints: [1000, 5000, 10000]
+sweep_batches: [16, 32, 64, 96, 128, 160]
+taxonomy_relative: taxonomies/serum128-audio-v1
+taxonomy_action: taxonomy_validate_audio
+audition_reports: true
+families:
+  - id: audio_dark_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-audio-v1/buckets/audio_dark_proxy.json
+  - id: audio_bright_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-audio-v1/buckets/audio_bright_proxy.json
+  - id: audio_soft_attack_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-audio-v1/buckets/audio_soft_attack_proxy.json
+  - id: audio_hard_attack_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-audio-v1/buckets/audio_hard_attack_proxy.json
+  - id: audio_static_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-audio-v1/buckets/audio_static_proxy.json
+  - id: audio_moving_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-audio-v1/buckets/audio_moving_proxy.json
+  - id: audio_clean_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-audio-v1/buckets/audio_clean_proxy.json
+  - id: audio_noisy_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-audio-v1/buckets/audio_noisy_proxy.json

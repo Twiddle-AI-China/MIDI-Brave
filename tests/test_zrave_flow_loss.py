@@ -69,11 +69,7 @@ def _loss_fixture(
     pitch_probe: nn.Module | None = None,
     perfect_velocity: bool = False,
 ) -> dict[str, object]:
-    raw_future = (
-        torch.randn(2, 64, 16)
-        if clean_future is None
-        else clean_future
-    )
+    raw_future = torch.randn(2, 64, 16) if clean_future is None else clean_future
     resolved_statistics = statistics or _statistics()
     mask = torch.arange(64).unsqueeze(0).expand(2, -1) < valid_frames
     generator = torch.Generator().manual_seed(generator_seed)
@@ -251,8 +247,31 @@ def test_pitch_windows_follow_framewise_midi_event_labels() -> None:
     windows, labels = _pitch_windows(estimate, mask, notes)
 
     assert windows is not None and labels is not None
-    assert windows.shape == (4, 16, 4)
-    assert labels.tolist() == [62, 82, 82, 82]
+    assert windows.shape == (3, 16, 4)
+    assert labels.tolist() == [62, 82, 82]
+    # No pitch-probe window is allowed to cross the note event at frame 20.
+    torch.testing.assert_close(windows[0], estimate[0, :16])
+    torch.testing.assert_close(windows[1], estimate[0, 20:36])
+    torch.testing.assert_close(windows[2], estimate[0, 36:52])
+
+
+def test_short_transition_runs_are_independently_padded() -> None:
+    from midibrave.zrave_flow_loss import _pitch_windows
+
+    estimate = torch.zeros(1, 64, 2)
+    estimate[:, :12] = torch.arange(12).view(1, 12, 1).expand(-1, -1, 2).float()
+    mask = torch.zeros(1, 64, dtype=torch.bool)
+    mask[:, :12] = True
+    notes = torch.full((1, 64), 62)
+    notes[:, 5:12] = 82
+
+    windows, labels = _pitch_windows(estimate, mask, notes)
+
+    assert windows is not None and labels is not None
+    assert windows.shape == (2, 16, 2)
+    assert labels.tolist() == [62, 82]
+    assert torch.all(windows[0, 5:] == 4)
+    assert torch.all(windows[1, 7:] == 11)
 
 
 def test_temporal_loss_detects_one_frozen_sample_inside_moving_batch() -> None:

@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "implementation": "laion-clap-1.1.7/HTSAT-base/no-fusion",
+  "package": "laion-clap",
+  "package_version": "1.1.7",
+  "transformers_version": "5.13.0",
+  "torchlibrosa_version": "0.1.0",
+  "librosa_version": "0.11.0",
+  "ftfy_version": "6.3.1",
+  "audio_model": "HTSAT-base",
+  "enable_fusion": false,
+  "checkpoint_filename": "music_audioset_epoch_15_esc_90.14.pt",
+  "checkpoint_bytes": 2352471003,
+  "checkpoint_sha256": "fae3e9c087f2909c28a09dc31c8dfcdacbc42ba44c70e972b58c1bd1caf6dedd",
+  "clap_sample_rate": 48000,
+  "clap_input_samples": 480000,
+  "data_truncating": "rand_trunc",
+  "data_filling": "repeatpad",
+  "crop_seed": "first_63_bits_of_source_audio_sha256/python_numpy_torch_cuda_scoped_restore",
+  "import_time_hf_assets": [
+    "bert-base-uncased-tokenizer",
+    "roberta-base-tokenizer-and-model",
+    "facebook/bart-base-tokenizer"
+  ],
+  "embedding_dimension": 512,
+  "embedding_normalization": "l2",
+  "input_scope": "complete_mono_wav_passed_to_clap_preprocessor",
+  "comparison": "audio_audio_cosine",
+  "caption_evaluation": false,
+  "batch_size": 1
+}

@@ -93,6 +93,50 @@ validate_relative_path() {
     die "relative path traversal is not allowed: $value"
 }
 
+verify_initializer_environment() {
+  local initializer_path=$1 actual_sha expected_sha
+  require_file "$initializer_path"
+  require_command sha256sum
+  actual_sha=$(sha256sum "$initializer_path" | awk '{print $1}')
+  expected_sha=${LV_EXPECTED_INITIALIZER_SHA256:-}
+  if [[ -n "$expected_sha" ]]; then
+    [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] ||
+      die "LV_EXPECTED_INITIALIZER_SHA256 must be a lowercase SHA-256"
+    [[ "$actual_sha" == "$expected_sha" ]] ||
+      die "initializer SHA-256 changed: $initializer_path"
+  fi
+  INITIALIZER_SHA256=$actual_sha
+}
+
+resolve_persistent_initializer() {
+  local relative=$1 candidate resolved expected work_root_real source_update
+  validate_relative_path "$relative"
+  [[ "$relative" =~ ^runs/[A-Za-z0-9._/-]+/checkpoints/step-[0-9]{6}\.pt$ ]] ||
+    die "initializer must be a runs/.../checkpoints/step-NNNNNN.pt path"
+  [[ "$relative" != *//* ]] || die "initializer path is malformed"
+  require_command realpath
+  candidate="$LV_WORK_ROOT/$relative"
+  require_file "$candidate"
+  work_root_real=$(realpath "$LV_WORK_ROOT")
+  resolved=$(realpath "$candidate")
+  expected="$work_root_real/$relative"
+  [[ "$resolved" == "$work_root_real"/runs/* ]] ||
+    die "initializer resolves outside LV_WORK_ROOT/runs: $relative"
+  [[ "$resolved" == "$expected" ]] ||
+    die "initializer path must not traverse symlinks: $relative"
+  verify_initializer_environment "$resolved"
+  source_update=$(basename -- "$resolved")
+  source_update=${source_update#step-}
+  source_update=${source_update%.pt}
+  [[ "$source_update" =~ ^[0-9]{6}$ ]] ||
+    die "resolved initializer basename is not step-NNNNNN.pt"
+  source_update=$((10#$source_update))
+  (( source_update > 0 )) || die "initializer update must be positive"
+  RESOLVED_INITIALIZER_PATH=$resolved
+  RESOLVED_INITIALIZER_SHA256=$INITIALIZER_SHA256
+  RESOLVED_INITIALIZER_UPDATE=$source_update
+}
+
 host_config_path() {
   local relative=$1
   validate_relative_path "$relative"
@@ -121,6 +165,44 @@ assert_config_contract() {
   expected_pack="$LV_CONTAINER_WORK_ROOT/$LV_PACK_RELATIVE"
   [[ "$packed" == "$expected_pack" ]] ||
     die "config packed_root is $packed; expected $expected_pack"
+}
+
+load_single_source_allowed_categories() {
+  local config=$1 source_count category list_sections
+  require_file "$config"
+  source_count=$(awk '$1 == "kind:" {count++} END {print count + 0}' "$config")
+  [[ "$source_count" == 1 ]] ||
+    die "audition config must contain exactly one data source"
+  ALLOWED_CATEGORIES=()
+  list_sections=$(awk '$1 == "allowed_categories:" {count++} END {print count + 0}' "$config")
+  [[ "$list_sections" == 1 ]] ||
+    die "config must contain exactly one allowed_categories list"
+  while IFS= read -r category; do
+    [[ "$category" =~ ^[A-Za-z0-9_-]+$ ]] ||
+      die "unsafe allowed category in $config: $category"
+    ALLOWED_CATEGORIES+=("$category")
+  done < <(
+    awk '
+      $1 == "allowed_categories:" {
+        sections++
+        capture = 1
+        next
+      }
+      capture && $1 == "-" {
+        value = $0
+        sub(/^[[:space:]]*-[[:space:]]*/, "", value)
+        sub(/[[:space:]]*#.*$/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        print value
+        values++
+        next
+      }
+      capture && $0 !~ /^[[:space:]]*$/ {capture = 0}
+      END {if (sections != 1 || values == 0) exit 2}
+    ' "$config"
+  )
+  ((${#ALLOWED_CATEGORIES[@]} > 0)) ||
+    die "config allowed_categories must not be empty"
 }
 
 latest_checkpoint() {

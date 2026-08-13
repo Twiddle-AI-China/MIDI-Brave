@@ -1,12 +1,130 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import replace
+from pathlib import Path
+
+import numpy as np
 import pytest
 import torch
 
+from midibrave.zrave_flow_config import ZraveFlowConfig
 from midibrave.zrave_flow_sampler import (
     GpuFlowSampler,
     build_different_note_pair_graph,
 )
+
+ROOT = Path(__file__).parents[1]
+PURE_CONFIG = ROOT / "configs" / "zrave" / "octopus_pure_flow_poc.yaml"
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_allowlist_pack(
+    tmp_path: Path,
+    *,
+    inconsistent_split: bool = False,
+) -> tuple[ZraveFlowConfig, Path]:
+    root = tmp_path / "pack"
+    root.mkdir()
+    presets = ["serum:p1"] * 2 + ["serum:p2"] * 2
+    presets += ["serum:p3"] * 2 + ["serum:p4"] * 2
+    splits = ["train"] * 2 + ["validation"] * 2 + ["train"] * 4
+    if inconsistent_split:
+        splits[1] = "validation"
+    split_by_name = {"train": 0, "validation": 1, "test": 2}
+    split_codes = np.asarray(
+        [split_by_name[value] for value in splits],
+        dtype=np.uint8,
+    )
+    categories = ["Pad"] * 4 + ["Lead"] * 2 + ["Pad"] * 2
+    category_codes = np.asarray(
+        [1 if value == "Pad" else 0 for value in categories],
+        dtype=np.uint16,
+    )
+    records = len(presets)
+    latents = np.broadcast_to(
+        np.arange(records, dtype=np.float16)[:, None, None],
+        (records, 100, 16),
+    ).copy()
+    shard = root / "shard-000000.npz"
+    np.savez(
+        shard,
+        latents=latents,
+        lengths=np.full(records, 100, dtype=np.int16),
+        active_frames=np.full(records, 100, dtype=np.int16),
+        notes=np.asarray([60, 67] * 4, dtype=np.int16),
+        velocities=np.full(records, 100, dtype=np.int16),
+        split_codes=split_codes,
+        source_codes=np.zeros(records, dtype=np.uint8),
+        category_codes=category_codes,
+        maximum_future_frames=np.full(records, 64, dtype=np.uint8),
+    )
+    pitch_pairs_path = root / "pitch-pairs.npy"
+    np.save(
+        pitch_pairs_path,
+        np.arange(records, dtype=np.int64).reshape(-1, 2)[:, ::-1].reshape(-1),
+    )
+    rows = [
+        {
+            "packed_index": index,
+            "sample_id": f"sample-{index}",
+            "source_name": "serum_full",
+            "source_code": 0,
+            "category": categories[index],
+            "category_code": int(category_codes[index]),
+            "canonical_preset_id": presets[index],
+            "split": splits[index],
+            "split_code": int(split_codes[index]),
+            "midi_note": 60 if index % 2 == 0 else 67,
+            "velocity": 100,
+            "articulation_id": "steady",
+            "length": 100,
+            "active_frames": 100,
+            "maximum_future_frames": 64,
+        }
+        for index in range(records)
+    ]
+    (root / "sequences.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    base = ZraveFlowConfig.load(PURE_CONFIG)
+    index = {
+        "records": records,
+        "rave_checkpoint_sha256": base.rave.expected_sha256,
+        "source_vocab": ["serum_full"],
+        "category_vocab": ["Lead", "Pad"],
+        "shard_sha256": {shard.name: _file_sha256(shard)},
+        "pitch_pairs_sha256": _file_sha256(pitch_pairs_path),
+    }
+    (root / "index.json").write_text(
+        json.dumps(index),
+        encoding="utf-8",
+    )
+    allowlist = tmp_path / "bucket.json"
+    allowlist.write_text(
+        json.dumps({"preset_ids": ["serum:p1", "serum:p2"]}),
+        encoding="utf-8",
+    )
+    source = replace(
+        base.data.sources[0],
+        weight=1.0,
+        allowed_categories=("Pad",),
+        preset_allowlist=str(allowlist),
+    )
+    config = replace(
+        base,
+        data=replace(
+            base.data,
+            packed_root=str(root),
+            sources=(source,),
+        ),
+    )
+    return config, allowlist
 
 
 def _sampler(seed: int) -> GpuFlowSampler:
@@ -83,14 +201,121 @@ def test_sampler_honors_source_weights_and_category_balance() -> None:
 def test_sampler_filters_prepacked_records_by_configured_category() -> None:
     sampler = _sampler(seed=11)
     sampler.record_eligible = torch.isin(
-        sampler.category_codes,
-        torch.tensor([1, 3, 5, 7, 9, 10, 11])
+        sampler.category_codes, torch.tensor([1, 3, 5, 7, 9, 10, 11])
     )
 
     batch = sampler.sample(batch_size=100, maximum_valid_future=64)
 
     serum_categories = batch.category_code[batch.source_code == 0]
     assert set(serum_categories.tolist()) == {1, 3, 5, 7}
+
+
+def test_from_pack_intersects_allowlist_category_source_and_split(
+    tmp_path: Path,
+) -> None:
+    config, _allowlist = _write_allowlist_pack(tmp_path)
+
+    sampler = GpuFlowSampler.from_pack(
+        config,
+        split="train",
+        device="cpu",
+        seed=13,
+    )
+
+    assert sampler.latents.shape[0] == 4
+    assert sampler.pitch_pairs.tolist() == [1, 0, 3, 2]
+    assert sampler.split_codes.tolist() == [0, 0, 1, 1]
+    assert sampler.category_codes.tolist() == [1, 1, 1, 1]
+    assert sampler._eligible(0, require_full_future=False).tolist() == [0, 1]
+    torch.testing.assert_close(
+        sampler.latents[:, 0, 0].cpu(),
+        torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float16),
+    )
+
+
+def test_from_pack_category_only_filter_compacts_records_and_pairs(
+    tmp_path: Path,
+) -> None:
+    config, _allowlist = _write_allowlist_pack(tmp_path)
+    source = replace(config.data.sources[0], preset_allowlist=None)
+    config = replace(
+        config,
+        data=replace(config.data, sources=(source,)),
+    )
+
+    sampler = GpuFlowSampler.from_pack(
+        config,
+        split="train",
+        device="cpu",
+        seed=17,
+    )
+
+    assert sampler.latents.shape[0] == 6
+    assert sampler.pitch_pairs.tolist() == [1, 0, 3, 2, 5, 4]
+    assert sampler._eligible(0, require_full_future=False).tolist() == [
+        0,
+        1,
+        4,
+        5,
+    ]
+
+
+def test_from_pack_rebuild_rejects_reordered_or_stale_sequence_metadata(
+    tmp_path: Path,
+) -> None:
+    config, _allowlist = _write_allowlist_pack(tmp_path)
+    root = Path(config.data.packed_root)
+    np.save(root / "pitch-pairs.npy", np.full(8, -1, dtype=np.int64))
+    index = json.loads((root / "index.json").read_text(encoding="utf-8"))
+    index["pitch_pairs_sha256"] = _file_sha256(root / "pitch-pairs.npy")
+    (root / "index.json").write_text(json.dumps(index), encoding="utf-8")
+    rows = [
+        json.loads(line)
+        for line in (root / "sequences.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    rows[0]["midi_note"] = 99
+    (root / "sequences.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    source = replace(config.data.sources[0], preset_allowlist=None)
+    config = replace(config, data=replace(config.data, sources=(source,)))
+
+    with pytest.raises(ValueError, match="sequence/shard note mismatch"):
+        GpuFlowSampler.from_pack(
+            config,
+            split="train",
+            device="cpu",
+            seed=19,
+        )
+
+
+def test_from_pack_rejects_missing_or_split_inconsistent_presets(
+    tmp_path: Path,
+) -> None:
+    config, allowlist = _write_allowlist_pack(tmp_path)
+    allowlist.write_text('["serum:missing"]', encoding="utf-8")
+    with pytest.raises(ValueError, match="absent from pack"):
+        GpuFlowSampler.from_pack(
+            config,
+            split="train",
+            device="cpu",
+            seed=19,
+        )
+
+    second_root = tmp_path / "split-mismatch"
+    second_root.mkdir()
+    config, _allowlist = _write_allowlist_pack(
+        second_root,
+        inconsistent_split=True,
+    )
+    with pytest.raises(ValueError, match="preset split mismatch"):
+        GpuFlowSampler.from_pack(
+            config,
+            split="train",
+            device="cpu",
+            seed=23,
+        )
 
 
 def test_dense_serum_masks_release_tail_and_sampling_repeats() -> None:
@@ -129,14 +354,11 @@ def test_sampler_builds_real_same_preset_pitch_transitions() -> None:
 
     assert int(transition.sum()) == 20
     assert torch.all(
-        torch.abs(
-            batch.history_midi_note[transition] - batch.midi_note[transition]
-        )
+        torch.abs(batch.history_midi_note[transition] - batch.midi_note[transition])
         == 12
     )
     assert torch.all(
-        (batch.source_code[transition] == 1)
-        | (batch.source_code[transition] == 2)
+        (batch.source_code[transition] == 1) | (batch.source_code[transition] == 2)
     )
 
 
@@ -389,8 +611,7 @@ def test_segment_fractional_transition_credit_covers_batch_one() -> None:
     )
 
     transitions = sum(
-        int(sampler.sample(1, 64).pitch_transition_mask.sum())
-        for _ in range(5)
+        int(sampler.sample(1, 64).pitch_transition_mask.sum()) for _ in range(5)
     )
 
     assert transitions == 1
@@ -442,9 +663,7 @@ def test_segment_transition_splices_latent_and_framewise_midi_event() -> None:
 
     assert 0 < event < valid
     assert torch.all(batch.future_midi_sequence[0, :event] == history_note)
-    assert torch.all(
-        batch.future_midi_sequence[0, event:valid] == target_note
-    )
+    assert torch.all(batch.future_midi_sequence[0, event:valid] == target_note)
     torch.testing.assert_close(
         batch.future[0, :event, 0],
         history_offset + torch.arange(start, start + event),
@@ -507,7 +726,8 @@ def test_different_note_pair_graph_is_not_limited_to_octaves() -> None:
     assert pairs.tolist() == [1, 2, 1, 2, -1]
     for index, partner in enumerate(pairs.tolist()):
         if partner >= 0:
-            assert rows[index]["canonical_preset_id"] == rows[partner][
-                "canonical_preset_id"
-            ]
+            assert (
+                rows[index]["canonical_preset_id"]
+                == rows[partner]["canonical_preset_id"]
+            )
             assert rows[index]["midi_note"] != rows[partner]["midi_note"]

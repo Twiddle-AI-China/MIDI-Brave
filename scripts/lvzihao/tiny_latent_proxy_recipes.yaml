@@ -1,0 +1,37 @@
+schema: 1
+template: configs/zrave/lvzihao_serum128_tiny_category_template.yaml
+config_output_dir: configs/zrave/generated/lvzihao_tiny_latent_proxies_v1
+queue_output: scripts/lvzihao/tiny_latent_proxies_v1.queue.tsv
+run_root: runs/tiny-latent-proxies-v1
+experiment_prefix: tinyproxy-v1
+initialization: scratch
+maximum_updates: 10000
+checkpoints: [1000, 5000, 10000]
+sweep_batches: [16, 32, 64, 96, 128, 160]
+taxonomy_relative: taxonomies/serum128-latent-v1
+audition_reports: true
+families:
+  - id: latent_slow_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-latent-v1/buckets/latent_slow_proxy.json
+  - id: latent_fast_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-latent-v1/buckets/latent_fast_proxy.json
+  - id: latent_soft_onset_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-latent-v1/buckets/latent_soft_onset_proxy.json
+  - id: latent_hard_onset_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-latent-v1/buckets/latent_hard_onset_proxy.json
+  - id: latent_static_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-latent-v1/buckets/latent_static_proxy.json
+  - id: latent_moving_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-latent-v1/buckets/latent_moving_proxy.json
+  - id: latent_smooth_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-latent-v1/buckets/latent_smooth_proxy.json
+  - id: latent_irregular_proxy
+    categories: [Arp, Bass, FX, Lead, Pad, Pluck, Synth]
+    preset_allowlist: /data/midibrave-zrave-flow-serum128/taxonomies/serum128-latent-v1/buckets/latent_irregular_proxy.json

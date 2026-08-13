@@ -46,6 +46,14 @@ sweep_container="$LV_CONTAINER_WORK_ROOT/sweeps/$experiment_id"
 selection_host="$LV_WORK_ROOT/$run_relative/lvzihao-selection.json"
 mkdir -p "$sweep_host" "$(dirname -- "$selection_host")"
 optional_pitch_probe_args
+INITIALIZER_ARGS=()
+if [[ -n "${LV_INITIALIZE_FROM:-}" ]]; then
+  verify_initializer_environment "$LV_INITIALIZE_FROM"
+  initializer_container=$(
+    host_path_to_container_work_path "$LV_INITIALIZE_FROM"
+  )
+  INITIALIZER_ARGS=(--initialize-from "$initializer_container")
+fi
 expected_config_sha=$(sha256sum "$host_config" | awk '{print $1}')
 expected_pack_sha=$(sha256sum "$pack_index_host" | awk '{print $1}')
 expected_commit=$(git -C "$LV_PROJECT_ROOT" rev-parse HEAD)
@@ -92,6 +100,7 @@ for batch in "${batches[@]}"; do
       --benchmark-warmup "$LV_BENCHMARK_WARMUP" \
       --benchmark-updates "$LV_BENCHMARK_UPDATES" \
       --benchmark-exposure-updates "$expected_exposure_updates" \
+      "${INITIALIZER_ARGS[@]}" \
       "${PITCH_PROBE_ARGS[@]}"
   status=$?
   set -e

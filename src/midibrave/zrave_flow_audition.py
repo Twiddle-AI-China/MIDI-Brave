@@ -17,7 +17,11 @@ from scipy.signal import resample_poly
 from torch import Tensor
 
 from .zrave_codec import decode_with_seed
-from .zrave_flow_config import ZraveFlowConfig
+from .zrave_flow_config import (
+    ZraveFlowConfig,
+    data_selection_sha256,
+    load_preset_allowlist,
+)
 from .zrave_flow_exploration import (
     exploration_controls,
     rollout_candidate_metrics,
@@ -48,9 +52,7 @@ def _candidate_seed(
     if generation_seed < 0 or commit_index < 0 or candidate_index < 0:
         raise ValueError("rollout seed indices must be non-negative")
     digest = hashlib.sha256(
-        f"{generation_seed}:{commit_index}:{candidate_index}".encode(
-            "utf-8"
-        )
+        f"{generation_seed}:{commit_index}:{candidate_index}".encode("utf-8")
     ).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=False)
 
@@ -121,13 +123,10 @@ def rollout_exploration_flow(
     )
     if history.ndim != 3 or tuple(history.shape) != expected_history:
         raise ValueError(
-            f"history must have shape {expected_history}, "
-            f"got {tuple(history.shape)}"
+            f"history must have shape {expected_history}, got {tuple(history.shape)}"
         )
     statistics.validate(int(model.latent_dim))
-    control = exploration_controls(
-        torch.tensor([exploration], device=history.device)
-    )
+    control = exploration_controls(torch.tensor([exploration], device=history.device))
     temperature = float(control.temperature[0].item())
     wander_delay = float(control.wander_delay_frames[0].item())
     visible_history = int(control.visible_history_frames[0].item())
@@ -230,8 +229,7 @@ def rollout_pure_flow(
     )
     if history.ndim != 3 or tuple(history.shape) != expected_history:
         raise ValueError(
-            f"history must have shape {expected_history}, "
-            f"got {tuple(history.shape)}"
+            f"history must have shape {expected_history}, got {tuple(history.shape)}"
         )
     chunks: list[Tensor] = []
     current = history
@@ -285,9 +283,7 @@ def _validate_midi_control_values(
         ):
             raise ValueError(f"{name} must contain integer MIDI notes")
         if torch.any(value < note_min) or torch.any(value > note_max):
-            raise ValueError(
-                f"{name} must be in [{note_min}, {note_max}]"
-            )
+            raise ValueError(f"{name} must be in [{note_min}, {note_max}]")
     elif torch.any(value < 0) or torch.any(value > 127):
         raise ValueError(f"{name} must be in [0, 127]")
 
@@ -348,28 +344,20 @@ def rollout_midi_sequence_flow(
     expected_history = (batch, context_frames, latent_dim)
     if history.ndim != 3 or tuple(history.shape) != expected_history:
         raise ValueError(
-            f"history must have shape {expected_history}, "
-            f"got {tuple(history.shape)}"
+            f"history must have shape {expected_history}, got {tuple(history.shape)}"
         )
     expected_history_control = (batch, context_frames)
     if tuple(history_midi_note.shape) != expected_history_control:
         raise ValueError(
-            "history_midi_note must have shape "
-            f"{expected_history_control}"
+            f"history_midi_note must have shape {expected_history_control}"
         )
     if tuple(history_velocity.shape) != expected_history_control:
-        raise ValueError(
-            f"history_velocity must have shape {expected_history_control}"
-        )
+        raise ValueError(f"history_velocity must have shape {expected_history_control}")
     expected_future_control = (batch, frames)
     if tuple(future_midi_note.shape) != expected_future_control:
-        raise ValueError(
-            f"future_midi_note must have shape {expected_future_control}"
-        )
+        raise ValueError(f"future_midi_note must have shape {expected_future_control}")
     if tuple(future_velocity.shape) != expected_future_control:
-        raise ValueError(
-            f"future_velocity must have shape {expected_future_control}"
-        )
+        raise ValueError(f"future_velocity must have shape {expected_future_control}")
     resolved_history_mask = (
         torch.ones(
             batch,
@@ -381,9 +369,7 @@ def rollout_midi_sequence_flow(
         else history_mask.to(device=history.device, dtype=torch.bool)
     )
     if tuple(resolved_history_mask.shape) != expected_history_control:
-        raise ValueError(
-            f"history_mask must have shape {expected_history_control}"
-        )
+        raise ValueError(f"history_mask must have shape {expected_history_control}")
     if not torch.all(resolved_history_mask.any(dim=1)):
         raise ValueError("every sample needs visible MIDI history")
     note_min = int(model.note_min)
@@ -451,9 +437,7 @@ def rollout_midi_sequence_flow(
         committed_note = note_block[:, :take]
         committed_velocity = velocity_block[:, :take]
         chunks.append(chunk)
-        current = torch.cat((current, chunk), dim=1)[
-            :, -context_frames:
-        ].detach()
+        current = torch.cat((current, chunk), dim=1)[:, -context_frames:].detach()
         current_note = torch.cat(
             (current_note, committed_note),
             dim=1,
@@ -487,8 +471,9 @@ def build_midi_audition_control_sequences(
     note_min: int,
     note_max: int,
     available_notes: Sequence[int] | Tensor | None = None,
+    available_velocities: Sequence[int] | Tensor | None = None,
 ) -> dict[str, tuple[Tensor, Tensor]]:
-    """Build matched and observed-note-swapped controls for audition rows."""
+    """Build constant and midpoint-step controls from observed MIDI vocabularies."""
 
     if recorded_notes.ndim != 1 or recorded_velocities.shape != (
         recorded_notes.shape[0],
@@ -496,6 +481,8 @@ def build_midi_audition_control_sequences(
         raise ValueError("recorded MIDI controls must have shape [batch]")
     if frames <= 0:
         raise ValueError("frames must be positive")
+    if frames % 2:
+        raise ValueError("MIDI audition controls require an even frame count")
     _validate_midi_control_values(
         "recorded_notes",
         recorded_notes,
@@ -527,12 +514,36 @@ def build_midi_audition_control_sequences(
     swapped = note_pool[(indices + 1) % note_pool.numel()]
     if torch.any(swapped == recorded_notes):
         raise ValueError("note swap must change every requested note")
+    velocity_pool = torch.as_tensor(
+        (recorded_velocities if available_velocities is None else available_velocities),
+        device=recorded_velocities.device,
+        dtype=recorded_velocities.dtype,
+    ).flatten()
+    _validate_midi_control_values("available_velocities", velocity_pool)
+    velocity_pool = torch.unique(velocity_pool, sorted=True)
+    if velocity_pool.numel() < 2:
+        raise ValueError("velocity step requires at least two observed velocities")
+    velocity_matches = recorded_velocities[:, None] == velocity_pool[None, :]
+    if not torch.all(velocity_matches.any(dim=1)):
+        raise ValueError("every recorded velocity must occur in available_velocities")
+    velocity_indices = velocity_matches.to(dtype=torch.long).argmax(dim=1)
+    swapped_velocities = velocity_pool[(velocity_indices + 1) % velocity_pool.numel()]
+    if torch.any(swapped_velocities == recorded_velocities):
+        raise ValueError("velocity step must change every requested velocity")
+
     matched_notes = recorded_notes[:, None].expand(-1, frames).clone()
     swapped_notes = swapped[:, None].expand(-1, frames).clone()
     velocities = recorded_velocities[:, None].expand(-1, frames).clone()
+    transition_frame = frames // 2
+    note_step = matched_notes.clone()
+    note_step[:, transition_frame:] = swapped[:, None]
+    velocity_step = velocities.clone()
+    velocity_step[:, transition_frame:] = swapped_velocities[:, None]
     return {
         "matched": (matched_notes, velocities.clone()),
         "note_swap": (swapped_notes, velocities.clone()),
+        "note_step": (note_step, velocities.clone()),
+        "velocity_step": (matched_notes.clone(), velocity_step),
     }
 
 
@@ -552,11 +563,9 @@ def select_audition_rows(
         candidates = [
             row
             for row in available
-            if str(row.get("category", "")).casefold()
-            == category.casefold()
+            if str(row.get("category", "")).casefold() == category.casefold()
             and str(row.get("split", "")) == split
-            and int(row.get("active_frames", 0))
-            >= minimum_active_frames
+            and int(row.get("active_frames", 0)) >= minimum_active_frames
         ]
         if not candidates:
             raise ValueError(
@@ -565,10 +574,9 @@ def select_audition_rows(
             )
         candidates.sort(
             key=lambda row: hashlib.sha256(
-                (
-                    f"{seed}:serum128-flow-audition:{category}:"
-                    f"{row['sample_id']}"
-                ).encode("utf-8")
+                (f"{seed}:serum128-flow-audition:{category}:{row['sample_id']}").encode(
+                    "utf-8"
+                )
             ).digest()
         )
         selected.append(candidates[0])
@@ -610,6 +618,7 @@ def validate_pure_checkpoint_payload(
     pack_index_sha256: str,
     statistics_sha256: str,
     exploration_enabled: bool | None = None,
+    expected_data_selection_sha256: str | None = None,
 ) -> int:
     if not isinstance(payload, dict) or payload.get("format") != 1:
         raise ValueError("checkpoint must use format 1")
@@ -634,6 +643,13 @@ def validate_pure_checkpoint_payload(
     }
     if exploration_enabled is not None:
         expected["exploration_enabled"] = exploration_enabled
+    if expected_data_selection_sha256 is not None:
+        _require_sha256(
+            "expected_data_selection_sha256",
+            expected_data_selection_sha256,
+        )
+    if contract.get("data_selection_sha256") != (expected_data_selection_sha256):
+        raise ValueError("checkpoint data_selection_sha256 contract mismatch")
     for name, value in expected.items():
         actual = (
             contract.get(name, False)
@@ -657,9 +673,7 @@ def validate_pure_checkpoint_payload(
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_MIDI_SEQUENCE_ARCHITECTURE = (
-    "zrave_midi_sequence_flow_transformer_v2"
-)
+_MIDI_SEQUENCE_ARCHITECTURE = "zrave_midi_sequence_flow_transformer_v2"
 _PURE_INITIALIZER_ARCHITECTURES = {
     "zrave_pure_flow_transformer_v1",
     "zrave_pure_flow_transformer_v2",
@@ -697,6 +711,7 @@ def validate_midi_sequence_checkpoint_payload(
     segment_sampling: bool,
     expected_initializer_sha256: str,
     expected_initializer_update: int = 85000,
+    expected_data_selection_sha256: str | None = None,
 ) -> int:
     """Validate the complete inference contract for a G3 MIDI checkpoint."""
 
@@ -713,6 +728,11 @@ def validate_midi_sequence_checkpoint_payload(
         "expected_initializer_sha256",
         expected_initializer_sha256,
     )
+    if expected_data_selection_sha256 is not None:
+        _require_sha256(
+            "expected_data_selection_sha256",
+            expected_data_selection_sha256,
+        )
     if maximum_updates <= 0:
         raise ValueError("maximum_updates must be positive")
     if expected_initializer_update <= 0:
@@ -724,6 +744,8 @@ def validate_midi_sequence_checkpoint_payload(
     contract = payload.get("contract")
     if not isinstance(contract, dict):
         raise ValueError("checkpoint has no contract")
+    if contract.get("data_selection_sha256") != (expected_data_selection_sha256):
+        raise ValueError("checkpoint data_selection_sha256 contract mismatch")
     expected: dict[str, object] = {
         "latent_dim": latent_dim,
         "context_frames": context_frames,
@@ -771,10 +793,7 @@ def validate_midi_sequence_checkpoint_payload(
         or source_update != expected_initializer_update
     ):
         raise ValueError("checkpoint initializer update mismatch")
-    if (
-        initialization.get("source_architecture")
-        not in _PURE_INITIALIZER_ARCHITECTURES
-    ):
+    if initialization.get("source_architecture") not in _PURE_INITIALIZER_ARCHITECTURES:
         raise ValueError("checkpoint initializer architecture is not pure flow")
     initializer_hash = _require_sha256(
         "checkpoint initializer checkpoint_sha256",
@@ -807,9 +826,7 @@ def _validated_pitch_qualification(
         qualification_path = candidate.parent.parent / "qualification.json"
     if not qualification_path.is_file():
         raise ValueError("pitch probe qualification is missing")
-    qualification = json.loads(
-        qualification_path.read_text(encoding="utf-8")
-    )
+    qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
     if not isinstance(qualification, dict):
         raise ValueError("pitch qualification must be a mapping")
     if qualification.get("passed") is not True:
@@ -828,8 +845,10 @@ def _validated_pitch_qualification(
     ):
         raise ValueError("pitch qualification update must be positive")
     gates = qualification.get("gates")
-    if not isinstance(gates, dict) or not gates or not all(
-        value is True for value in gates.values()
+    if (
+        not isinstance(gates, dict)
+        or not gates
+        or not all(value is True for value in gates.values())
     ):
         raise ValueError("pitch qualification gates are incomplete")
     metrics = qualification.get("metrics")
@@ -875,6 +894,7 @@ def _validated_pitch_qualification(
     ):
         raise ValueError("qualified pitch probe architecture mismatch")
     return {
+        "probe": probe,
         "qualification_path": qualification_path.resolve(),
         "qualification_sha256": _sha256_file(qualification_path),
         "checkpoint_path": checkpoint_path.resolve(),
@@ -882,6 +902,214 @@ def _validated_pitch_qualification(
         "update": qualification_update,
         "gates": gates,
         "metrics": metrics,
+    }
+
+
+def latent_pitch_probe_adherence(
+    generated: Tensor,
+    requested_notes: Tensor,
+    pitch_probe: Any,
+    *,
+    window_frames: int = 16,
+) -> list[dict[str, float | int | bool]]:
+    """Measure generated latent windows with a qualified frozen pitch probe.
+
+    This is a latent-probe proxy. It is not decoded-audio/CREPE MIDI accuracy,
+    and it has no voiced/unvoiced observation.
+    """
+
+    if generated.ndim != 3:
+        raise ValueError("generated latents must have shape [batch, frames, dim]")
+    if requested_notes.shape != generated.shape[:2]:
+        raise ValueError("requested_notes must match generated batch and frames")
+    if window_frames != 16:
+        raise ValueError("qualified pitch probe requires 16-frame windows")
+    if generated.shape[1] < window_frames:
+        raise ValueError("pitch adherence needs at least one complete window")
+    if not torch.isfinite(generated).all():
+        raise ValueError("generated pitch-adherence latents are non-finite")
+    notes = requested_notes.to(device=generated.device)
+    if notes.is_floating_point() and (
+        not torch.isfinite(notes).all() or not torch.equal(notes, notes.round())
+    ):
+        raise ValueError("requested pitch-adherence notes must be finite integers")
+    notes = notes.long()
+    note_min = int(getattr(pitch_probe, "note_min"))
+    note_max = int(getattr(pitch_probe, "note_max"))
+    latent_dim = int(getattr(pitch_probe, "latent_dim"))
+    if generated.shape[2] != latent_dim:
+        raise ValueError("pitch probe latent dimension mismatch")
+    if torch.any(notes < note_min) or torch.any(notes > note_max):
+        raise ValueError("requested pitch-adherence note is outside probe range")
+
+    windows: list[Tensor] = []
+    targets: list[Tensor] = []
+    locations: list[tuple[int, int, int]] = []
+    for sample in range(generated.shape[0]):
+        for start in range(0, generated.shape[1] - window_frames + 1, window_frames):
+            midpoint = start + (window_frames - 1) // 2
+            windows.append(generated[sample, start : start + window_frames])
+            targets.append(notes[sample, midpoint])
+            locations.append((sample, start, midpoint))
+    output = pitch_probe(torch.stack(windows))
+    if (
+        not torch.isfinite(output.logits).all()
+        or not torch.isfinite(output.expected_midi).all()
+    ):
+        raise ValueError("qualified pitch probe produced non-finite output")
+    target = torch.stack(targets)
+    predicted = output.logits.argmax(dim=-1) + note_min
+    errors = (output.expected_midi.float() - target.float()).abs() * 100.0
+    rows: list[dict[str, float | int | bool]] = []
+    for index, (sample, start, midpoint) in enumerate(locations):
+        error = float(errors[index].item())
+        rows.append(
+            {
+                "sample_index": sample,
+                "start_frame": start,
+                "midpoint_frame": midpoint,
+                "requested_midi_note": int(target[index].item()),
+                "predicted_midi_class": int(predicted[index].item()),
+                "expected_midi": float(output.expected_midi[index].item()),
+                "absolute_cents": error,
+                "exact_class": bool(predicted[index] == target[index]),
+                "within_50_cents": error <= 50.0,
+                "within_100_cents": error <= 100.0,
+            }
+        )
+    return rows
+
+
+def _pitch_adherence_summary(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, float | int | None]:
+    errors = np.asarray(
+        [float(row["absolute_cents"]) for row in rows], dtype=np.float64
+    )
+    if not errors.size or not np.isfinite(errors).all():
+        return {
+            "window_count": int(errors.size),
+            "exact_class_accuracy": None,
+            "absolute_cents_median": None,
+            "absolute_cents_p90": None,
+            "within_50_cents": None,
+            "within_100_cents": None,
+            "voiced_coverage": None,
+        }
+    return {
+        "window_count": int(errors.size),
+        "exact_class_accuracy": float(
+            np.mean([bool(row["exact_class"]) for row in rows])
+        ),
+        "absolute_cents_median": float(np.median(errors)),
+        "absolute_cents_p90": float(np.percentile(errors, 90)),
+        "within_50_cents": float(
+            np.mean([bool(row["within_50_cents"]) for row in rows])
+        ),
+        "within_100_cents": float(
+            np.mean([bool(row["within_100_cents"]) for row in rows])
+        ),
+        "voiced_coverage": None,
+    }
+
+
+def _finite_distribution(
+    values: Sequence[float | int | None],
+) -> dict[str, float | int | None]:
+    finite = np.asarray(
+        [float(value) for value in values if value is not None],
+        dtype=np.float64,
+    )
+    if finite.size and not np.isfinite(finite).all():
+        raise ValueError("transition metric contains non-finite values")
+    if not finite.size:
+        return {"count": 0, "median": None, "p90": None, "maximum": None}
+    return {
+        "count": int(finite.size),
+        "median": float(np.median(finite)),
+        "p90": float(np.percentile(finite, 90)),
+        "maximum": float(finite.max()),
+    }
+
+
+def _latent_pitch_transition_settling(
+    rows: Sequence[Mapping[str, object]],
+    requested_notes: Sequence[int] | Tensor,
+    *,
+    latent_hop: int,
+    sample_rate: int,
+) -> dict[str, object]:
+    """Report internal note-step settling at the 16-frame probe resolution.
+
+    The first post-transition probe window within 100 cents is considered the
+    settled observation.  This is deliberately a report-only latent proxy,
+    not an audio-rate or voiced MIDI-accuracy measurement.
+    """
+
+    notes = torch.as_tensor(requested_notes).detach().cpu().flatten()
+    if notes.numel() <= 0:
+        raise ValueError("transition settling requires requested notes")
+    if latent_hop <= 0 or sample_rate <= 0:
+        raise ValueError("transition settling timing must be positive")
+    _validate_midi_control_values("requested_notes", notes)
+    changes = (
+        torch.nonzero(notes[1:] != notes[:-1], as_tuple=False).flatten() + 1
+    ).tolist()
+    events: list[dict[str, object]] = []
+    for change in changes:
+        target = int(notes[change].item())
+        eligible = [
+            row
+            for row in rows
+            if int(row["midpoint_frame"]) >= change
+            and int(row["requested_midi_note"]) == target
+        ]
+        settled = next(
+            (row for row in eligible if row.get("within_100_cents") is True),
+            None,
+        )
+        settling_frames = (
+            None if settled is None else int(settled["midpoint_frame"]) - int(change)
+        )
+        events.append(
+            {
+                "event_kind": "within_generated_request_change",
+                "latent_frame": int(change),
+                "from_midi_note": int(notes[change - 1].item()),
+                "to_midi_note": target,
+                "settled": settled is not None,
+                "settling_frames": settling_frames,
+                "settling_ms": (
+                    None
+                    if settling_frames is None
+                    else settling_frames * latent_hop * 1000.0 / sample_rate
+                ),
+            }
+        )
+    return _latent_pitch_transition_summary(events)
+
+
+def _latent_pitch_transition_summary(
+    events: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    return {
+        "event_count": len(events),
+        "settled_event_count": sum(event.get("settled") is True for event in events),
+        "settling_frames": _finite_distribution(
+            [event.get("settling_frames") for event in events]
+        ),
+        "settling_ms": _finite_distribution(
+            [event.get("settling_ms") for event in events]
+        ),
+        "events": [dict(event) for event in events],
+        "status": (
+            "not_applicable_no_internal_note_change" if not events else "measured"
+        ),
+        "metric_kind": "latent_pitch_probe_transition_proxy",
+        "semantic_warning": (
+            "Settling uses the first 16-frame latent-probe observation within "
+            "100 cents; it is report-only and is not decoded-audio MIDI accuracy."
+        ),
     }
 
 
@@ -899,24 +1127,18 @@ def _audio_cell(title: str, payload: dict[str, Any]) -> str:
 def render_index_html(manifest: dict[str, Any]) -> str:
     checkpoint = manifest["checkpoint"]
     is_midi = manifest.get("conditioning") == "midi_sequence"
-    page_title = (
-        "Serum128 MIDI-flow audition"
-        if is_midi
-        else "Serum128 flow audition"
-    )
+    page_title = "Serum128 MIDI-flow audition" if is_midi else "Serum128 flow audition"
     eyebrow = (
-        "MIDI Z-RAVE / matched vs note swap"
+        "MIDI Z-RAVE / constant and step controls"
         if is_midi
         else "Pure Z-RAVE / listening proof"
     )
     headline = (
-        "Does the latent follow control?"
-        if is_midi
-        else "Does the latent keep moving?"
+        "Does the latent follow control?" if is_midi else "Does the latent keep moving?"
     )
     description = (
-        "Compare matched MIDI control with the same velocity under an "
-        "next observed-vocabulary note."
+        "Compare matched, note-swap, midpoint note-step, and report-only "
+        "velocity-step controls."
         if is_midi
         else "Compare the source, codec ceiling, then stochastic continuation."
     )
@@ -924,9 +1146,7 @@ def render_index_html(manifest: dict[str, Any]) -> str:
     commit_stride = int(manifest.get("commit_stride_frames", 64))
     commit_count = math.ceil(generated_frames / commit_stride)
     unit_name = "commits" if commit_stride == 16 else "blocks"
-    generated_label = (
-        f"{commit_count} × {commit_stride} generated {unit_name}"
-    )
+    generated_label = f"{commit_count} × {commit_stride} generated {unit_name}"
     cards: list[str] = []
     for example in manifest["examples"]:
         takes = [
@@ -940,12 +1160,10 @@ def render_index_html(manifest: dict[str, Any]) -> str:
         cards.append(
             '<section class="instrument">'
             '<header class="instrument__head">'
-            f'<h2>{escape(str(example["category"]))}</h2>'
-            f'<code>{escape(str(example["sample_id"]))}</code>'
+            f"<h2>{escape(str(example['category']))}</h2>"
+            f"<code>{escape(str(example['sample_id']))}</code>"
             "</header>"
-            '<div class="takes">'
-            + "".join(takes)
-            + "</div></section>"
+            '<div class="takes">' + "".join(takes) + "</div></section>"
         )
     return f"""<!doctype html>
 <html lang="en">
@@ -1021,7 +1239,7 @@ def render_index_html(manifest: dict[str, Any]) -> str:
       <h1>{escape(headline)}</h1>
     </div>
     <div class="facts">
-      <strong>Checkpoint {int(checkpoint['update']):,}</strong><br>
+      <strong>Checkpoint {int(checkpoint["update"]):,}</strong><br>
       128D Serum Balanced RAVE · 44.1 kHz · hop 2048<br>
       {escape(description)}
       <div class="timeline">
@@ -1032,7 +1250,7 @@ def render_index_html(manifest: dict[str, Any]) -> str:
     </div>
   </header>
   <p class="note">Players use source-RMS-matched files for fair loudness. The package also contains untouched float WAVs under <code>raw/</code>.</p>
-  {''.join(cards)}
+  {"".join(cards)}
 </main>
 </body>
 </html>
@@ -1060,26 +1278,59 @@ def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _filter_audition_preset_allowlist(
+    rows: list[dict[str, Any]],
+    config: ZraveFlowConfig,
+) -> tuple[list[dict[str, Any]], str | None, frozenset[str] | None]:
+    allowlisted_sources = [
+        source for source in config.data.sources if source.preset_allowlist is not None
+    ]
+    if not allowlisted_sources:
+        return rows, None, None
+    if len(allowlisted_sources) != 1:
+        raise ValueError("pure audition supports exactly one preset_allowlist source")
+    source = allowlisted_sources[0]
+    assert source.preset_allowlist is not None
+    allowlist_path = Path(source.preset_allowlist)
+    allowed = frozenset(load_preset_allowlist(allowlist_path))
+    available = {
+        str(row.get("canonical_preset_id", ""))
+        for row in rows
+        if str(row.get("source_name", "")) == source.name
+    }
+    missing = sorted(allowed - available)
+    if missing:
+        preview = ", ".join(missing[:8])
+        suffix = " ..." if len(missing) > 8 else ""
+        raise ValueError(
+            f"source {source.name} preset allowlist IDs are absent "
+            f"from pack: {preview}{suffix}"
+        )
+    filtered = [
+        row
+        for row in rows
+        if str(row.get("source_name", "")) == source.name
+        and str(row.get("canonical_preset_id", "")) in allowed
+    ]
+    return filtered, _sha256_file(allowlist_path), allowed
+
+
 def _load_statistics(path: str | Path) -> FlowStatistics:
     with np.load(path, allow_pickle=False) as values:
         return FlowStatistics(
             mean=torch.from_numpy(values["mean"].copy()),
             latent_std=torch.from_numpy(values["latent_std"].copy()),
             delta_std=torch.from_numpy(values["delta_std"].copy()),
-            latent_norm_p01=torch.as_tensor(
-                values["latent_norm_p01"].copy()
-            ),
-            latent_norm_p99=torch.as_tensor(
-                values["latent_norm_p99"].copy()
-            ),
+            latent_norm_p01=torch.as_tensor(values["latent_norm_p01"].copy()),
+            latent_norm_p99=torch.as_tensor(values["latent_norm_p99"].copy()),
         )
 
 
 def _packed_latent(root: Path, row: dict[str, Any]) -> np.ndarray:
     with np.load(root / str(row["shard"]), allow_pickle=False) as values:
-        latent = values["latents"][
-            int(row["shard_row"]), : int(row["length"])
-        ].astype(np.float32)
+        latent = values["latents"][int(row["shard_row"]), : int(row["length"])].astype(
+            np.float32
+        )
     if latent.ndim != 2 or not np.isfinite(latent).all():
         raise ValueError(f"invalid packed latent for {row['sample_id']}")
     return latent
@@ -1211,8 +1462,7 @@ def render_flow_audition(
     if generated_frames <= 0:
         raise ValueError("generated_frames must be positive")
     if not explorations or any(
-        not math.isfinite(value) or not 0.0 <= value <= 1.0
-        for value in explorations
+        not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in explorations
     ):
         raise ValueError("explorations must be non-empty and in [0, 1]")
     if not generation_seeds or any(value < 0 for value in generation_seeds):
@@ -1242,6 +1492,7 @@ def render_flow_audition(
         pack_index_sha256=_sha256_file(index_path),
         statistics_sha256=_sha256_file(statistics_path),
         exploration_enabled=config.exploration.enabled,
+        expected_data_selection_sha256=data_selection_sha256(config),
     )
     checkpoint_architecture = str(payload["architecture"])
     initialization = payload.get("initialization")
@@ -1265,6 +1516,11 @@ def render_flow_audition(
         raise ValueError("RAVE codec latent dimension mismatch")
 
     sequence_rows = _read_jsonl(packed_root / "sequences.jsonl")
+    (
+        sequence_rows,
+        preset_allowlist_sha256,
+        allowed_preset_ids,
+    ) = _filter_audition_preset_allowlist(sequence_rows, config)
     selected = select_audition_rows(
         sequence_rows,
         categories=categories,
@@ -1272,9 +1528,12 @@ def render_flow_audition(
         seed=selection_seed,
         minimum_active_frames=config.model.context_frames,
     )
+    if allowed_preset_ids is not None and any(
+        str(row["canonical_preset_id"]) not in allowed_preset_ids for row in selected
+    ):
+        raise RuntimeError("audition selected a preset outside preset_allowlist")
     manifest_rows = {
-        str(row["sample_id"]): row
-        for row in _read_jsonl(config.data.unified_manifest)
+        str(row["sample_id"]): row for row in _read_jsonl(config.data.unified_manifest)
     }
     latents: list[np.ndarray] = []
     sources: list[np.ndarray] = []
@@ -1304,9 +1563,7 @@ def render_flow_audition(
                 {
                     "category": str(row["category"]),
                     "sample_id": sample_id,
-                    "canonical_preset_id": str(
-                        row["canonical_preset_id"]
-                    ),
+                    "canonical_preset_id": str(row["canonical_preset_id"]),
                     "midi_note": int(row["midi_note"]),
                     "velocity": int(row["velocity"]),
                     "source": _write_audio_pair(
@@ -1330,9 +1587,7 @@ def render_flow_audition(
             sources.append(source)
 
         history = torch.from_numpy(
-            np.stack(
-                [latent[: config.model.context_frames] for latent in latents]
-            )
+            np.stack([latent[: config.model.context_frames] for latent in latents])
         ).to(device)
         for exploration_index, exploration in enumerate(explorations):
             for generation_seed in generation_seeds:
@@ -1357,9 +1612,7 @@ def render_flow_audition(
                         # cross-seed diversity belongs to the predictor latent.
                         random_seed=config.seed + index,
                     )
-                    exploration_name = str(float(exploration)).replace(
-                        ".", "p"
-                    )
+                    exploration_name = str(float(exploration)).replace(".", "p")
                     stem = (
                         f"{index:02d}-{_slug(str(example['category']))}"
                         f"-flow-e{exploration_name}-s{generation_seed}"
@@ -1449,6 +1702,8 @@ def render_flow_audition(
         "selection_seed": selection_seed,
         "examples": examples,
     }
+    if preset_allowlist_sha256 is not None:
+        manifest["preset_allowlist_sha256"] = preset_allowlist_sha256
     (output / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -1486,7 +1741,7 @@ def render_midi_flow_audition(
     selection_seed: int = 20260812,
     device_name: str = "cuda",
 ) -> dict[str, Any]:
-    """Render paired matched/note-swap MIDI sequence continuations."""
+    """Render constant, note-step, and velocity-step MIDI continuations."""
 
     config_path = Path(config_path)
     checkpoint_path = Path(checkpoint_path)
@@ -1501,21 +1756,18 @@ def render_midi_flow_audition(
         "expected_initializer_sha256",
         expected_initializer_sha256,
     )
-    if generated_frames <= 0:
-        raise ValueError("generated_frames must be positive")
+    if generated_frames <= 0 or generated_frames % 16:
+        raise ValueError("generated_frames must be positive and divisible by 16")
     if (
         len(generation_seeds) < 2
         or len(set(generation_seeds)) != len(generation_seeds)
         or any(
-            not isinstance(value, int)
-            or isinstance(value, bool)
-            or value < 0
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
             for value in generation_seeds
         )
     ):
         raise ValueError(
-            "generation seeds must contain at least two unique, "
-            "non-negative integers"
+            "generation seeds must contain at least two unique, non-negative integers"
         )
     if not categories or len(set(categories)) != len(categories):
         raise ValueError("categories must be non-empty and unique")
@@ -1523,11 +1775,9 @@ def render_midi_flow_audition(
         raise ValueError("temperature must be finite and non-negative")
     if wander_delay_frames not in {16, 32, 48}:
         raise ValueError("wander_delay_frames must be 16, 32, or 48")
-    if (
-        len(expected_note_vocabulary) < 2
-        or tuple(sorted(set(expected_note_vocabulary)))
-        != tuple(expected_note_vocabulary)
-    ):
+    if len(expected_note_vocabulary) < 2 or tuple(
+        sorted(set(expected_note_vocabulary))
+    ) != tuple(expected_note_vocabulary):
         raise ValueError(
             "expected_note_vocabulary must be sorted, unique, and non-trivial"
         )
@@ -1544,9 +1794,7 @@ def render_midi_flow_audition(
     if not config.segment_sampling.enabled:
         raise ValueError("MIDI audition requires segment sampling")
     resolved_pitch_guidance = (
-        config.model.pitch_guidance
-        if pitch_guidance is None
-        else float(pitch_guidance)
+        config.model.pitch_guidance if pitch_guidance is None else float(pitch_guidance)
     )
     if (
         not math.isfinite(resolved_pitch_guidance)
@@ -1583,16 +1831,13 @@ def render_midi_flow_audition(
         config_sha256=config_hash,
         pack_index_sha256=pack_hash,
         statistics_sha256=statistics_hash,
-        pitch_checkpoint_sha256=str(
-            pitch_artifacts["checkpoint_sha256"]
-        ),
-        pitch_qualification_sha256=str(
-            pitch_artifacts["qualification_sha256"]
-        ),
+        pitch_checkpoint_sha256=str(pitch_artifacts["checkpoint_sha256"]),
+        pitch_qualification_sha256=str(pitch_artifacts["qualification_sha256"]),
         maximum_updates=config.train.max_updates,
         segment_sampling=config.segment_sampling.enabled,
         expected_initializer_sha256=expected_initializer_sha256,
         expected_initializer_update=expected_initializer_update,
+        expected_data_selection_sha256=data_selection_sha256(config),
     )
     checkpoint_architecture = str(payload["architecture"])
     checkpoint_contract = dict(payload["contract"])
@@ -1605,6 +1850,9 @@ def render_midi_flow_audition(
     model.load_state_dict(payload["model"], strict=True)
     model.eval().requires_grad_(False)
     del payload
+
+    pitch_probe = pitch_artifacts["probe"].to(device)
+    pitch_probe.eval().requires_grad_(False)
 
     codec_path = Path(config.rave.checkpoint)
     codec_hash = _sha256_file(codec_path)
@@ -1624,6 +1872,14 @@ def render_midi_flow_audition(
             f"{tuple(expected_note_vocabulary)}, got "
             f"{observed_note_vocabulary}"
         )
+    observed_velocity_vocabulary = tuple(
+        sorted({int(row["velocity"]) for row in sequence_rows})
+    )
+    if observed_velocity_vocabulary != (54, 108):
+        raise ValueError(
+            "pack MIDI velocity vocabulary mismatch: expected (54, 108), got "
+            f"{observed_velocity_vocabulary}"
+        )
     selected = select_audition_rows(
         sequence_rows,
         categories=categories,
@@ -1632,8 +1888,7 @@ def render_midi_flow_audition(
         minimum_active_frames=config.model.context_frames,
     )
     manifest_rows = {
-        str(row["sample_id"]): row
-        for row in _read_jsonl(config.data.unified_manifest)
+        str(row["sample_id"]): row for row in _read_jsonl(config.data.unified_manifest)
     }
     latents: list[np.ndarray] = []
     sources: list[np.ndarray] = []
@@ -1677,17 +1932,13 @@ def render_midi_flow_audition(
                     "category": str(row["category"]),
                     "split": str(row["split"]),
                     "sample_id": sample_id,
-                    "canonical_preset_id": str(
-                        row["canonical_preset_id"]
-                    ),
+                    "canonical_preset_id": str(row["canonical_preset_id"]),
                     "midi_note": recorded_note,
                     "velocity": recorded_velocity,
-                    "history_requested_notes": [
-                        recorded_note
-                    ] * config.model.context_frames,
-                    "history_requested_velocities": [
-                        recorded_velocity
-                    ] * config.model.context_frames,
+                    "history_requested_notes": [recorded_note]
+                    * config.model.context_frames,
+                    "history_requested_velocities": [recorded_velocity]
+                    * config.model.context_frames,
                     "decoder_seed": decoder_seed,
                     "source": _write_audio_pair(
                         output,
@@ -1704,9 +1955,7 @@ def render_midi_flow_audition(
             sources.append(source)
 
         history = torch.from_numpy(
-            np.stack(
-                [latent[: config.model.context_frames] for latent in latents]
-            )
+            np.stack([latent[: config.model.context_frames] for latent in latents])
         ).to(device=device, dtype=torch.float32)
         recorded_notes = torch.tensor(
             [example["midi_note"] for example in examples],
@@ -1718,14 +1967,22 @@ def render_midi_flow_audition(
             device=device,
             dtype=torch.long,
         )
-        history_notes = recorded_notes[:, None].expand(
-            -1,
-            config.model.context_frames,
-        ).clone()
-        history_velocities = recorded_velocities[:, None].expand(
-            -1,
-            config.model.context_frames,
-        ).clone()
+        history_notes = (
+            recorded_notes[:, None]
+            .expand(
+                -1,
+                config.model.context_frames,
+            )
+            .clone()
+        )
+        history_velocities = (
+            recorded_velocities[:, None]
+            .expand(
+                -1,
+                config.model.context_frames,
+            )
+            .clone()
+        )
         controls = build_midi_audition_control_sequences(
             recorded_notes,
             recorded_velocities,
@@ -1733,7 +1990,14 @@ def render_midi_flow_audition(
             note_min=config.model.note_min,
             note_max=config.model.note_max,
             available_notes=observed_note_vocabulary,
+            available_velocities=observed_velocity_vocabulary,
         )
+        adherence_by_kind: dict[str, list[dict[str, object]]] = {
+            kind: [] for kind in controls
+        }
+        transition_events_by_kind: dict[str, list[dict[str, object]]] = {
+            kind: [] for kind in controls
+        }
         for condition_kind, (
             requested_notes,
             requested_velocities,
@@ -1754,6 +2018,18 @@ def render_midi_flow_audition(
                     pitch_guidance=resolved_pitch_guidance,
                     solver_steps=config.model.solver_steps,
                 )
+                adherence_windows = latent_pitch_probe_adherence(
+                    generated,
+                    requested_notes,
+                    pitch_probe,
+                )
+                windows_by_sample: dict[int, list[dict[str, object]]] = {
+                    index: [] for index in range(len(examples))
+                }
+                for window in adherence_windows:
+                    window_row = dict(window)
+                    sample_index = int(window_row.pop("sample_index"))
+                    windows_by_sample[sample_index].append(window_row)
                 complete = torch.cat((history, generated), dim=1)
                 for index, example in enumerate(examples):
                     decoder_seed = int(example["decoder_seed"])
@@ -1766,8 +2042,33 @@ def render_midi_flow_audition(
                         random_seed=decoder_seed,
                     )
                     condition_note = int(requested_notes[index, 0].item())
-                    condition_velocity = int(
-                        requested_velocities[index, 0].item()
+                    condition_velocity = int(requested_velocities[index, 0].item())
+                    note_first = int(requested_notes[index, 0].item())
+                    note_last = int(requested_notes[index, -1].item())
+                    velocity_first = int(requested_velocities[index, 0].item())
+                    velocity_last = int(requested_velocities[index, -1].item())
+                    requested_note_values = (
+                        [note_first]
+                        if note_first == note_last
+                        else [note_first, note_last]
+                    )
+                    requested_velocity_values = (
+                        [velocity_first]
+                        if velocity_first == velocity_last
+                        else [velocity_first, velocity_last]
+                    )
+                    condition_description = (
+                        " → ".join(f"N{int(value)}" for value in requested_note_values)
+                        + " / "
+                        + " → ".join(
+                            f"V{int(value)}" for value in requested_velocity_values
+                        )
+                    )
+                    transition_proxy = _latent_pitch_transition_settling(
+                        windows_by_sample[index],
+                        requested_notes[index],
+                        latent_hop=config.rave.latent_hop,
+                        sample_rate=config.rave.sample_rate,
                     )
                     stem = (
                         f"{index:02d}-{_slug(str(example['category']))}"
@@ -1785,7 +2086,7 @@ def render_midi_flow_audition(
                         {
                             "label": (
                                 f"MIDI {condition_kind.replace('_', ' ')} "
-                                f"· N{condition_note} V{condition_velocity} "
+                                f"· {condition_description} "
                                 f"· Seed {generation_seed}"
                             ),
                             "condition_kind": condition_kind,
@@ -1795,22 +2096,76 @@ def render_midi_flow_audition(
                                 requested_notes[index].detach().cpu().tolist()
                             ),
                             "requested_velocities": (
-                                requested_velocities[index]
-                                .detach()
-                                .cpu()
-                                .tolist()
+                                requested_velocities[index].detach().cpu().tolist()
                             ),
                             "generation_seed": int(generation_seed),
                             "decoder_seed": decoder_seed,
                             "temperature": float(temperature),
                             "wander_delay_frames": wander_delay_frames,
                             "pitch_guidance": resolved_pitch_guidance,
-                            "commit_stride_frames": (
-                                config.model.future_frames
-                            ),
+                            "commit_stride_frames": (config.model.future_frames),
+                            "pitch_adherence_proxy": {
+                                "metric_kind": "latent_pitch_probe_proxy",
+                                "window_frames": 16,
+                                "target_policy": (
+                                    "requested_note_at_lower_window_midpoint"
+                                ),
+                                "voiced_coverage": None,
+                                "voiced_coverage_reason": (
+                                    "latent probe has no voiced/unvoiced observation; "
+                                    "decoded-audio CREPE remains a separate evaluation"
+                                ),
+                                "summary": _pitch_adherence_summary(
+                                    windows_by_sample[index]
+                                ),
+                                "transition": transition_proxy,
+                                "windows": windows_by_sample[index],
+                            },
                         }
                     )
                     example["rollouts"].append(rendered)
+                    adherence_by_kind[condition_kind].extend(windows_by_sample[index])
+                    transition_events_by_kind[condition_kind].extend(
+                        transition_proxy["events"]
+                    )
+
+        adherence_overall = [
+            row
+            for condition_rows in adherence_by_kind.values()
+            for row in condition_rows
+        ]
+        adherence_aggregate = {
+            "metric_kind": "latent_pitch_probe_proxy",
+            "semantic_warning": (
+                "This measures a qualified frozen probe on generated latents; "
+                "it is not decoded-audio/CREPE MIDI accuracy."
+            ),
+            "window_frames": 16,
+            "target_policy": "requested_note_at_lower_window_midpoint",
+            "control_scope": (
+                "constant matched, constant observed-vocabulary note_swap, "
+                "midpoint recorded-to-next note_step, and midpoint 54<->108 "
+                "velocity_step"
+            ),
+            "step_transition_control": True,
+            "velocity_step_control": True,
+            "voiced_coverage": None,
+            "voiced_coverage_reason": (
+                "latent probe has no voiced/unvoiced observation; decoded-audio "
+                "CREPE remains a separate evaluation"
+            ),
+            "probe_checkpoint_sha256": pitch_artifacts["checkpoint_sha256"],
+            "probe_qualification_sha256": pitch_artifacts["qualification_sha256"],
+            "by_condition_kind": {
+                kind: _pitch_adherence_summary(rows)
+                for kind, rows in adherence_by_kind.items()
+            },
+            "transition_by_condition_kind": {
+                kind: _latent_pitch_transition_summary(events)
+                for kind, events in transition_events_by_kind.items()
+            },
+            "overall": _pitch_adherence_summary(adherence_overall),
+        }
 
     manifest: dict[str, Any] = {
         "schema": 1,
@@ -1828,15 +2183,26 @@ def render_midi_flow_audition(
         "pitch_probe": {
             "checkpoint_path": str(pitch_artifacts["checkpoint_path"]),
             "checkpoint_sha256": pitch_artifacts["checkpoint_sha256"],
-            "qualification_path": str(
-                pitch_artifacts["qualification_path"]
-            ),
-            "qualification_sha256": pitch_artifacts[
-                "qualification_sha256"
-            ],
+            "qualification_path": str(pitch_artifacts["qualification_path"]),
+            "qualification_sha256": pitch_artifacts["qualification_sha256"],
             "qualification_update": pitch_artifacts["update"],
             "gates": pitch_artifacts["gates"],
             "metrics": pitch_artifacts["metrics"],
+        },
+        "pitch_adherence_proxy": adherence_aggregate,
+        "decoded_audio_midi_evaluation": {
+            "status": "controls_materialized_evaluation_pending",
+            "missing_metrics": [
+                "crepe_voiced_coverage",
+                "crepe_absolute_cents",
+                "note_step_transition_settling_ms",
+                "velocity_step_rms_response_proxy",
+            ],
+            "reason": (
+                "The audition contains note_step and velocity_step controls. "
+                "Run the separate decoded-audio panel for CREPE note-step "
+                "settling and report-only velocity-to-loudness response."
+            ),
         },
         "codec": {
             "path": str(codec_path.resolve()),
@@ -1868,7 +2234,16 @@ def render_midi_flow_audition(
         "controls": {
             "matched": "recorded note and recorded velocity",
             "note_vocabulary": list(observed_note_vocabulary),
+            "velocity_vocabulary": list(observed_velocity_vocabulary),
             "note_swap_policy": "next observed note in sorted cyclic order",
+            "note_step_policy": (
+                "recorded note to next observed note at generated midpoint"
+            ),
+            "velocity_step_policy": (
+                "recorded velocity to the other observed 54/108 velocity at "
+                "generated midpoint"
+            ),
+            "transition_frame": generated_frames // 2,
             "note_swap_mapping": {
                 str(note): observed_note_vocabulary[
                     (index + 1) % len(observed_note_vocabulary)

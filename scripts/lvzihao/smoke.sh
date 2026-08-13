@@ -19,9 +19,24 @@ assert_config_contract "$config_relative" "$run_relative"
   die "invalid experiment id: $experiment_id"
 config=$(container_config_path "$config_relative")
 optional_pitch_probe_args
+host_config=$(host_config_path "$config_relative")
+model_profile=$(awk '$1 == "profile:" {print $2; exit}' "$host_config")
+model_profile=${model_profile:-standard}
+pitch_conditioning=$(awk '$1 == "pitch_conditioning:" {print $2; exit}' "$host_config")
+pitch_conditioning=${pitch_conditioning:-true}
+if [[ "$model_profile" != standard && "$pitch_conditioning" == false ]]; then
+  [[ -z "${LV_INITIALIZE_FROM:-}" ]] ||
+    die "non-standard pure profiles train from scratch; unset LV_INITIALIZE_FROM"
+elif (
+  [[ "$model_profile" != standard ]] &&
+  [[ "$pitch_conditioning" == true ]] &&
+  [[ -z "${LV_INITIALIZE_FROM:-}" ]]
+); then
+  die "non-standard MIDI profiles require a same-profile pure LV_INITIALIZE_FROM"
+fi
 INITIALIZER_ARGS=()
 if [[ -n "${LV_INITIALIZE_FROM:-}" ]]; then
-  require_file "$LV_INITIALIZE_FROM"
+  verify_initializer_environment "$LV_INITIALIZE_FROM"
   initializer_container=$(
     host_path_to_container_work_path "$LV_INITIALIZE_FROM"
   )

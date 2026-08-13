@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass, field, fields
 from math import isclose
 from pathlib import Path
@@ -7,9 +9,80 @@ from typing import Any, TypeVar
 
 import yaml
 
-
 _SECTION = TypeVar("_SECTION")
 _WANDER_DELAYS = (16, 32, 48)
+FLOW_MODEL_PROFILES: dict[str, tuple[int, int, int, int, int]] = {
+    "standard": (384, 4, 8, 8, 1536),
+    "small": (256, 3, 6, 8, 1024),
+    "tiny": (128, 2, 4, 4, 512),
+}
+
+
+def _preset_id(value: object, *, location: str) -> str:
+    if isinstance(value, dict):
+        value = value.get(
+            "canonical_preset_id",
+            value.get("preset_id"),
+        )
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"preset allowlist entry at {location} must contain a "
+            "non-empty canonical preset ID"
+        )
+    result = value.strip()
+    if "\n" in result or "\r" in result or "\x00" in result:
+        raise ValueError(f"preset allowlist entry at {location} is invalid")
+    return result
+
+
+def load_preset_allowlist(path: str | Path) -> tuple[str, ...]:
+    """Load canonical preset IDs from taxonomy JSON, JSONL, or text.
+
+    Supported JSON documents are ``{"preset_ids": [...]}`` and a top-level
+    array.  JSONL objects may use ``canonical_preset_id`` (preferred) or
+    ``preset_id``.  Plain-text files contain one canonical ID per non-comment
+    line.  IDs are exact and case-sensitive; duplicates are removed while
+    preserving their first occurrence.
+    """
+
+    source = Path(path)
+    text = source.read_text(encoding="utf-8")
+    values: list[object]
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        values = []
+        for line_number, raw_line in enumerate(text.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                value = line
+            values.append((line_number, value))
+        ids = [
+            _preset_id(value, location=f"line {line_number}")
+            for line_number, value in values
+        ]
+    else:
+        if isinstance(payload, dict):
+            if "preset_ids" not in payload:
+                raise ValueError("preset allowlist JSON object must contain preset_ids")
+            payload = payload["preset_ids"]
+        if not isinstance(payload, list):
+            raise ValueError(
+                "preset allowlist JSON must be an array or an object "
+                "containing preset_ids"
+            )
+        ids = [
+            _preset_id(value, location=f"item {index}")
+            for index, value in enumerate(payload)
+        ]
+    unique = tuple(dict.fromkeys(ids))
+    if not unique:
+        raise ValueError(f"preset allowlist is empty: {source}")
+    return unique
 
 
 def _positive(name: str, value: int | float) -> None:
@@ -32,9 +105,7 @@ def _strict_section(
     allowed = {field.name for field in fields(section_type)}
     unknown = set(values) - allowed
     if unknown:
-        raise ValueError(
-            f"unknown {name} config keys: {', '.join(sorted(unknown))}"
-        )
+        raise ValueError(f"unknown {name} config keys: {', '.join(sorted(unknown))}")
     try:
         return section_type(**values)
     except TypeError as error:
@@ -52,6 +123,7 @@ class FlowSourceConfig:
     registry_dataset_id: str | None = None
     preset_metadata: str | None = None
     allowed_categories: tuple[str, ...] = ()
+    preset_allowlist: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -65,6 +137,11 @@ class FlowSourceConfig:
             raise ValueError("source kind must be registry or jsonl")
         if not self.manifest or not self.audio_root:
             raise ValueError("source manifest and audio_root are required")
+        if self.preset_allowlist is not None and (
+            not isinstance(self.preset_allowlist, str)
+            or not self.preset_allowlist.strip()
+        ):
+            raise ValueError("source preset_allowlist must be a non-empty path")
         _positive(f"source {self.name} weight", self.weight)
         _positive(
             f"source {self.name} maximum_future_frames",
@@ -138,6 +215,7 @@ class FlowRaveConfig:
 @dataclass(frozen=True)
 class FlowModelConfig:
     latent_dim: int = 16
+    profile: str = "standard"
     context_frames: int = 32
     future_frames: int = 64
     d_model: int = 384
@@ -159,27 +237,35 @@ class FlowModelConfig:
         if not isinstance(self.pitch_conditioning, bool):
             raise ValueError("model.pitch_conditioning must be boolean")
         if not isinstance(self.midi_sequence_conditioning, bool):
-            raise ValueError(
-                "model.midi_sequence_conditioning must be boolean"
-            )
+            raise ValueError("model.midi_sequence_conditioning must be boolean")
         if self.midi_sequence_conditioning and not self.pitch_conditioning:
             raise ValueError(
-                "model.midi_sequence_conditioning requires "
-                "pitch_conditioning"
+                "model.midi_sequence_conditioning requires pitch_conditioning"
             )
         object.__setattr__(
             self,
             "wander_delay_frames",
             tuple(self.wander_delay_frames),
         )
+        if self.profile not in FLOW_MODEL_PROFILES:
+            raise ValueError("model.profile must be standard, small, or tiny")
+        profile_values = (
+            self.d_model,
+            self.context_layers,
+            self.future_layers,
+            self.heads,
+            self.feedforward_dim,
+        )
+        expected_profile = FLOW_MODEL_PROFILES[self.profile]
+        if profile_values != expected_profile:
+            raise ValueError(
+                f"model profile {self.profile} requires "
+                "d_model/context_layers/future_layers/heads/"
+                f"feedforward_dim={expected_profile}, got {profile_values}"
+            )
         exact = {
             "context_frames": 32,
             "future_frames": 64,
-            "d_model": 384,
-            "context_layers": 4,
-            "future_layers": 8,
-            "heads": 8,
-            "feedforward_dim": 1536,
             "note_min": 21,
             "note_max": 109,
             "solver_steps": 8,
@@ -290,12 +376,13 @@ class FlowTrainConfig:
         ):
             _positive(f"train.{name}", getattr(self, name))
         _positive("train.gradient_clip", self.gradient_clip)
-        if self.checkpoint_every != 5000:
-            raise ValueError("train.checkpoint_every must be 5000")
-        if self.validation_every != 5000:
-            raise ValueError("train.validation_every must be 5000")
-        if self.short_future_updates != 5000:
-            raise ValueError("train.short_future_updates must be 5000")
+        for name in (
+            "checkpoint_every",
+            "validation_every",
+            "short_future_updates",
+        ):
+            if getattr(self, name) not in {1000, 5000}:
+                raise ValueError(f"train.{name} must be 1000 or 5000")
         if self.precision != "amp_fp16":
             raise ValueError("train.precision must be amp_fp16")
         exact_floats = {
@@ -308,9 +395,7 @@ class FlowTrainConfig:
         if self.exposure_prefix_frames != 32:
             raise ValueError("train.exposure_prefix_frames must be 32")
         if self.pitch_transition_fraction not in {0.0, 0.20}:
-            raise ValueError(
-                "train.pitch_transition_fraction must be 0.0 or 0.20"
-            )
+            raise ValueError("train.pitch_transition_fraction must be 0.0 or 0.20")
         if self.seed < 0:
             raise ValueError("train.seed must be non-negative")
 
@@ -346,53 +431,33 @@ class FlowExplorationConfig:
         if not isinstance(self.enabled, bool):
             raise ValueError("exploration.enabled must be boolean")
         if self.visible_history_frames != (8, 16, 32):
-            raise ValueError(
-                "exploration.visible_history_frames must be 8, 16, 32"
-            )
+            raise ValueError("exploration.visible_history_frames must be 8, 16, 32")
         if self.schedule_offsets != (0, 16, 32, 64, 128):
-            raise ValueError(
-                "exploration.schedule_offsets must be 0, 16, 32, 64, 128"
-            )
+            raise ValueError("exploration.schedule_offsets must be 0, 16, 32, 64, 128")
         if (
             self.temperature_minimum,
             self.temperature_maximum,
         ) != (0.7, 1.3):
-            raise ValueError(
-                "exploration temperature range must be 0.7 through 1.3"
-            )
+            raise ValueError("exploration temperature range must be 0.7 through 1.3")
         if (
             self.wander_delay_minimum,
             self.wander_delay_maximum,
         ) != (16, 48):
-            raise ValueError(
-                "exploration wander delay range must be 16 through 48"
-            )
+            raise ValueError("exploration wander delay range must be 16 through 48")
         if self.rollout_stride_frames != 16:
-            raise ValueError(
-                "exploration.rollout_stride_frames must be 16"
-            )
+            raise ValueError("exploration.rollout_stride_frames must be 16")
         if self.exposure_max_depth != 3:
             raise ValueError("exploration.exposure_max_depth must be 3")
         if self.candidate_count not in {1, 2, 4}:
-            raise ValueError(
-                "exploration.candidate_count must be 1, 2, or 4"
-            )
+            raise ValueError("exploration.candidate_count must be 1, 2, or 4")
         if self.temporal_loss_weight != 0.05:
-            raise ValueError(
-                "exploration.temporal_loss_weight must be 0.05"
-            )
+            raise ValueError("exploration.temporal_loss_weight must be 0.05")
         if self.exposure_start_update != 1000:
-            raise ValueError(
-                "exploration.exposure_start_update must be 1000"
-            )
+            raise ValueError("exploration.exposure_start_update must be 1000")
         if self.exposure_ramp_updates != 4000:
-            raise ValueError(
-                "exploration.exposure_ramp_updates must be 4000"
-            )
+            raise ValueError("exploration.exposure_ramp_updates must be 4000")
         if self.exposure_probability != 0.50:
-            raise ValueError(
-                "exploration.exposure_probability must be 0.50"
-            )
+            raise ValueError("exploration.exposure_probability must be 0.50")
 
 
 @dataclass(frozen=True)
@@ -414,9 +479,7 @@ class FlowSegmentSamplingConfig:
         if not isinstance(self.enabled, bool):
             raise ValueError("segment_sampling.enabled must be boolean")
         if not isinstance(self.include_first, bool):
-            raise ValueError(
-                "segment_sampling.include_first must be boolean"
-            )
+            raise ValueError("segment_sampling.include_first must be boolean")
         if (
             not self.divisions
             or tuple(sorted(set(self.divisions))) != self.divisions
@@ -442,9 +505,7 @@ class ZraveFlowConfig:
     loss: FlowLossConfig
     optimizer: FlowOptimizerConfig
     train: FlowTrainConfig
-    exploration: FlowExplorationConfig = field(
-        default_factory=FlowExplorationConfig
-    )
+    exploration: FlowExplorationConfig = field(default_factory=FlowExplorationConfig)
     segment_sampling: FlowSegmentSamplingConfig = field(
         default_factory=FlowSegmentSamplingConfig
     )
@@ -455,25 +516,26 @@ class ZraveFlowConfig:
             raise ValueError("seed must be non-negative")
         if self.seed != self.train.seed:
             raise ValueError("seed and train.seed must match")
-        expected_transition_fraction = (
-            0.20 if self.model.pitch_conditioning else 0.0
-        )
-        if (
-            self.train.pitch_transition_fraction
-            != expected_transition_fraction
+        expected_interval = 5000 if self.model.profile == "standard" else 1000
+        for name in (
+            "checkpoint_every",
+            "validation_every",
+            "short_future_updates",
         ):
+            if getattr(self.train, name) != expected_interval:
+                raise ValueError(
+                    f"train.{name} must be {expected_interval} for "
+                    f"model.profile {self.model.profile}"
+                )
+        expected_transition_fraction = 0.20 if self.model.pitch_conditioning else 0.0
+        if self.train.pitch_transition_fraction != expected_transition_fraction:
             raise ValueError(
-                "train.pitch_transition_fraction must match "
-                "model.pitch_conditioning"
+                "train.pitch_transition_fraction must match model.pitch_conditioning"
             )
         if self.exploration.enabled and self.model.pitch_conditioning:
-            raise ValueError(
-                "exploration with MIDI conditioning is not yet supported"
-            )
+            raise ValueError("exploration with MIDI conditioning is not yet supported")
         if self.exploration.enabled and self.segment_sampling.enabled:
-            raise ValueError(
-                "segment sampling cannot use generated-history exposure"
-            )
+            raise ValueError("segment sampling cannot use generated-history exposure")
 
     @classmethod
     def load(cls, path: str | Path) -> "ZraveFlowConfig":
@@ -494,8 +556,7 @@ class ZraveFlowConfig:
         unknown = set(root) - allowed
         if unknown:
             raise ValueError(
-                "unknown top-level config keys: "
-                + ", ".join(sorted(unknown))
+                "unknown top-level config keys: " + ", ".join(sorted(unknown))
             )
 
         data_raw = _mapping(root.get("data"), "data")
@@ -503,8 +564,7 @@ class ZraveFlowConfig:
         data_unknown = set(data_raw) - data_allowed
         if data_unknown:
             raise ValueError(
-                "unknown data config keys: "
-                + ", ".join(sorted(data_unknown))
+                "unknown data config keys: " + ", ".join(sorted(data_unknown))
             )
         source_rows = data_raw.get("sources")
         if not isinstance(source_rows, list):
@@ -518,18 +578,14 @@ class ZraveFlowConfig:
 
         model_raw = _mapping(root.get("model"), "model")
         if "wander_delay_frames" in model_raw:
-            model_raw["wander_delay_frames"] = tuple(
-                model_raw["wander_delay_frames"]
-            )
+            model_raw["wander_delay_frames"] = tuple(model_raw["wander_delay_frames"])
         exploration_raw = dict(root.get("exploration") or {})
         for name in ("visible_history_frames", "schedule_offsets"):
             if name in exploration_raw:
                 exploration_raw[name] = tuple(exploration_raw[name])
         segment_sampling_raw = dict(root.get("segment_sampling") or {})
         if "divisions" in segment_sampling_raw:
-            segment_sampling_raw["divisions"] = tuple(
-                segment_sampling_raw["divisions"]
-            )
+            segment_sampling_raw["divisions"] = tuple(segment_sampling_raw["divisions"])
         try:
             seed = int(root["seed"])
         except (KeyError, TypeError, ValueError) as error:
@@ -567,3 +623,39 @@ class ZraveFlowConfig:
         payload = asdict(self)
         payload.pop("source_path", None)
         return payload
+
+
+def data_selection_sha256(config: ZraveFlowConfig) -> str | None:
+    """Hash category filters and allowlist bytes for checkpoint binding.
+
+    Legacy standard-profile configs without an allowlist predate this
+    contract field and intentionally return ``None``. Specialist profiles
+    and every allowlist-backed config always receive a selection hash.
+    """
+
+    records_selection = config.model.profile != "standard" or any(
+        source.preset_allowlist is not None for source in config.data.sources
+    )
+    if not records_selection:
+        return None
+    sources: list[dict[str, object]] = []
+    for source in config.data.sources:
+        allowlist_sha256 = (
+            hashlib.sha256(Path(source.preset_allowlist).read_bytes()).hexdigest()
+            if source.preset_allowlist is not None
+            else None
+        )
+        sources.append(
+            {
+                "name": source.name,
+                "allowed_categories": sorted(set(source.allowed_categories)),
+                "preset_allowlist_sha256": allowlist_sha256,
+            }
+        )
+    canonical = json.dumps(
+        {"sources": sources},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()

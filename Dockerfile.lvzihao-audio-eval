@@ -1,0 +1,66 @@
+ARG BASE_IMAGE=midibrave:lvzihao-cu128-v1
+FROM ${BASE_IMAGE}
+ARG EXPECTED_TORCH_PREFIX=2.9.1
+ARG EXPECTED_TORCHAUDIO_PREFIX=2.9.1
+
+LABEL org.opencontainers.image.title="MidiBrave lvzihao decoded-audio evaluator" \
+      org.opencontainers.image.description="Offline torchcrepe 0.0.24 runtime; never used by training queues"
+
+# torch/torchaudio come from the audited CUDA base and must remain an exact
+# matching pair. The official torchcrepe wheel embeds tiny.pth and full.pth, so
+# a qgpu allocation can evaluate with --network none after this image is built.
+RUN if python -m pip --version >/dev/null 2>&1; then \
+      install_command="python -m pip install"; \
+    else \
+      command -v uv >/dev/null; \
+      install_command="uv pip install --python $(command -v python)"; \
+    fi && \
+    $install_command --no-deps torchcrepe==0.0.24 && \
+    $install_command librosa==0.11.0 resampy==0.4.3 tqdm==4.67.1
+
+RUN python - <<PY
+import hashlib
+import importlib.metadata
+from pathlib import Path
+
+import numpy as np
+import torch
+import torchaudio
+import torchcrepe
+import librosa
+
+assert importlib.metadata.version("torchcrepe") == "0.0.24"
+assert importlib.metadata.version("librosa") == "0.11.0"
+assert torch.__version__.startswith("${EXPECTED_TORCH_PREFIX}"), torch.__version__
+assert torchaudio.__version__.startswith("${EXPECTED_TORCHAUDIO_PREFIX}"), (
+    torchaudio.__version__
+)
+assert torch.version.cuda == "12.8", torch.version.cuda
+asset = Path(torchcrepe.__file__).resolve().parent / "assets" / "tiny.pth"
+assert asset.is_file(), asset
+digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+assert digest == "d4993eea36ed1a0ad9ac549c740dae5265b049ce72004f00c2f59e01c0be8432", digest
+
+# Exercise the public inference path during the connected build. Runtime qgpu
+# jobs are then safe to run with Docker networking disabled.
+time = np.arange(16000, dtype=np.float32) / 16000.0
+audio = torch.from_numpy((0.1 * np.sin(2.0 * np.pi * 440.0 * time))[None])
+pitch, periodicity = torchcrepe.predict(
+    audio,
+    16000,
+    160,
+    50.0,
+    2000.0,
+    "tiny",
+    batch_size=1024,
+    device="cpu",
+    return_periodicity=True,
+)
+median_pitch = float(pitch[:, 10:-10].median())
+median_periodicity = float(periodicity[:, 10:-10].median())
+assert 430.0 <= median_pitch <= 450.0, median_pitch
+assert median_periodicity >= 0.8, median_periodicity
+PY
+
+ENTRYPOINT []
+CMD ["/bin/bash"]

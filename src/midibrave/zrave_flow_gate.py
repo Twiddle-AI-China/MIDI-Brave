@@ -15,6 +15,76 @@ import numpy as np
 import soundfile as sf
 
 
+_ENVELOPE_FRAME_SECONDS = 0.020
+_ENVELOPE_HOP_SECONDS = 0.005
+_ENVELOPE_SILENCE_FLOOR_DBFS = -80.0
+_ENVELOPE_ONSET_PEAK_RATIO = 0.05
+_ENVELOPE_ATTACK_PEAK_RATIO = 0.90
+_ENVELOPE_ATTACK_HOLD_SECONDS = 0.015
+_ENVELOPE_SUSTAIN_START_FRACTION = 0.35
+_ENVELOPE_SUSTAIN_END_FRACTION = 0.65
+_ENVELOPE_TAIL_FRACTION = 0.25
+_ENVELOPE_MAXIMUM_TAIL_SECONDS = 1.0
+_ENVELOPE_LAST_RMS_SECONDS = 0.100
+_ENVELOPE_DBFS_FLOOR = -120.0
+_ENVELOPE_SUMMARY_METRICS = (
+    "envelope_peak_rms_dbfs_proxy",
+    "envelope_attack_ms_proxy",
+    "envelope_decay_slope_db_per_second_proxy",
+    "envelope_peak_to_sustain_drop_db_proxy",
+    "envelope_sustain_rms_dbfs_proxy",
+    "envelope_sustain_variation_db_proxy",
+    "envelope_tail_release_slope_db_per_second_proxy",
+    "envelope_tail_rms_dbfs_proxy",
+)
+
+
+def _envelope_algorithm_proxy() -> dict[str, object]:
+    return {
+        "schema": 1,
+        "report_only": True,
+        "claim": (
+            "Relative full-WAV amplitude-envelope proxies; these are not "
+            "true ADSR parameters because the audition renders do not carry "
+            "an authoritative note-off time."
+        ),
+        "analysis_scope": "full_mono_wav",
+        "envelope": "sliding_rms",
+        "frame_seconds": _ENVELOPE_FRAME_SECONDS,
+        "hop_seconds": _ENVELOPE_HOP_SECONDS,
+        "dbfs_floor": _ENVELOPE_DBFS_FLOOR,
+        "silence_floor_dbfs": _ENVELOPE_SILENCE_FLOOR_DBFS,
+        "attack": {
+            "onset_peak_ratio": _ENVELOPE_ONSET_PEAK_RATIO,
+            "crossing_peak_ratio": _ENVELOPE_ATTACK_PEAK_RATIO,
+            "minimum_hold_seconds": _ENVELOPE_ATTACK_HOLD_SECONDS,
+            "definition": (
+                "elapsed time from the first active RMS frame to the first "
+                "sustained crossing of the peak-relative threshold"
+            ),
+        },
+        "sustain": {
+            "start_fraction": _ENVELOPE_SUSTAIN_START_FRACTION,
+            "end_fraction": _ENVELOPE_SUSTAIN_END_FRACTION,
+            "rms_definition": "root mean square of frame RMS values",
+            "variation_definition": "p90 minus p10 frame RMS dBFS",
+        },
+        "decay": {
+            "definition": (
+                "signed dB-per-second line from peak RMS to the center of "
+                "the sustain proxy window; null when the peak is not earlier"
+            )
+        },
+        "tail": {
+            "fraction": _ENVELOPE_TAIL_FRACTION,
+            "maximum_seconds": _ENVELOPE_MAXIMUM_TAIL_SECONDS,
+            "slope_definition": "least-squares frame RMS dBFS slope",
+            "last_rms_seconds": _ENVELOPE_LAST_RMS_SECONDS,
+        },
+        "aggregation_unit": "triplet_take",
+    }
+
+
 @dataclass(frozen=True)
 class GateThresholds:
     """Hard limits for decoded 128D Z-RAVE long-rollout auditions."""
@@ -48,20 +118,19 @@ class GateThresholds:
         if not 0.0 <= self.maximum_silence_ratio <= 1.0:
             raise ValueError("maximum_silence_ratio must be in [0, 1]")
         if not 0.0 <= self.maximum_static_tone_fraction <= 1.0:
-            raise ValueError(
-                "maximum_static_tone_fraction must be in [0, 1]"
-            )
+            raise ValueError("maximum_static_tone_fraction must be in [0, 1]")
         if not 0.0 <= self.maximum_short_cycle_correlation <= 1.0:
-            raise ValueError(
-                "maximum_short_cycle_correlation must be in [0, 1]"
+            raise ValueError("maximum_short_cycle_correlation must be in [0, 1]")
+        if (
+            min(
+                self.maximum_absolute_tail_rms_drift_db,
+                self.maximum_block_boundary_jump_ratio,
+                self.minimum_cross_seed_waveform_nrmse,
+                self.tail_window_seconds,
+                self.cycle_tail_seconds,
             )
-        if min(
-            self.maximum_absolute_tail_rms_drift_db,
-            self.maximum_block_boundary_jump_ratio,
-            self.minimum_cross_seed_waveform_nrmse,
-            self.tail_window_seconds,
-            self.cycle_tail_seconds,
-        ) < 0.0:
+            < 0.0
+        ):
             raise ValueError("gate magnitude thresholds must be non-negative")
         if self.minimum_cross_seed_groups < 0:
             raise ValueError("minimum_cross_seed_groups must be non-negative")
@@ -72,9 +141,7 @@ class GateThresholds:
     def from_mapping(cls, value: Mapping[str, object]) -> GateThresholds:
         unknown = sorted(set(value) - set(cls.__dataclass_fields__))
         if unknown:
-            raise ValueError(
-                "unknown gate threshold fields: " + ", ".join(unknown)
-            )
+            raise ValueError("unknown gate threshold fields: " + ", ".join(unknown))
         return cls(**dict(value))  # type: ignore[arg-type]
 
 
@@ -253,19 +320,13 @@ def _generic_triplets(
             AuditionTriplet(
                 identifier=identifier,
                 group_id=_generic_group_id(value, identifier),
-                generation_seed=value.get(
-                    "generation_seed", value.get("seed")
-                ),
+                generation_seed=value.get("generation_seed", value.get("seed")),
                 source=_resolve_path(root, source, "source"),
                 direct=_resolve_path(root, direct, "direct"),
                 generated=_resolve_path(root, generated, "generated"),
-                sample_rate=(
-                    _positive_int(value.get("sample_rate")) or sample_rate
-                ),
+                sample_rate=(_positive_int(value.get("sample_rate")) or sample_rate),
                 seed_boundary_seconds=_seed_boundary_seconds(manifest, value),
-                latent_hop=(
-                    _positive_int(value.get("latent_hop")) or latent_hop
-                ),
+                latent_hop=(_positive_int(value.get("latent_hop")) or latent_hop),
                 block_stride_frames=_block_stride_frames(manifest, value),
                 category=(
                     str(value["category"])
@@ -312,24 +373,16 @@ def _flow_audition_triplets(
             )
             triplets.append(
                 AuditionTriplet(
-                    identifier=(
-                        f"{sample_id}:rollout-{rollout_index}:seed-{seed}"
-                    ),
+                    identifier=(f"{sample_id}:rollout-{rollout_index}:seed-{seed}"),
                     group_id=f"{sample_id}|{control_key}",
                     generation_seed=seed,
-                    source=_resolve_path(
-                        root, example_value.get("source"), "source"
-                    ),
-                    direct=_resolve_path(
-                        root, example_value.get("direct"), "direct"
-                    ),
+                    source=_resolve_path(root, example_value.get("source"), "source"),
+                    direct=_resolve_path(root, example_value.get("direct"), "direct"),
                     generated=_resolve_path(root, rollout_value, "generated"),
                     sample_rate=sample_rate,
                     seed_boundary_seconds=_seed_boundary_seconds(manifest),
                     latent_hop=latent_hop,
-                    block_stride_frames=_block_stride_frames(
-                        manifest, rollout_value
-                    ),
+                    block_stride_frames=_block_stride_frames(manifest, rollout_value),
                     category=(
                         str(example_value["category"])
                         if example_value.get("category") is not None
@@ -378,9 +431,7 @@ def _pure_audition_triplets(
                     group_id=sample_id,
                     generation_seed=seed,
                     source=_resolve_path(root, roles["source"], "source"),
-                    direct=_resolve_path(
-                        root, roles["rave_direct"], "direct"
-                    ),
+                    direct=_resolve_path(root, roles["rave_direct"], "direct"),
                     generated=_resolve_path(root, generated, "generated"),
                     sample_rate=sample_rate,
                     seed_boundary_seconds=_seed_boundary_seconds(manifest),
@@ -466,6 +517,173 @@ def _frame_rms(audio: np.ndarray, frame_samples: int) -> np.ndarray:
     return np.asarray(values, dtype=np.float64)
 
 
+def _rms_dbfs(value: float) -> float:
+    floor = 10.0 ** (_ENVELOPE_DBFS_FLOOR / 20.0)
+    return max(
+        _ENVELOPE_DBFS_FLOOR,
+        20.0 * math.log10(max(float(value), floor)),
+    )
+
+
+def _sliding_envelope_rms(
+    audio: np.ndarray,
+    sample_rate: int,
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    samples = np.asarray(audio, dtype=np.float64)
+    if samples.ndim != 1 or samples.size == 0:
+        raise ValueError("envelope proxy audio must be a non-empty mono array")
+    if not np.isfinite(samples).all():
+        raise ValueError("envelope proxy audio must be finite")
+    if sample_rate <= 0:
+        raise ValueError("envelope proxy sample_rate must be positive")
+    requested_frame = max(1, round(_ENVELOPE_FRAME_SECONDS * sample_rate))
+    frame_samples = min(samples.size, requested_frame)
+    hop_samples = max(1, round(_ENVELOPE_HOP_SECONDS * sample_rate))
+    last_start = samples.size - frame_samples
+    starts = list(range(0, last_start + 1, hop_samples))
+    if not starts or starts[-1] != last_start:
+        starts.append(last_start)
+    rms = np.asarray(
+        [_rms(samples[start : start + frame_samples]) for start in starts],
+        dtype=np.float64,
+    )
+    centers = (np.asarray(starts, dtype=np.float64) + frame_samples / 2.0) / sample_rate
+    return rms, centers, frame_samples, hop_samples
+
+
+def envelope_proxy_metrics(
+    audio: np.ndarray,
+    sample_rate: int,
+) -> dict[str, float | int | bool | None]:
+    """Compute report-only amplitude-envelope proxies for one mono WAV take."""
+
+    samples = np.asarray(audio, dtype=np.float64)
+    rms, centers, frame_samples, hop_samples = _sliding_envelope_rms(
+        samples,
+        sample_rate,
+    )
+    duration = samples.size / sample_rate
+    rms_db = np.asarray([_rms_dbfs(value) for value in rms], dtype=np.float64)
+    peak_index = int(np.argmax(rms))
+    peak_rms = float(rms[peak_index])
+    peak_dbfs = _rms_dbfs(peak_rms)
+    silence_rms = 10.0 ** (_ENVELOPE_SILENCE_FLOOR_DBFS / 20.0)
+    silent = peak_rms < silence_rms
+
+    sustain_start = duration * _ENVELOPE_SUSTAIN_START_FRACTION
+    sustain_end = duration * _ENVELOPE_SUSTAIN_END_FRACTION
+    sustain_indices = np.flatnonzero(
+        (centers >= sustain_start) & (centers <= sustain_end)
+    )
+    if not sustain_indices.size:
+        sustain_indices = np.asarray(
+            [int(np.argmin(np.abs(centers - duration * 0.5)))],
+            dtype=np.int64,
+        )
+    sustain_values = rms[sustain_indices]
+    sustain_db_values = rms_db[sustain_indices]
+    sustain_rms = float(np.sqrt(np.mean(np.square(sustain_values))))
+    sustain_dbfs = _rms_dbfs(sustain_rms)
+    sustain_variation = float(
+        np.percentile(sustain_db_values, 90) - np.percentile(sustain_db_values, 10)
+    )
+    sustain_center = float(np.mean(centers[sustain_indices]))
+
+    attack_ms: float | None = None
+    attack_crossing_found = False
+    attack_hold_frames = min(
+        max(
+            1,
+            math.ceil(
+                _ENVELOPE_ATTACK_HOLD_SECONDS
+                / max(hop_samples / sample_rate, 1.0 / sample_rate)
+            ),
+        ),
+        rms.size,
+    )
+    if not silent:
+        onset_threshold = max(
+            silence_rms,
+            peak_rms * _ENVELOPE_ONSET_PEAK_RATIO,
+        )
+        onset_candidates = np.flatnonzero(rms >= onset_threshold)
+        onset_index = int(onset_candidates[0])
+        attack_threshold = peak_rms * _ENVELOPE_ATTACK_PEAK_RATIO
+        final_crossing_start = rms.size - attack_hold_frames
+        for index in range(onset_index, final_crossing_start + 1):
+            if bool(
+                np.all(rms[index : index + attack_hold_frames] >= attack_threshold)
+            ):
+                attack_ms = max(
+                    0.0,
+                    float(centers[index] - centers[onset_index]) * 1000.0,
+                )
+                attack_crossing_found = True
+                break
+
+    peak_to_sustain_drop = max(0.0, peak_dbfs - sustain_dbfs)
+    peak_time = float(centers[peak_index])
+    decay_seconds = sustain_center - peak_time
+    decay_slope = (
+        (sustain_dbfs - peak_dbfs) / decay_seconds
+        if not silent
+        and decay_seconds > max(1.0 / sample_rate, 0.5 * hop_samples / sample_rate)
+        else None
+    )
+
+    tail_seconds = min(
+        duration,
+        _ENVELOPE_MAXIMUM_TAIL_SECONDS,
+        max(duration * _ENVELOPE_TAIL_FRACTION, frame_samples / sample_rate),
+    )
+    tail_start = max(0.0, duration - tail_seconds)
+    tail_indices = np.flatnonzero(centers >= tail_start)
+    if not tail_indices.size:
+        tail_indices = np.asarray([rms.size - 1], dtype=np.int64)
+    tail_times = centers[tail_indices]
+    tail_db = rms_db[tail_indices]
+    if silent or tail_indices.size < 2 or float(np.ptp(tail_times)) <= 0.0:
+        tail_slope = 0.0
+    else:
+        centered_time = tail_times - float(tail_times[0])
+        tail_slope = float(np.polyfit(centered_time, tail_db, 1)[0])
+    last_window_samples = min(
+        samples.size,
+        max(1, round(_ENVELOPE_LAST_RMS_SECONDS * sample_rate)),
+    )
+    tail_rms_dbfs = _rms_dbfs(_rms(samples[-last_window_samples:]))
+
+    payload: dict[str, float | int | bool | None] = {
+        "envelope_duration_seconds_proxy": duration,
+        "envelope_analysis_samples_proxy": int(samples.size),
+        "envelope_frame_count_proxy": int(rms.size),
+        "envelope_frame_ms_proxy": frame_samples * 1000.0 / sample_rate,
+        "envelope_hop_ms_proxy": hop_samples * 1000.0 / sample_rate,
+        "envelope_silent_proxy": silent,
+        "envelope_peak_rms_dbfs_proxy": peak_dbfs,
+        "envelope_attack_crossing_found_proxy": attack_crossing_found,
+        "envelope_attack_ms_proxy": attack_ms,
+        "envelope_attack_hold_ms_proxy": (
+            attack_hold_frames * hop_samples * 1000.0 / sample_rate
+        ),
+        "envelope_decay_slope_db_per_second_proxy": decay_slope,
+        "envelope_peak_to_sustain_drop_db_proxy": peak_to_sustain_drop,
+        "envelope_sustain_rms_dbfs_proxy": sustain_dbfs,
+        "envelope_sustain_variation_db_proxy": sustain_variation,
+        "envelope_sustain_window_start_seconds_proxy": sustain_start,
+        "envelope_sustain_window_end_seconds_proxy": sustain_end,
+        "envelope_tail_release_slope_db_per_second_proxy": tail_slope,
+        "envelope_tail_rms_dbfs_proxy": tail_rms_dbfs,
+        "envelope_tail_slope_window_start_seconds_proxy": tail_start,
+        "envelope_tail_slope_window_end_seconds_proxy": duration,
+        "envelope_tail_rms_window_seconds_proxy": (last_window_samples / sample_rate),
+    }
+    for name, value in payload.items():
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"non-finite envelope proxy metric: {name}")
+    return payload
+
+
 def _silence_ratio(
     audio: np.ndarray,
     sample_rate: int,
@@ -515,7 +733,7 @@ def _temporal_features(
     edges = np.linspace(0, spectrum.shape[1], 25, dtype=np.int64)
     bands = np.stack(
         [
-            spectrum[:, left:max(left + 1, right)].sum(axis=1)
+            spectrum[:, left : max(left + 1, right)].sum(axis=1)
             for left, right in itertools.pairwise(edges)
         ],
         axis=1,
@@ -607,9 +825,7 @@ def _boundary_metrics(
         boundaries.append(generated_start)
     if block_samples is not None and block_samples > 0:
         first = (
-            generated_start + block_samples
-            if generated_start > 0
-            else block_samples
+            generated_start + block_samples if generated_start > 0 else block_samples
         )
         boundaries.extend(range(first, audio.size, block_samples))
     boundaries = sorted(set(boundaries))
@@ -621,9 +837,7 @@ def _boundary_metrics(
         }
     generated = audio[generated_start:]
     adjacent = np.abs(np.diff(generated.astype(np.float64)))
-    reference = (
-        float(np.percentile(adjacent, 95)) if adjacent.size else 0.0
-    )
+    reference = float(np.percentile(adjacent, 95)) if adjacent.size else 0.0
     jumps = np.asarray(
         [abs(float(audio[index]) - float(audio[index - 1])) for index in boundaries],
         dtype=np.float64,
@@ -641,10 +855,7 @@ def _boundary_metrics(
             steps.append(
                 abs(
                     20.0
-                    * math.log10(
-                        max(_rms(after), 1.0e-12)
-                        / max(_rms(before), 1.0e-12)
-                    )
+                    * math.log10(max(_rms(after), 1.0e-12) / max(_rms(before), 1.0e-12))
                 )
             )
     return {
@@ -703,6 +914,81 @@ def _metric_values(
     return values
 
 
+def _envelope_role_metric_values(
+    rows: Sequence[Mapping[str, object]],
+    role: str,
+    name: str,
+) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        takes = row.get("envelope_takes_proxy")
+        if not isinstance(takes, Mapping):
+            continue
+        metrics = takes.get(role)
+        if not isinstance(metrics, Mapping):
+            continue
+        value = metrics.get(name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            parsed = float(value)
+            if math.isfinite(parsed):
+                values.append(parsed)
+    return values
+
+
+def _envelope_absolute_difference_values(
+    rows: Sequence[Mapping[str, object]],
+    baseline_role: str,
+    name: str,
+) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        takes = row.get("envelope_takes_proxy")
+        if not isinstance(takes, Mapping):
+            continue
+        generated = takes.get("generated")
+        baseline = takes.get(baseline_role)
+        if not isinstance(generated, Mapping) or not isinstance(
+            baseline,
+            Mapping,
+        ):
+            continue
+        generated_value = generated.get(name)
+        baseline_value = baseline.get(name)
+        if (
+            isinstance(generated_value, (int, float))
+            and not isinstance(generated_value, bool)
+            and isinstance(baseline_value, (int, float))
+            and not isinstance(baseline_value, bool)
+        ):
+            difference = abs(float(generated_value) - float(baseline_value))
+            if math.isfinite(difference):
+                values.append(difference)
+    return values
+
+
+def _envelope_summary_proxy(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    return {
+        "report_only": True,
+        "distribution_unit": "triplet_take",
+        "take_distributions": {
+            role: {
+                name: _summary(_envelope_role_metric_values(rows, role, name))
+                for name in _ENVELOPE_SUMMARY_METRICS
+            }
+            for role in ("source", "direct", "generated")
+        },
+        "generated_absolute_difference_distributions": {
+            f"generated_vs_{role}": {
+                name: _summary(_envelope_absolute_difference_values(rows, role, name))
+                for name in _ENVELOPE_SUMMARY_METRICS
+            }
+            for role in ("source", "direct")
+        },
+    }
+
+
 def _check(
     value: float | None,
     threshold: float,
@@ -750,13 +1036,9 @@ def acceptance_gate(
         diversity_groups = int(diversity.get("groups") or 0)
         minimum_group = diversity.get("minimum_group_median_waveform_nrmse")
         minimum_group_value = (
-            float(minimum_group)
-            if isinstance(minimum_group, (int, float))
-            else None
+            float(minimum_group) if isinstance(minimum_group, (int, float)) else None
         )
-        if minimum_group_value is not None and not math.isfinite(
-            minimum_group_value
-        ):
+        if minimum_group_value is not None and not math.isfinite(minimum_group_value):
             minimum_group_value = None
     else:
         diversity_groups = 0
@@ -765,9 +1047,7 @@ def acceptance_gate(
     checks = {
         "wav_load": _check(load_errors, 0, "==", load_errors == 0),
         "finite": _check(nonfinite, 0, "==", nonfinite == 0),
-        "complete_metrics": _check(
-            analyzed, triplets, "==", complete_metrics
-        ),
+        "complete_metrics": _check(analyzed, triplets, "==", complete_metrics),
         "silence_ratio": _check(
             silence,
             limits.maximum_silence_ratio,
@@ -778,22 +1058,19 @@ def acceptance_gate(
             drift,
             limits.maximum_absolute_tail_rms_drift_db,
             "<=",
-            drift is not None
-            and drift <= limits.maximum_absolute_tail_rms_drift_db,
+            drift is not None and drift <= limits.maximum_absolute_tail_rms_drift_db,
         ),
         "static_tone_fraction": _check(
             static,
             limits.maximum_static_tone_fraction,
             "<=",
-            static is not None
-            and static <= limits.maximum_static_tone_fraction,
+            static is not None and static <= limits.maximum_static_tone_fraction,
         ),
         "short_cycle_correlation": _check(
             cycle,
             limits.maximum_short_cycle_correlation,
             "<=",
-            cycle is not None
-            and cycle <= limits.maximum_short_cycle_correlation,
+            cycle is not None and cycle <= limits.maximum_short_cycle_correlation,
         ),
         "block_boundary_jump_ratio": _check(
             boundary,
@@ -813,8 +1090,7 @@ def acceptance_gate(
             limits.minimum_cross_seed_waveform_nrmse,
             ">=",
             minimum_group_value is not None
-            and minimum_group_value
-            >= limits.minimum_cross_seed_waveform_nrmse,
+            and minimum_group_value >= limits.minimum_cross_seed_waveform_nrmse,
         ),
     }
     if limits.minimum_cross_seed_groups == 0 and diversity_groups == 0:
@@ -869,6 +1145,11 @@ def evaluate_wav_triplets(
             "direct": str(triplet.direct),
             "generated": str(triplet.generated),
             "metrics": None,
+            "envelope_takes_proxy": {
+                "source": None,
+                "direct": None,
+                "generated": None,
+            },
             "errors": [],
         }
         loaded: dict[str, _LoadedAudio] = {}
@@ -891,22 +1172,26 @@ def evaluate_wav_triplets(
             rates = {audio.sample_rate for audio in loaded.values()}
             if len(rates) != 1:
                 row["errors"].append("triplet sample rates do not match")
-            row["finite"] = {
-                role: audio.finite for role, audio in loaded.items()
-            }
+            row["finite"] = {role: audio.finite for role, audio in loaded.items()}
             row["all_finite"] = all(audio.finite for audio in loaded.values())
         else:
             row["finite"] = None
             row["all_finite"] = False
 
+        envelope_takes = row["envelope_takes_proxy"]
+        assert isinstance(envelope_takes, dict)
+        for role in ("source", "direct", "generated"):
+            audio = loaded.get(role)
+            if audio is not None and audio.finite:
+                envelope_takes[role] = envelope_proxy_metrics(
+                    audio.audio,
+                    audio.sample_rate,
+                )
+
         generated = loaded.get("generated")
         errors = row["errors"]
         assert isinstance(errors, list)
-        if (
-            generated is not None
-            and bool(row["all_finite"])
-            and not errors
-        ):
+        if generated is not None and bool(row["all_finite"]) and not errors:
             generated_start = round(
                 triplet.seed_boundary_seconds * generated.sample_rate
             )
@@ -990,9 +1275,7 @@ def evaluate_wav_triplets(
     for group_id, values in sorted(groups.items()):
         pair_rows: list[dict[str, object]] = []
         distances: list[float] = []
-        for (left_row, left), (right_row, right) in itertools.combinations(
-            values, 2
-        ):
+        for (left_row, left), (right_row, right) in itertools.combinations(values, 2):
             if str(left_row.generation_seed) == str(right_row.generation_seed):
                 continue
             distance = _normalized_rms_distance(left, right)
@@ -1053,15 +1336,14 @@ def evaluate_wav_triplets(
         "absolute_tail_rms_drift_db": _summary(
             _metric_values(rows, "absolute_tail_rms_drift_db")
         ),
-        "static_tone_fraction": _summary(
-            _metric_values(rows, "static_tone_fraction")
-        ),
+        "static_tone_fraction": _summary(_metric_values(rows, "static_tone_fraction")),
         "maximum_short_cycle_correlation": _summary(
             _metric_values(rows, "maximum_short_cycle_correlation")
         ),
         "block_boundary_jump_ratio": _summary(
             _metric_values(rows, "block_boundary_jump_ratio")
         ),
+        "envelope_summary_proxy": _envelope_summary_proxy(rows),
         "cross_seed_diversity": {
             "groups": len(group_rows),
             "pairs": len(all_distances),
@@ -1078,6 +1360,7 @@ def evaluate_wav_triplets(
         "manifest": str(Path(manifest).resolve()) if manifest else None,
         "manifest_sha256": manifest_sha256,
         "thresholds": asdict(limits),
+        "envelope_algorithm_proxy": _envelope_algorithm_proxy(),
         "files": file_rows,
         "rows": rows,
         "summary": summary,
@@ -1149,9 +1432,7 @@ def _parser() -> argparse.ArgumentParser:
 def _thresholds_from_args(args: argparse.Namespace) -> GateThresholds:
     thresholds = GateThresholds()
     if args.thresholds_json:
-        payload = json.loads(
-            Path(args.thresholds_json).read_text(encoding="utf-8")
-        )
+        payload = json.loads(Path(args.thresholds_json).read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError("thresholds JSON must be a mapping")
         thresholds = GateThresholds.from_mapping(payload)
