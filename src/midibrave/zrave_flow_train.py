@@ -2873,6 +2873,16 @@ def _benchmark(args: argparse.Namespace) -> None:
             args.initialize_from,
             model=runtime["training_model"],
             expected_contract=runtime["contract"],
+            expected_initializer_sha256=getattr(
+                args,
+                "expected_initializer_sha256",
+                None,
+            ),
+            expected_initializer_update=getattr(
+                args,
+                "expected_initializer_update",
+                None,
+            ),
         )
     warmup = int(args.benchmark_warmup)
     measured = int(args.benchmark_updates)

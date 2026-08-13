@@ -35,12 +35,25 @@ elif (
   die "non-standard MIDI profiles require a same-profile pure LV_INITIALIZE_FROM"
 fi
 INITIALIZER_ARGS=()
+EXPECTED_INITIALIZER_ARGS=()
 if [[ -n "${LV_INITIALIZE_FROM:-}" ]]; then
   verify_initializer_environment "$LV_INITIALIZE_FROM"
   initializer_container=$(
     host_path_to_container_work_path "$LV_INITIALIZE_FROM"
   )
   INITIALIZER_ARGS=(--initialize-from "$initializer_container")
+  expected_initializer_sha256=${LV_EXPECTED_INITIALIZER_SHA256:-$INITIALIZER_SHA256}
+  expected_initializer_update=${LV_INITIALIZER_UPDATE:-}
+  if [[ -z "$expected_initializer_update" ]]; then
+    initializer_basename=$(basename -- "$LV_INITIALIZE_FROM")
+    [[ "$initializer_basename" =~ ^step-([0-9]+)\.pt$ ]] ||
+      die "LV_INITIALIZER_UPDATE is required unless initializer is step-N.pt"
+    expected_initializer_update=$((10#${BASH_REMATCH[1]}))
+  fi
+  EXPECTED_INITIALIZER_ARGS=(
+    --expected-initializer-sha256 "$expected_initializer_sha256"
+    --expected-initializer-update "$expected_initializer_update"
+  )
 fi
 
 mkdir -p "$LV_WORK_ROOT/smoke"
@@ -77,6 +90,7 @@ run_timed_gpu_container \
     --benchmark-updates 2 \
     --benchmark-exposure-updates 5 \
     "${INITIALIZER_ARGS[@]}" \
+    "${EXPECTED_INITIALIZER_ARGS[@]}" \
     "${PITCH_PROBE_ARGS[@]}"
 
 require_file "$report_host"

@@ -1819,6 +1819,49 @@ def test_training_start_uses_initializer_without_resume_state(
     }
 
 
+def test_benchmark_forwards_expected_initializer_lineage(monkeypatch) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_initialize(path, **kwargs):
+        observed["path"] = path
+        observed.update(kwargs)
+        return {
+            "source_update": 10000,
+            "source_architecture": "zrave_pure_flow_transformer_v2",
+            "checkpoint_sha256": "f" * 64,
+        }
+
+    monkeypatch.setattr(flow_train, "load_flow_initial_weights", fake_initialize)
+    monkeypatch.setattr(
+        flow_train,
+        "_build_runtime",
+        lambda _args: {
+            "config": SimpleNamespace(
+                segment_sampling=SimpleNamespace(enabled=False),
+                model=SimpleNamespace(midi_sequence_conditioning=False),
+            ),
+            "rank": 0,
+            "device": torch.device("cpu"),
+            "training_model": nn.Linear(1, 1),
+            "contract": {},
+        },
+    )
+    args = SimpleNamespace(
+        initialize_from="step-010000.pt",
+        expected_initializer_sha256="f" * 64,
+        expected_initializer_update=10000,
+        benchmark_warmup=-1,
+        benchmark_updates=1,
+        benchmark_exposure_updates=0,
+    )
+
+    with pytest.raises(ValueError, match="invalid benchmark"):
+        flow_train._benchmark(args)
+
+    assert observed["expected_initializer_sha256"] == "f" * 64
+    assert observed["expected_initializer_update"] == 10000
+
+
 def test_training_resume_forwards_expected_initializer_lineage(
     monkeypatch,
 ) -> None:

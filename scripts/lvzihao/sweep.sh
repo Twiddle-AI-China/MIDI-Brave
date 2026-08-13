@@ -47,12 +47,25 @@ selection_host="$LV_WORK_ROOT/$run_relative/lvzihao-selection.json"
 mkdir -p "$sweep_host" "$(dirname -- "$selection_host")"
 optional_pitch_probe_args
 INITIALIZER_ARGS=()
+EXPECTED_INITIALIZER_ARGS=()
 if [[ -n "${LV_INITIALIZE_FROM:-}" ]]; then
   verify_initializer_environment "$LV_INITIALIZE_FROM"
   initializer_container=$(
     host_path_to_container_work_path "$LV_INITIALIZE_FROM"
   )
   INITIALIZER_ARGS=(--initialize-from "$initializer_container")
+  expected_initializer_sha256=${LV_EXPECTED_INITIALIZER_SHA256:-$INITIALIZER_SHA256}
+  expected_initializer_update=${LV_INITIALIZER_UPDATE:-}
+  if [[ -z "$expected_initializer_update" ]]; then
+    initializer_basename=$(basename -- "$LV_INITIALIZE_FROM")
+    [[ "$initializer_basename" =~ ^step-([0-9]+)\.pt$ ]] ||
+      die "LV_INITIALIZER_UPDATE is required unless initializer is step-N.pt"
+    expected_initializer_update=$((10#${BASH_REMATCH[1]}))
+  fi
+  EXPECTED_INITIALIZER_ARGS=(
+    --expected-initializer-sha256 "$expected_initializer_sha256"
+    --expected-initializer-update "$expected_initializer_update"
+  )
 fi
 expected_config_sha=$(sha256sum "$host_config" | awk '{print $1}')
 expected_pack_sha=$(sha256sum "$pack_index_host" | awk '{print $1}')
@@ -101,6 +114,7 @@ for batch in "${batches[@]}"; do
       --benchmark-updates "$LV_BENCHMARK_UPDATES" \
       --benchmark-exposure-updates "$expected_exposure_updates" \
       "${INITIALIZER_ARGS[@]}" \
+      "${EXPECTED_INITIALIZER_ARGS[@]}" \
       "${PITCH_PROBE_ARGS[@]}"
   status=$?
   set -e

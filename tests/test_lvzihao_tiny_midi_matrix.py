@@ -234,7 +234,11 @@ def test_midi_matrix_shell_contract_keeps_soft_and_hard_gates() -> None:
     assert '[[ "$action" == midi_audition_from ]]' in runner
     assert "LV_EXPECTED_INITIALIZER_SHA256" in common
     assert '--initialize-from "$initializer_container"' in smoke
+    assert '--expected-initializer-sha256 "$expected_initializer_sha256"' in smoke
+    assert '--expected-initializer-update "$expected_initializer_update"' in smoke
     assert '--initialize-from "$initializer_container"' in sweep
+    assert '--expected-initializer-sha256 "$expected_initializer_sha256"' in sweep
+    assert '--expected-initializer-update "$expected_initializer_update"' in sweep
     assert '--initialize-from "$initialize_container"' in train
     assert '--expected-initializer-sha256 "$expected_initializer_sha256"' in train
     assert '--expected-initializer-update "$expected_initializer_update"' in train
