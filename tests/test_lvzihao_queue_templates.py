@@ -217,6 +217,7 @@ def test_midi_audition_strict_contract_and_gate() -> None:
     assert '"$partial/qualification.json"' in script
     assert '"midi_adherence_calibrated": False' in script
     assert '"provisional_gates_passed_uncalibrated"' in script
+    assert 'qualification.get("gate_sha256") == gate_hashes' in script
 
 
 def test_allocation_runner_records_die_failures_as_blocked() -> None:

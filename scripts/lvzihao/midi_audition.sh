@@ -76,10 +76,19 @@ import sys
 from pathlib import Path
 
 manifest_path = Path(sys.argv[1])
+gate_paths = {
+    "generic_long_rollout": Path(sys.argv[2]),
+    "latent_pitch_probe_proxy": Path(sys.argv[3]),
+    "decoded_audio_crepe": Path(sys.argv[4]),
+}
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-gate = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-midi_gate = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
-decoded_gate = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+gate = json.loads(gate_paths["generic_long_rollout"].read_text(encoding="utf-8"))
+midi_gate = json.loads(
+    gate_paths["latent_pitch_probe_proxy"].read_text(encoding="utf-8")
+)
+decoded_gate = json.loads(
+    gate_paths["decoded_audio_crepe"].read_text(encoding="utf-8")
+)
 qualification = json.loads(Path(sys.argv[5]).read_text(encoding="utf-8"))
 manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
 hard = sys.argv[9] == "1"
@@ -95,6 +104,15 @@ gate_results_valid = (
 all_passed = all(
     value.get("passed") is True for value in (gate, midi_gate, decoded_gate)
 )
+gate_results = {
+    "generic_long_rollout": gate.get("passed") is True,
+    "latent_pitch_probe_proxy": midi_gate.get("passed") is True,
+    "decoded_audio_crepe": decoded_gate.get("passed") is True,
+}
+gate_hashes = {
+    name: hashlib.sha256(path.read_bytes()).hexdigest()
+    for name, path in gate_paths.items()
+}
 valid = (
     manifest.get("checkpoint", {}).get("sha256") == sys.argv[6]
     and manifest.get("checkpoint", {}).get("initialization", {}).get(
@@ -114,6 +132,8 @@ valid = (
     and qualification.get("qualified") is False
     and qualification.get("midi_adherence_calibrated") is False
     and qualification.get("checkpoint_sha256") == sys.argv[6]
+    and qualification.get("gates") == gate_results
+    and qualification.get("gate_sha256") == gate_hashes
     and qualification.get("qualification_status")
     == (
         "provisional_gates_passed_uncalibrated"
