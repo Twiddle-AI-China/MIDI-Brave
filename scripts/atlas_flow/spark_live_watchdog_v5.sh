@@ -10,7 +10,7 @@ fi
 
 readonly ROOT=${ATLAS_FLOW_ROOT:-/data/atlas-flow-pad-v1}
 readonly IMAGE=${ATLAS_FLOW_IMAGE:-midibrave:atlas-flow-spark-gb10-v3}
-readonly PROJECT_DIR=${ATLAS_FLOW_PROJECT_DIR:-/data/projects/latent-cosmos-synth/atlas-flow-v5/MidiBrave-v2}
+readonly PROJECT_DIR=${ATLAS_FLOW_PROJECT_DIR:-/data/atlas-flow-pad-v1/source/atlas-flow-v5/MidiBrave-v2}
 readonly RUNTIME_PORT=${ATLAS_FLOW_RUNTIME_PORT:-8791}
 readonly CONTRACT=$ROOT/contracts/spark-gb10/v5
 readonly QUALIFICATION=$CONTRACT/qualification.complete
