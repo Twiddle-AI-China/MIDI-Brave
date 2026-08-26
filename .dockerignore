@@ -8,6 +8,8 @@
 !configs/**
 !scripts/
 !scripts/**
+!atlas-flow-live-dashboard/
+!atlas-flow-live-dashboard/**
 !tests/
 !tests/**
 !training_profiles/
