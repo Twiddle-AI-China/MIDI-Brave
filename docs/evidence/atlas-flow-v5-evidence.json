@@ -1,0 +1,134 @@
+{
+  "schema": "midibrave.atlas-flow.handoff-evidence.v1",
+  "as_of": "2026-08-26",
+  "branch": "feat/atlas-flow-v5",
+  "runtime_source_commit": "003878a402e3ec7f15722ab9a34c50c1db31118b",
+  "scope": "pad-only research prototype",
+  "model": {
+    "checkpoint": "step-000030000.pt",
+    "checkpoint_sha256": "c4207b347099033184616be8be0862338b55157747439c8896525438b0bbe7ba",
+    "total_parameters": 22229681,
+    "latent_dimensions": 128,
+    "atlas_pca_dimensions": 8,
+    "all_modules_trainable": true
+  },
+  "data": {
+    "class": "pad",
+    "presets": 50,
+    "samples": 2700,
+    "split_presets": {
+      "train": 45,
+      "validation": 2,
+      "test": 3
+    },
+    "sample_rate": 44100,
+    "duration_seconds": 5.0,
+    "midi_note_range": [36, 71],
+    "note_on_seconds": 0.1,
+    "note_off_seconds": 2.6,
+    "velocity": 127
+  },
+  "training": {
+    "stage1": {
+      "effective_updates": 60000,
+      "first_logged_update": 320,
+      "first_logged_loss": 6.4094643593,
+      "final_loss": 1.9563854933,
+      "global_batch": 256,
+      "nonfinite_skips": 17,
+      "final_consecutive_nonfinite": 0
+    },
+    "flow": {
+      "effective_updates": 100000,
+      "first_logged_update": 1,
+      "first_logged_loss": 1.3957594633,
+      "final_loss": 0.07370971888,
+      "global_batch": 768,
+      "nonfinite_skips": 0
+    },
+    "joint": {
+      "effective_updates": 30000,
+      "first_logged_update": 1,
+      "first_logged_loss": 1.9480780363,
+      "final_loss": 2.0042293072,
+      "audio_global_batch": 160,
+      "flow_global_batch": 80,
+      "nonfinite_skips": 0,
+      "all_module_gradient_norms_positive": true,
+      "note": "Joint loss combines reconstruction and flow terms and is not directly comparable with either preceding stage."
+    }
+  },
+  "evaluation": {
+    "schema": "midibrave.atlas-flow.evaluation.v2",
+    "pipeline_state": "complete",
+    "quality_state": "fail",
+    "passed": false,
+    "passed_gates": 4,
+    "total_gates": 9,
+    "metric_rows": 108,
+    "audition_rows": 18,
+    "canonical_audio_files": 72,
+    "legacy_alias_audio_files": 12,
+    "test_presets": 3,
+    "audition_notes": [36, 43, 50, 57, 64, 71],
+    "metrics": {
+      "midi_following_fraction": 0.796296,
+      "dynamic_median_improvement_fraction": 0.114381,
+      "dynamic_positive_fraction": 0.740741,
+      "silence_fraction": 0.0,
+      "tail_drift_db": 22.8756,
+      "boundary_ratio": 16.4309,
+      "rms_error_median_db": 9.19915,
+      "rms_error_p90_db": 14.14265,
+      "deterministic_fraction": 1.0
+    },
+    "gates": {
+      "midi_following_ge_0_95": false,
+      "dynamic_median_improvement_ge_0_05": true,
+      "dynamic_positive_fraction_ge_0_70": true,
+      "silence_fraction_le_0_01": true,
+      "tail_drift_db_le_12": false,
+      "boundary_ratio_le_4": false,
+      "rms_error_median_db_le_6": false,
+      "rms_error_p90_db_le_12": false,
+      "deterministic": true
+    },
+    "publication_readiness": "NO-GO"
+  },
+  "spark_runtime": {
+    "qualification_passed": true,
+    "qualification_job": 686,
+    "live_job": 687,
+    "device": "NVIDIA GB10",
+    "compute_capability": [12, 1],
+    "visible_gpus": 1,
+    "block_samples": 4096,
+    "block_deadline_ms": 92.87981859410431,
+    "plan_ms_median": 72.02857732772827,
+    "solver_steps": 4,
+    "websocket_validation": {
+      "passed": true,
+      "telemetry_records": 13,
+      "first_nonzero_block": 22,
+      "minimum_held_peak": 0.0070404470898211,
+      "minimum_post_control_peak": 0.04911237582564354,
+      "release_final_peak": 0.0,
+      "release_idle": true,
+      "errors": []
+    },
+    "automated_tests_passed": 25,
+    "portal_service": "midibrave-atlas-flow-spark-portal@.service",
+    "watchdog_timer": "midibrave-atlas-flow-spark-live@.timer",
+    "dashboard_port": 18790,
+    "runtime_port": 8791
+  },
+  "deployment": {
+    "spark_inference": "running",
+    "spark_portal": "running",
+    "spark_watchdog": "enabled",
+    "octopus_inference": "stopped",
+    "octopus_evaluation_timer": "disabled",
+    "octopus_gpu_processes": 0,
+    "octopus_tensorboard": "running_cpu_only"
+  }
+}
