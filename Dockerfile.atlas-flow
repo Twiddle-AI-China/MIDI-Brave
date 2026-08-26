@@ -1,0 +1,19 @@
+FROM midibrave:octopus-tiny-v1
+
+WORKDIR /opt/midibrave
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY scripts ./scripts
+COPY configs ./configs
+COPY atlas-flow-live-dashboard ./atlas-flow-live-dashboard
+
+# Every production command uses ``python -m`` and the source tree is exposed
+# through PYTHONPATH below. Avoid an unnecessary PEP 517 build-isolation step,
+# which would otherwise download hatchling during an offline image build.
+RUN python -m compileall -q src
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/midibrave/src \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1

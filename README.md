@@ -1,6 +1,16 @@
 # MidiBrave
 
-Independent dual-branch MIDI-conditioned BRAVE training framework for Octopus.
+Independent dual-branch MIDI-conditioned BRAVE training framework.
+
+## Current Atlas Flow v5 handoff
+
+The current Pad Top50 trajectory model, evaluation portal, and continuous live
+instrument are implemented in `src/midibrave/atlas_flow_*.py`,
+`configs/atlas_flow/`, and `atlas-flow-live-dashboard/`. GPU inference is a
+Dockerized SLURM workload on Spark; Octopus is retained only as the training
+artifact source. The complete architecture, data, training, evaluation,
+operations, limitations, and recovery notes are maintained in
+`docs/Atlas-Flow-v5-完整交接文档-2026-08-26.md`.
 
 ## Current v2 qualification rollout
 

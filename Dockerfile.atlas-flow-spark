@@ -1,0 +1,19 @@
+FROM midibrave:spark-gb10-tiny-v1
+
+WORKDIR /opt/midibrave
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY scripts ./scripts
+COPY configs ./configs
+COPY atlas-flow-live-dashboard ./atlas-flow-live-dashboard
+
+# The GB10 base already contains the ARM64 CUDA/PyTorch runtime. Production
+# remains fully offline and imports directly from the source tree.
+RUN python -m compileall -q src
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/midibrave/src \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1

@@ -1,0 +1,26 @@
+[Unit]
+Description=midiBrave Atlas Flow v5 Spark portal
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+EnvironmentFile=-/etc/midibrave/atlas-flow-spark.env
+Restart=always
+RestartSec=5s
+CPUQuota=200%
+MemoryHigh=768M
+MemoryMax=1G
+MemorySwapMax=0
+TasksMax=512
+TimeoutStopSec=30s
+ExecStartPre=-/usr/bin/docker rm -f midibrave-atlas-flow-spark-portal-v5
+ExecStart=/usr/local/sbin/midibrave-atlas-flow-spark-portal-v5
+ExecStop=-/usr/bin/docker stop -t 20 midibrave-atlas-flow-spark-portal-v5
+
+[Install]
+WantedBy=multi-user.target

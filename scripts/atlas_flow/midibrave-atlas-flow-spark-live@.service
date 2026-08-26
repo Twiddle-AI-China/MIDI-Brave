@@ -1,0 +1,15 @@
+[Unit]
+Description=midiBrave Atlas Flow v5 Spark GPU watchdog
+After=network-online.target slurmctld.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+Group=%i
+EnvironmentFile=-/etc/midibrave/atlas-flow-spark.env
+CPUQuota=30%
+MemoryMax=256M
+MemorySwapMax=0
+TasksMax=64
+ExecStart=/usr/local/sbin/midibrave-atlas-flow-spark-live-watchdog-v5

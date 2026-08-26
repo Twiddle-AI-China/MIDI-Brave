@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>midiBrave · Atlas Flow 能力边界</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <header class="hero">
+      <div>
+        <p class="eyebrow">PAD TOP50 · RESEARCH DEMO</p>
+        <h1>Atlas Flow 能力边界</h1>
+        <p class="lead">用同一 MIDI 条件比较重建与完整轨迹生成，并在合法音色图上试听单声部实时漫游。</p>
+      </div>
+      <div id="qualityBadge" class="badge pending">评估载入中</div>
+    </header>
+
+    <section id="qualityNotice" class="notice warning">
+      当前页面是阶段性研究工具；只有全部硬门禁通过后才会显示“自动评估通过”。
+    </section>
+
+    <section class="grid">
+      <article class="panel summary-panel">
+        <div class="section-head">
+          <div><p class="kicker">EVALUATION</p><h2>自动硬门禁</h2></div>
+          <span id="checkpoint" class="mono">—</span>
+        </div>
+        <div id="gates" class="gates"><p class="muted">等待 evaluation.json</p></div>
+        <details>
+          <summary>当前结论与限制</summary>
+          <ul id="limitations"></ul>
+        </details>
+      </article>
+
+      <article class="panel instrument-panel">
+        <div class="section-head">
+          <div><p class="kicker">LIVE INSTRUMENT</p><h2>潜空间漫游</h2></div>
+          <span id="runtimeBadge" class="badge pending">GPU 服务检查中</span>
+        </div>
+        <canvas id="atlas" width="820" height="430" aria-label="音色潜空间控制面板"></canvas>
+        <div class="atlas-legend"><span>彩色点：训练 preset</span><span>空心环：用户目标</span><span>实心点：当前发声音色</span><span>拖动：控制 PC1/PC2</span></div>
+        <div class="pca-head"><div><p class="kicker">FULL PCA CONTROL</p><h3>8D 音色坐标</h3></div><span class="mono">始终投影到合法局部区域</span></div>
+        <div id="pcaSliders" class="pca-sliders"></div>
+        <div class="controls">
+          <label>音高 <output id="noteValue">50</output><input id="note" type="range" min="36" max="71" value="50"></label>
+          <label>力度 <output id="velocityValue">0.80</output><input id="velocity" type="range" min="0" max="1" step="0.01" value="0.80"></label>
+          <label>随机度 <output id="temperatureValue">0.00</output><input id="temperature" type="range" min="0" max="1" step="0.01" value="0"></label>
+          <label>音色渐变 <output id="morphValue">2.0 s</output><input id="morph" type="range" min="0.5" max="5" step="0.1" value="2"></label>
+          <label>种子 <input id="seed" type="number" value="20260822" step="1"></label>
+        </div>
+        <div class="transport">
+          <button id="start" class="primary" disabled>开始演奏</button>
+          <button id="noteOff" disabled>释放</button>
+          <button id="stop" disabled>停止</button>
+          <button id="reseed" disabled>重新采样未来</button>
+        </div>
+        <p class="keyboard-help">电脑键盘：A W S E D F T G Y H U J K。按住持续 sustain，松开当前活动键才进入 release；Start 按钮会锁存音符，需点击“释放”。Pad 单声部，训练音域 MIDI 36–71。</p>
+        <div class="telemetry">
+          <div><small>状态</small><b id="liveState">离线</b></div>
+          <div><small>轨迹策略</small><b id="planMode">—</b></div>
+          <div><small>重规划</small><b id="planMs">—</b></div>
+          <div><small>缓冲欠载</small><b id="underruns">0</b></div>
+          <div><small>连通域</small><b id="component">—</b></div>
+          <div><small>规划队列</small><b id="planPending">—</b></div>
+        </div>
+      </article>
+
+      <article class="panel samples-panel">
+        <div class="section-head">
+          <div><p class="kicker">AUDITION</p><h2>Test preset 对照试听</h2></div>
+          <span id="sampleCount" class="mono">0 个</span>
+        </div>
+        <div class="definitions">
+          <article><b>SOURCE · 真实参考</b><p>Held-out Serum 实际渲染音频，是比较目标，不经过模型。</p></article>
+          <article><b>DYNAMIC · 动态轨迹重建</b><p>Source 提取音高归一化 96D 特征，经 Encoder 得到随时间变化的 128D 轨迹，再用相同 MIDI 解码；检验 Encoder+Decoder 的重建能力。</p></article>
+          <article><b>STATIC · 静态轨迹消融</b><p>把 Dynamic 轨迹沿时间取均值并复制到所有帧，再用相同 Decoder/MIDI 合成；用于判断时间变化轨迹是否真的有贡献，不是另一套模型。</p></article>
+          <article><b>FLOW · 完整轨迹预测</b><p>不读取 Source 轨迹。Flow 根据 Atlas 锚点、8D 坐标、生命周期与历史生成 128D 音色轨迹，随后 Decoder 注入相同 MIDI；检验独立轨迹预测能力。</p></article>
+        </div>
+        <p class="muted">指标覆盖 3 个 held-out preset × MIDI 36–71 共 108 组；页面展示每个 preset 的六个代表音高，共 18 组。播放器切换模式时保持当前时间，请使用耳机并统一音量。</p>
+        <div id="samples" class="samples"><p class="muted">试听材料载入中</p></div>
+      </article>
+    </section>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

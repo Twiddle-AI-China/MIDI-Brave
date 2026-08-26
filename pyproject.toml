@@ -11,6 +11,7 @@ dependencies = [
   "tensorboard>=2.21,<2.22",
   "torchcrepe==0.0.24",
   "laion-clap==1.1.7",
+  "aiohttp==3.14.1",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,12 @@ midibrave-zrave-flow-data = "midibrave.zrave_flow_data:main"
 midibrave-zrave-pitch-train = "midibrave.zrave_pitch_train:main"
 midibrave-zrave-flow-train = "midibrave.zrave_flow_train:main"
 midibrave-zrave-flow-evaluate = "midibrave.zrave_flow_evaluate:main"
+midibrave-atlas-manifest = "midibrave.atlas_flow_manifest:main"
+midibrave-atlas-train = "midibrave.atlas_flow_train:main"
+midibrave-atlas-evaluate = "midibrave.atlas_flow_evaluate:main"
+midibrave-atlas-dashboard = "midibrave.atlas_flow_dashboard:main"
+midibrave-atlas-runtime = "midibrave.atlas_flow_runtime_server:main"
+midibrave-atlas-portal = "midibrave.atlas_flow_portal:main"
 
 [build-system]
 requires = ["hatchling"]
