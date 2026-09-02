@@ -39,6 +39,7 @@ REQUIRED_RECIPE_KEYS = {
     "families",
 }
 OPTIONAL_RECIPE_KEYS = {
+    "environment_prefix",
     "taxonomy_relative",
     "taxonomy_action",
     "audition_reports",
@@ -140,6 +141,9 @@ def _validate_recipe(
         raise ValueError("invalid recipe keys: " + " ".join(details))
     if recipe["schema"] != 1:
         raise ValueError("recipes schema must be 1")
+    environment_prefix = recipe.get("environment_prefix", "LV")
+    if environment_prefix not in {"LV", "SP"}:
+        raise ValueError("environment_prefix must be LV or SP")
     initialization = recipe["initialization"]
     if initialization not in {"scratch", "same_family_pure"}:
         raise ValueError("initialization must be scratch or same_family_pure")
@@ -334,6 +338,7 @@ def materialize(recipes_path: Path) -> dict[Path, str]:
     if taxonomy_relative is not None:
         taxonomy_relative = PurePosixPath(str(taxonomy_relative)).as_posix()
     audition_reports = bool(recipe.get("audition_reports", True))
+    environment_prefix = str(recipe.get("environment_prefix", "LV"))
     taxonomy_action = str(recipe.get("taxonomy_action", "taxonomy"))
     initializer_config_root: Path | None = None
     initializer_run_root: str | None = None
@@ -568,7 +573,7 @@ def materialize(recipes_path: Path) -> dict[Path, str]:
         f"# Source recipe: {recipes_path.relative_to(ROOT).as_posix()}\n"
         + (
             "# Pure tiny category models train from scratch; "
-            "LV_INITIALIZE_FROM must be unset.\n"
+            f"{environment_prefix}_INITIALIZE_FROM must be unset.\n"
             if initialization == "scratch"
             else "# Tiny MIDI models use the per-row same-family pure "
             "initializer; global LV_INITIALIZE_FROM is forbidden.\n"

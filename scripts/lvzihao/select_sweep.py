@@ -7,12 +7,21 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
 
 METRIC = "median_valid_latent_frames_per_second"
+DEFAULT_PLATFORM = "lvzihao-rtx5080-single-gpu"
+_SAFE_PLATFORM = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _platform(value: str) -> str:
+    if not _SAFE_PLATFORM.fullmatch(value):
+        raise ValueError(f"unsafe sweep platform identifier: {value!r}")
+    return value
 
 
 def _digest(path: Path) -> str:
@@ -61,6 +70,7 @@ def _valid(
 
 
 def select(args: argparse.Namespace) -> None:
+    platform = _platform(args.platform)
     if (
         not args.batches
         or any(batch <= 0 for batch in args.batches)
@@ -110,7 +120,7 @@ def select(args: argparse.Namespace) -> None:
     winner = min(tied, key=lambda report: int(report["batch_per_gpu"]))
     selection = {
         "schema": 1,
-        "platform": "lvzihao-rtx5080-single-gpu",
+        "platform": platform,
         "rule": (
             "highest median valid latent frames/s; within 2% choose "
             "the smaller batch"
@@ -126,13 +136,14 @@ def select(args: argparse.Namespace) -> None:
 
 
 def print_verified_batch(args: argparse.Namespace) -> None:
+    platform = _platform(args.platform)
     selection = json.loads(Path(args.selection).read_text(encoding="utf-8"))
     if (
         selection.get("schema") != 1
-        or selection.get("platform") != "lvzihao-rtx5080-single-gpu"
+        or selection.get("platform") != platform
         or selection.get("metric") != METRIC
     ):
-        raise ValueError("unsupported lvzihao sweep selection")
+        raise ValueError(f"unsupported {platform} sweep selection")
     selected = selection["selected"]
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -169,6 +180,7 @@ def parser() -> argparse.ArgumentParser:
     choose.add_argument("--batches", nargs="+", type=int, required=True)
     choose.add_argument("--measured-updates", type=int, required=True)
     choose.add_argument("--exposure-updates", type=int, required=True)
+    choose.add_argument("--platform", default=DEFAULT_PLATFORM)
     choose.set_defaults(handler=select)
 
     verify = commands.add_parser("print-verified-batch")
@@ -176,6 +188,7 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--config", required=True)
     verify.add_argument("--pack-index", required=True)
     verify.add_argument("--project-root", required=True)
+    verify.add_argument("--platform", default=DEFAULT_PLATFORM)
     verify.set_defaults(handler=print_verified_batch)
     return root
 

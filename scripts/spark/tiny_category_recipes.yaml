@@ -1,0 +1,34 @@
+schema: 1
+template: configs/zrave/spark_serum128_tiny_category_template.yaml
+config_output_dir: configs/zrave/generated/spark_tiny_categories_v1
+queue_output: scripts/spark/tiny_categories_v1.queue.tsv
+run_root: runs/spark-tiny-categories-v1
+experiment_prefix: spark-tinycat-v1
+initialization: scratch
+environment_prefix: SP
+maximum_updates: 10000
+checkpoints: [1000, 5000, 10000]
+sweep_batches: [16, 32, 64, 96, 128, 160]
+families:
+  - id: arp
+    categories: [Arp]
+  - id: bass
+    categories: [Bass]
+  - id: fx
+    categories: [FX]
+  - id: lead
+    categories: [Lead]
+  - id: pad
+    categories: [Pad]
+  - id: pluck
+    categories: [Pluck]
+  - id: synth
+    categories: [Synth]
+  - id: chord_pilot
+    categories: [Chord]
+  - id: keys_pilot
+    categories: [Keys]
+  - id: lead_pluck
+    categories: [Lead, Pluck]
+  - id: keys_harmony
+    categories: [Arp, Chord, Keys]

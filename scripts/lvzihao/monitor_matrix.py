@@ -262,12 +262,18 @@ def build_matrix_snapshot(
     *,
     queue_path: str | Path,
     work_root: str | Path,
+    state_root: str | Path | None = None,
 ) -> dict[str, Any]:
     queue = Path(queue_path).expanduser().resolve()
     work = Path(work_root).expanduser().resolve()
     rows = _read_queue(queue)
     queue_name = queue.stem
-    queue_state = work / "lvzihao-state" / "queues" / queue_name
+    state = (
+        Path(state_root).expanduser().resolve()
+        if state_root is not None
+        else work / "lvzihao-state"
+    )
+    queue_state = state / "queues" / queue_name
     blocked = (queue_state / "blocked.txt").is_file()
     queue_complete = (queue_state / "complete.txt").is_file()
     done_root = queue_state / "done"
@@ -449,10 +455,14 @@ def _atomic_text(path: Path, value: str) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Read-only status snapshot for a lvzihao training matrix."
+        description="Read-only status snapshot for a single-GPU training matrix."
     )
     parser.add_argument("--queue", required=True)
     parser.add_argument("--work-root", required=True)
+    parser.add_argument(
+        "--state-root",
+        help="platform-specific queue state root (defaults to lvzihao-state)",
+    )
     parser.add_argument("--json-output")
     parser.add_argument("--markdown-output")
     return parser
@@ -463,6 +473,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     snapshot = build_matrix_snapshot(
         queue_path=args.queue,
         work_root=args.work_root,
+        state_root=args.state_root,
     )
     markdown = markdown_snapshot(snapshot)
     if args.json_output:
