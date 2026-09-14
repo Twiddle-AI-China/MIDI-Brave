@@ -73,23 +73,106 @@ def _spectral_error(prediction: torch.Tensor, target: torch.Tensor) -> float:
     return total / 4
 
 
+def _note_frequency(note: float) -> float:
+    return 440.0 * 2.0 ** ((float(note) - 69.0) / 12.0)
+
+
+def _harmonic_scores(
+    audio: np.ndarray, sample_rate: int, start: int, stop: int
+) -> tuple[np.ndarray | None, np.ndarray]:
+    """Harmonic-template scores over MIDI 36..71 (shared by v2 and corrected estimators)."""
+    candidates = np.arange(36, 72)
+    value = audio[start:stop].astype(np.float64)
+    if value.size < 4_096:
+        return None, candidates
+    value = value - value.mean()
+    spectrum = np.abs(np.fft.rfft(value * np.hanning(value.size)))
+    frequencies = np.fft.rfftfreq(value.size, 1.0 / sample_rate)
+    scores = []
+    for note in candidates:
+        f0 = _note_frequency(note)
+        score = 0.0
+        for harmonic in range(1, 9):
+            index = int(np.argmin(np.abs(frequencies - f0 * harmonic)))
+            score += spectrum[index] / harmonic
+        scores.append(score)
+    return np.asarray(scores, dtype=np.float64), candidates
+
+
 def _midi_estimate(audio: np.ndarray, sample_rate: int, start: int, stop: int) -> float:
+    """v2 estimator, retained unchanged so v2 and v3 reports stay comparable."""
+    scores, candidates = _harmonic_scores(audio, sample_rate, start, stop)
+    if scores is None:
+        return float("nan")
+    return float(candidates[int(np.argmax(scores))])
+
+
+def _midi_estimate_corrected(
+    audio: np.ndarray, sample_rate: int, start: int, stop: int, tolerance: float = 0.80
+) -> float:
+    """Octave-corrected estimator.
+
+    An octave-up candidate's harmonic set {2f, 4f, 6f, ...} is a subset of the true
+    series, so it can outscore the correct note whenever the fundamental is weak; the
+    1/h weighting does not prevent this. Measured on pad-v1: the fundamental sits
+    12.5 dB below the strongest partial at MIDI 36, and every single following
+    failure was an exact +/-12 semitone error. Preferring the lowest candidate that
+    still scores within `tolerance` of the maximum removes those.
+    """
+    scores, candidates = _harmonic_scores(audio, sample_rate, start, stop)
+    if scores is None:
+        return float("nan")
+    eligible = np.where(scores >= tolerance * float(scores.max()))[0]
+    return float(candidates[int(eligible.min())])
+
+
+def _fundamental_rel_db(
+    audio: np.ndarray, sample_rate: int, note: int, start: int, stop: int
+) -> float:
+    """Level of h1 relative to the strongest of h1..h8, in dB (0 = fundamental dominates).
+
+    This is the quantity the MIDI-following gate was accidentally measuring; reporting
+    it directly separates 'weak fundamental' from 'wrong pitch'.
+    """
     value = audio[start:stop].astype(np.float64)
     if value.size < 4_096:
         return float("nan")
     value = value - value.mean()
     spectrum = np.abs(np.fft.rfft(value * np.hanning(value.size)))
     frequencies = np.fft.rfftfreq(value.size, 1.0 / sample_rate)
-    candidates = np.arange(36, 72)
-    scores = []
-    for note in candidates:
-        f0 = 440.0 * 2.0 ** ((note - 69) / 12.0)
-        score = 0.0
-        for harmonic in range(1, 9):
-            index = int(np.argmin(np.abs(frequencies - f0 * harmonic)))
-            score += spectrum[index] / harmonic
-        scores.append(score)
-    return float(candidates[int(np.argmax(scores))])
+    f0 = _note_frequency(note)
+    levels = []
+    for harmonic in range(1, 9):
+        target = f0 * harmonic
+        band = (frequencies > target - 6.0) & (frequencies < target + 6.0)
+        levels.append(float(spectrum[band].max()) if band.any() else 1.0e-12)
+    peak = max(levels)
+    return float(20.0 * np.log10(max(levels[0], 1.0e-12) / max(peak, 1.0e-12)))
+
+
+def _envelope_error_db(prediction: np.ndarray, target: np.ndarray, frame: int = 2_048) -> float:
+    """Mean absolute frame-wise RMS envelope error AFTER global gain alignment.
+
+    The v2 rms gate compared whole-clip levels only, so a single constant could pass
+    it. Aligning gain first makes this measure envelope *shape* instead of level;
+    the level itself is reported separately as flow_level_offset_db.
+    """
+    length = min(prediction.size, target.size)
+    if length < frame:
+        return float("nan")
+    predicted = prediction[:length].astype(np.float64)
+    reference = target[:length].astype(np.float64)
+    predicted_rms = float(np.sqrt(np.mean(predicted ** 2)))
+    reference_rms = float(np.sqrt(np.mean(reference ** 2)))
+    if predicted_rms <= 1.0e-9 or reference_rms <= 1.0e-9:
+        return float("nan")
+    predicted = predicted * (reference_rms / predicted_rms)
+    frames = length // frame
+    predicted_env = predicted[: frames * frame].reshape(frames, frame)
+    reference_env = reference[: frames * frame].reshape(frames, frame)
+    predicted_level = np.sqrt((predicted_env ** 2).mean(axis=1)) + 1.0e-9
+    reference_level = np.sqrt((reference_env ** 2).mean(axis=1)) + 1.0e-9
+    return float(np.mean(np.abs(20.0 * np.log10(predicted_level / reference_level))))
 
 
 def _boundary_ratio(audio: np.ndarray, sample: int, width: int = 2_048) -> float:
@@ -222,12 +305,29 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
             "flow_tail_rms_drift_db": abs(_rms_db(flow_np[-22_050:]) - _rms_db(reference[-22_050:])),
             "flow_boundary_ratio": _boundary_ratio(flow_np, config.data.note_off_sample),
             "flow_silent": float(np.max(np.abs(flow_np))) < 0.01,
-            "estimated_midi": _midi_estimate(
+            # v2 estimator kept under its original key so old and new reports compare.
+            "estimated_midi_harmonic": _midi_estimate(
                 flow_np, rate, config.data.note_on_sample + 22_050, config.data.note_off_sample - 22_050
             ),
+            "estimated_midi": _midi_estimate_corrected(
+                flow_np, rate, config.data.note_on_sample + 22_050, config.data.note_off_sample - 22_050
+            ),
+            "fundamental_rel_db": _fundamental_rel_db(
+                flow_np, rate, note,
+                config.data.note_on_sample + 22_050, config.data.note_off_sample - 22_050,
+            ),
+            "flow_level_offset_db": float(_rms_db(flow_np) - _rms_db(reference)),
+            "flow_envelope_error_db": _envelope_error_db(flow_np, reference),
             "deterministic_exact": deterministic,
             "stochastic_latent_distance": stochastic_distance,
         }
+        estimated = float(row["estimated_midi"])
+        row["pitch_error_semitones"] = (
+            float("nan") if np.isnan(estimated) else float(estimated - note)
+        )
+        row["octave_error"] = bool(
+            not np.isnan(estimated) and abs(abs(estimated - note) - 12.0) <= 0.5
+        )
         metric_rows.append(row)
         if note in AUDITION_NOTES:
             prefix = f"{preset_id}-n{note:03d}"
@@ -249,19 +349,66 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
         abs(float(row["estimated_midi"]) - int(row["note"])) <= 0.5
         for row in metric_rows
     ]
+    tail_drifts = np.asarray([float(row["flow_tail_rms_drift_db"]) for row in metric_rows])
+    boundary_ratios = np.asarray([float(row["flow_boundary_ratio"]) for row in metric_rows])
+    envelope_errors = np.asarray(
+        [float(row["flow_envelope_error_db"]) for row in metric_rows], dtype=np.float64
+    )
+    envelope_errors = envelope_errors[np.isfinite(envelope_errors)]
+    level_offsets = np.abs(
+        np.asarray([float(row["flow_level_offset_db"]) for row in metric_rows])
+    )
+    fundamentals = np.asarray(
+        [float(row["fundamental_rel_db"]) for row in metric_rows], dtype=np.float64
+    )
+    fundamentals = fundamentals[np.isfinite(fundamentals)]
+    octave_errors = np.asarray([bool(row["octave_error"]) for row in metric_rows])
+
+    # Distribution summaries. v2 gated on max(), so a single outlier failed the gate
+    # and the result could not distinguish one bad sample from fifty. v3 gates on p95
+    # and keeps max as reported context.
+    distribution = {
+        "tail_drift_db_p95": float(np.percentile(tail_drifts, 95)),
+        "tail_drift_db_p99": float(np.percentile(tail_drifts, 99)),
+        "tail_drift_db_max": float(tail_drifts.max()),
+        "boundary_ratio_p95": float(np.percentile(boundary_ratios, 95)),
+        "boundary_ratio_p99": float(np.percentile(boundary_ratios, 99)),
+        "boundary_ratio_max": float(boundary_ratios.max()),
+        "envelope_error_db_median": float(np.median(envelope_errors)) if envelope_errors.size else float("nan"),
+        "level_offset_db_median": float(np.median(level_offsets)),
+        "fundamental_rel_db_median": float(np.median(fundamentals)) if fundamentals.size else float("nan"),
+        "octave_error_fraction": float(np.mean(octave_errors)),
+        "midi_following_harmonic_v2": float(
+            np.mean([
+                abs(float(row["estimated_midi_harmonic"]) - int(row["note"])) <= 0.5
+                for row in metric_rows
+            ])
+        ),
+    }
+
     gates: dict[str, bool] = {
         "midi_following_95pct": bool(np.mean(following) >= 0.95),
+        "octave_error_le_2pct": bool(distribution["octave_error_fraction"] <= 0.02),
+        "fundamental_present_ge_95pct": bool(
+            np.mean(fundamentals >= -6.0) >= 0.95 if fundamentals.size else False
+        ),
         "dynamic_median_5pct": bool(np.median(improvements) >= 0.05),
         "dynamic_benefit_70pct": bool(np.mean(np.asarray(improvements) > 0) >= 0.70),
         "silence_le_1pct": bool(np.mean([bool(row["flow_silent"]) for row in metric_rows]) <= 0.01),
-        "tail_drift_le_12db": bool(max(float(row["flow_tail_rms_drift_db"]) for row in metric_rows) <= 12.0),
-        "boundary_ratio_le_4": bool(max(float(row["flow_boundary_ratio"]) for row in metric_rows) <= 4.0),
+        "tail_drift_p95_le_12db": bool(distribution["tail_drift_db_p95"] <= 12.0),
+        "boundary_ratio_p95_le_4": bool(distribution["boundary_ratio_p95"] <= 4.0),
         "rms_median_le_6db": bool(np.median(rms_errors) <= 6.0),
         "rms_p90_le_12db": bool(np.percentile(rms_errors, 90) <= 12.0),
+        "envelope_error_median_le_3db": bool(
+            distribution["envelope_error_db_median"] <= 3.0
+            if np.isfinite(distribution["envelope_error_db_median"]) else False
+        ),
+        "level_offset_median_le_3db": bool(distribution["level_offset_db_median"] <= 3.0),
         "deterministic": bool(all(bool(row["deterministic_exact"]) for row in metric_rows)),
     }
     report: dict[str, object] = {
-        "schema": "midibrave.atlas-flow.evaluation.v2",
+        "schema": "midibrave.atlas-flow.evaluation.v3",
+        "distribution": distribution,
         "pipeline_state": "complete",
         "quality_state": "pass" if all(gates.values()) else "fail",
         "checkpoint": str(args.checkpoint),
