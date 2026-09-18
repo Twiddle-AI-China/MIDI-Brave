@@ -24,6 +24,12 @@ def describe_device(device: torch.device) -> str:
     return f"CPU x{torch.get_num_threads()}"
 
 
+# One model, one device, and two threads that want it: the live planner and an
+# offline render. CUDA tolerates that; Metal does not — driving command buffers
+# from two threads aborts the process with an MTLCommandBuffer assertion, which
+# is what pressing "play a progression" during a live session used to do.
+GPU_LOCK = threading.RLock()
+
 LIVE_SOLVER_STEPS = 4
 LIVE_BLOCK_SAMPLES = 4_096
 LIVE_TRANSITION_SECONDS = 0.5
@@ -296,6 +302,15 @@ class AtlasFlowLiveSession:
 
     @torch.no_grad()
     def _compute_plan(self, request: PlanRequest) -> RenderPlan:
+        with GPU_LOCK:
+            plan = self._compute_plan_locked(request)
+            if self.engine.device.type == "mps":
+                # Release the lock only once the device has actually finished,
+                # or the next thread starts encoding against work still in flight.
+                torch.mps.synchronize()
+            return plan
+
+    def _compute_plan_locked(self, request: PlanRequest) -> RenderPlan:
         started = time.perf_counter()
         system = self.engine.system
         cfg = self.engine.config
