@@ -71,7 +71,10 @@ body {
 #scope-source { margin-left: auto; color: var(--dim); }
 #scope { display: block; width: 100%; height: 100%; }
 
-#rail { display: flex; align-items: center; gap: 14px; padding: 0 14px; border-top: 1px solid var(--line); overflow: hidden; }
+#rail { display: flex; align-items: center; gap: 12px; padding: 0 14px; border-top: 1px solid var(--line); overflow-x: auto; overflow-y: hidden; }
+/* Nothing in the rail may shrink: a squeezed control wraps its label into a
+   stack of single characters, which is how it looked before. */
+#rail > * { flex: 0 0 auto; }
 .divider { width: 1px; height: 22px; background: var(--line); }
 .knob { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10.5px; white-space: nowrap; }
 .knob input[type=range] { width: 84px; accent-color: var(--ink); }
@@ -94,6 +97,7 @@ audio { display: none; }
   padding: 2px 14px 16px; display: grid; gap: 2px; z-index: 5;
 }
 #panel h3 { font-size: 10px; letter-spacing: .16em; color: var(--muted); margin: 15px 0 8px; font-weight: 500; }
+#panel input[type=number] { background: #0b0b0b; border: 1px solid var(--line); color: var(--ink); border-radius: 3px; padding: 4px 6px; font: inherit; font-size: 10.5px; grid-column: 2 / 4; }
 #panel label { display: grid; grid-template-columns: 52px 1fr 58px; gap: 8px; align-items: center; color: var(--muted); font-size: 10.5px; margin-bottom: 5px; }
 #panel select {
   background: #0b0b0b; border: 1px solid var(--line); color: var(--ink); border-radius: 3px;
@@ -103,3 +107,5 @@ audio { display: none; }
 #panel p { margin: 6px 0; font-size: 10.5px; line-height: 1.7; }
 #panel output { color: var(--ink); text-align: right; }
 .axes label { grid-template-columns: 64px 1fr 40px; }
+
+.knob select { background: #0b0b0b; border: 1px solid var(--line); color: var(--ink); border-radius: 3px; padding: 3px 5px; font: inherit; font-size: 10.5px; }

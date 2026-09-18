@@ -49,15 +49,17 @@
     <label class="knob">音高<input id="note" type="range" min="36" max="71" step="1" value="50"><output id="noteOut">50 · D3</output></label>
     <label class="knob">力度<input id="level" type="range" min="0" max="1" step="0.01" value="0.8"><output id="levelOut">0.80</output></label>
     <label class="knob">渐变<input id="morph" type="range" min="0.5" max="5" step="0.1" value="0.6"><output id="morphOut">0.6 s</output></label>
-    <label class="knob">种子<input id="seed" type="number" value="20260822" step="1"></label>
     <span class="divider"></span>
-    <button id="comp" class="chip" type="button" aria-pressed="true">多段压缩</button>
-    <label class="knob">压缩量<input id="compAmount" type="range" min="0" max="1" step="0.01" value="0.3"><output id="compOut">0.30</output></label>
+    <button id="comp" class="chip" type="button" aria-pressed="true">压缩</button>
     <span id="compMeter" class="mono">GR —</span>
     <button id="hold" class="chip" type="button" aria-pressed="false">常亮</button>
+    <button id="stop" class="chip" type="button">■ 停止</button>
+    <span class="divider"></span>
+    <label class="knob">进行<select id="progression"></select></label>
+    <button id="play" class="chip" type="button">▶ 弹</button>
     <span class="divider"></span>
     <button id="rec" class="chip" type="button" aria-pressed="false">● 录制</button>
-    <button id="render" class="chip" type="button">全速率渲染</button>
+    <button id="render" class="chip" type="button">渲染</button>
     <span id="work" class="mono"></span>
     <div id="modes" class="modes" hidden></div>
     <div id="takes" class="takes"></div>
@@ -66,6 +68,8 @@
 
   <aside id="panel" hidden>
     <section>
+      <h3>演奏</h3>
+      <label>种子<input id="seed" type="number" value="20260822" step="1"></label>
       <h3>实时链路</h3>
       <label>音质<select id="profile"></select></label>
       <label>缓冲<input id="buffer" type="range" min="0.2" max="4" step="0.1" value="1.4"><output id="bufferOut">1.4 s</output></label>
@@ -74,10 +78,12 @@
     </section>
     <section>
       <h3>多段压缩</h3>
+      <label>压缩量<input id="compAmount" type="range" min="0" max="1" step="0.01" value="0.3"><output id="compOut">0.30</output></label>
       <label>低/中<input id="crossLow" type="range" min="80" max="600" step="10" value="220"><output id="crossLowOut">220 Hz</output></label>
       <label>中/高<input id="crossHigh" type="range" min="1200" max="6000" step="100" value="2600"><output id="crossHighOut">2600 Hz</output></label>
       <label>输出<input id="makeup" type="range" min="-18" max="12" step="0.5" value="0"><output id="makeupOut">0.0 dB</output></label>
       <p class="mono muted" id="bands">—</p>
+      <p class="muted" id="chordNote"></p>
       <p class="muted">三段 LR4 分频，每段独立压缩。模型本身的响度一致性是未通过的门禁之一（Flow RMS 误差中位 9.2 dB），压缩只是听感补偿，不代表模型达标。</p>
     </section>
     <section>

@@ -33,9 +33,10 @@ from .atlas_flow_runtime_server import create_app as create_runtime_app
 from .atlas_flow_stream import supported_profiles
 
 
-RENDER_SCHEMA = "midibrave.atlas-flow.demo-take.v1"
+RENDER_SCHEMA = "midibrave.atlas-flow.demo-take.v2"
 OFFLINE_SOLVER_STEPS = 8
-MAX_STEPS = 4
+MAX_STEPS = 8
+MAX_VOICES = 4
 MAX_TOTAL_SECONDS = 24.0
 MIN_STEP_SECONDS = 1.0
 MAX_STEP_SECONDS = 10.0
@@ -83,9 +84,23 @@ def parse_take(payload: object, dimensions: int) -> dict[str, object]:
             _clip(item, f"steps[{index}].pca[{axis}]", -1.0, 1.0)
             for axis, item in enumerate(pca)
         ]
-        note = _clip(raw.get("note"), f"steps[{index}].note", 36, 71)
-        if not float(note).is_integer():
-            raise ValueError(f"steps[{index}].note must be an integer")
+        # The model is monophonic, so a chord is several independent voices
+        # rendered at the same timbre coordinate and summed.
+        raw_notes = raw.get("notes")
+        if raw_notes is None:
+            raw_notes = [raw.get("note")]
+        if not isinstance(raw_notes, Sequence) or isinstance(raw_notes, (str, bytes)):
+            raise ValueError(f"steps[{index}].notes must be a list")
+        if not 1 <= len(raw_notes) <= MAX_VOICES:
+            raise ValueError(f"steps[{index}].notes takes 1 to {MAX_VOICES} notes")
+        notes = []
+        for voice, item in enumerate(raw_notes):
+            value = _clip(item, f"steps[{index}].notes[{voice}]", 36, 71)
+            if not float(value).is_integer():
+                raise ValueError(f"steps[{index}].notes[{voice}] must be an integer")
+            notes.append(int(value))
+        notes = sorted(dict.fromkeys(notes))
+        note = notes[0]
         seconds = _clip(
             raw.get("seconds", 4.0), f"steps[{index}].seconds",
             MIN_STEP_SECONDS, MAX_STEP_SECONDS,
@@ -94,6 +109,7 @@ def parse_take(payload: object, dimensions: int) -> dict[str, object]:
         steps.append({
             "pca": [round(item, 6) for item in coordinates],
             "note": int(note),
+            "notes": notes,
             "seconds": round(seconds, 3),
         })
     if total > MAX_TOTAL_SECONDS:
@@ -124,46 +140,60 @@ def render_take(engine: AtlasFlowLiveEngine, take: Mapping[str, object]) -> dict
     offline solver budget is applied by swapping it for the duration of the
     render. The caller serialises renders, so no other plan observes the swap.
     """
-    session = engine.new_session()
     rate = float(engine.config.data.sample_rate)
-    blocks: list[np.ndarray] = []
     plan_times: list[float] = []
     landings: list[dict[str, object]] = []
+    voices = max(len(step["notes"]) for step in take["steps"])
     original = runtime_module.LIVE_SOLVER_STEPS
     runtime_module.LIVE_SOLVER_STEPS = int(take["solverSteps"])
     started = time.perf_counter()
+    rendered: list[np.ndarray] = []
     try:
-        for index, step in enumerate(take["steps"]):
-            plan_started = time.perf_counter()
-            controls = {
-                "pca_normalized": list(step["pca"]),
-                "note": int(step["note"]),
-                "velocity": float(take["velocity"]),
-                "temperature": float(take["temperature"]),
-                "morph_seconds": float(take["morphSeconds"]),
-            }
-            if index == 0:
-                session.start(seed=int(take["seed"]), **controls)
-            else:
-                session.update(seq=index + 1, **controls)
-            plan_times.append((time.perf_counter() - plan_started) * 1000.0)
-            for _ in range(max(1, math.ceil(float(step["seconds"]) * rate / LIVE_BLOCK_SAMPLES))):
+        # Each voice is a full independent pass at the same coordinates, so a
+        # chord keeps every voice's own attack and morph instead of one voice
+        # retriggered at different pitches.
+        for voice in range(voices):
+            session = engine.new_session()
+            blocks: list[np.ndarray] = []
+            for index, step in enumerate(take["steps"]):
+                pitch = step["notes"][min(voice, len(step["notes"]) - 1)]
+                plan_started = time.perf_counter()
+                controls = {
+                    "pca_normalized": list(step["pca"]),
+                    "note": int(pitch),
+                    "velocity": float(take["velocity"]),
+                    "temperature": float(take["temperature"]),
+                    "morph_seconds": float(take["morphSeconds"]),
+                }
+                if index == 0:
+                    session.start(seed=int(take["seed"]) + voice, **controls)
+                else:
+                    session.update(seq=index + 1, **controls)
+                if voice == 0:
+                    plan_times.append((time.perf_counter() - plan_started) * 1000.0)
+                for _ in range(max(1, math.ceil(float(step["seconds"]) * rate / LIVE_BLOCK_SAMPLES))):
+                    blocks.append(session.render_block()[0])
+                if voice == 0:
+                    # Read the landing after the morph has run, while held.
+                    reached = session.snapshot()
+                    landings.append({
+                        "notes": list(step["notes"]),
+                        "component": reached.get("component"),
+                        "planMode": reached.get("planMode"),
+                        "projectedPca": reached.get("projectedPcaNormalized"),
+                        "audiblePca": reached.get("audiblePcaNormalized"),
+                    })
+            session.note_off()
+            for _ in range(max(1, math.ceil(float(take["release"]) * rate / LIVE_BLOCK_SAMPLES))):
                 blocks.append(session.render_block()[0])
-            # Read the landing after the morph has run, while the voice is still held.
-            reached = session.snapshot()
-            landings.append({
-                "note": int(step["note"]),
-                "component": reached.get("component"),
-                "planMode": reached.get("planMode"),
-                "projectedPca": reached.get("projectedPcaNormalized"),
-                "audiblePca": reached.get("audiblePcaNormalized"),
-            })
-        session.note_off()
-        for _ in range(max(1, math.ceil(float(take["release"]) * rate / LIVE_BLOCK_SAMPLES))):
-            blocks.append(session.render_block()[0])
+            rendered.append(np.concatenate(blocks, axis=0)[:, 0].astype(np.float32))
     finally:
         runtime_module.LIVE_SOLVER_STEPS = original
-    audio = np.concatenate(blocks, axis=0)[:, 0].astype(np.float32)
+    length = min(item.shape[0] for item in rendered)
+    # Summing n voices would raise the level by up to n; 1/sqrt(n) keeps the
+    # loudness of a chord comparable to a single note.
+    audio = sum(item[:length] for item in rendered) / math.sqrt(len(rendered))
+    audio = np.asarray(audio, dtype=np.float32)
     if not np.isfinite(audio).all():
         raise RuntimeError("render produced non-finite audio")
     peak = float(np.abs(audio).max())
@@ -176,6 +206,7 @@ def render_take(engine: AtlasFlowLiveEngine, take: Mapping[str, object]) -> dict
         "clipped": bool(peak > 1.0),
         "planMs": [round(value, 1) for value in plan_times],
         "renderMs": round((time.perf_counter() - started) * 1000.0, 1),
+        "voices": voices,
         "landings": landings,
     }
 

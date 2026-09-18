@@ -940,12 +940,120 @@ async function filePlayback() {
 
 async function play(url, label = '渲染片段') {
   const player = $('#player');
-  const chain = await filePlayback().catch(() => null);
+  const chain = await filePlayback().catch(error => {
+    setWork(`播放链路失败 ${error.name || error}`);
+    return null;
+  });
   applyCompressor(chain);
   await live.fileContext?.resume().catch(() => {});
+  // The scope follows the element's own 'playing' event rather than this call
+  // site: switching here races with whatever the element was doing before.
+  live.playLabel = label;
   player.src = url;
   await player.play().catch(() => {});
-  if (chain) useAnalyser(chain.analyser, label);
+}
+
+
+/* ---------- chord progressions ---------- */
+
+// Degrees in a major key, written the way they are spoken: 4361 is IV-iii-vi-I.
+const PROGRESSIONS = [
+  {name: '4361', degrees: [4, 3, 6, 1]},
+  {name: '1645', degrees: [1, 6, 4, 5]},
+  {name: '4536', degrees: [4, 5, 3, 6]},
+  {name: '6451', degrees: [6, 4, 5, 1]},
+  {name: '1564', degrees: [1, 5, 6, 4]},
+  {name: '2516', degrees: [2, 5, 1, 6]},
+  {name: '卡农 15634125', degrees: [1, 5, 6, 3, 4, 1, 2, 5]},
+];
+
+const MAJOR_STEPS = [0, 2, 4, 5, 7, 9, 11];
+// Triad quality per degree of a major scale: I ii iii IV V vi vii°.
+const THIRDS = [4, 3, 3, 4, 4, 3, 3];
+const FIFTHS = [7, 7, 7, 7, 7, 7, 6];
+
+/** Voice one degree as a triad inside the trained range (MIDI 36-71). */
+function triad(root, degree) {
+  const index = (degree - 1) % 7;
+  let bottom = root + MAJOR_STEPS[index];
+  while (bottom > 59) bottom -= 12;      // keep the chord in the pad's register
+  while (bottom < 40) bottom += 12;
+  const notes = [bottom, bottom + THIRDS[index], bottom + FIFTHS[index]];
+  return notes.map(note => clamp(Math.round(note), 36, 71));
+}
+
+function buildProgressionPicker() {
+  const select = $('#progression');
+  PROGRESSIONS.forEach((item, index) => {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = item.name;
+    select.append(option);
+  });
+  select.value = '0';
+}
+
+/** Render the selected progression at the timbre you are standing on.
+ *
+ *  The model is monophonic, so every chord is three voices rendered
+ *  independently at the same coordinate and summed on the GPU side. That is a
+ *  stack of monophonic pads, not a polyphonic instrument.
+ */
+async function playProgression() {
+  const button = $('#play');
+  const item = PROGRESSIONS[Number($('#progression').value)] || PROGRESSIONS[0];
+  const root = Number($('#note').value);
+  const seconds = clamp(20 / item.degrees.length, 1.5, 3.0);
+  const chords = item.degrees.map(degree => triad(root, degree));
+  button.disabled = true;
+  setWork(`${item.name} 渲染中…`);
+  if ($('#hold').getAttribute('aria-pressed') !== 'true') liveSend({type: 'note_off'});
+  try {
+    const response = await fetch('/api/render', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        steps: chords.map(notes => ({
+          pca: coordinate.map(value => Number(value.toFixed(4))),
+          notes,
+          seconds: Number(seconds.toFixed(1)),
+        })),
+        seed: Number($('#seed').value) || 0,
+        velocity: Number($('#level').value),
+        temperature: 0,
+        morphSeconds: 0.5,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `渲染失败 ${response.status}`);
+    addTake(payload, `${item.name} ${noteName(root)}`);
+    setWork(`${item.name} · ${payload.voices} 声部 · ${payload.seconds.toFixed(1)}s`
+      + `${payload.cached ? ' · 缓存' : ` · GPU ${(payload.renderMs / 1000).toFixed(1)}s`}`);
+    $('#chordNote').textContent =
+      `${item.name} 于 ${noteName(root)}：` + chords.map(c => c.map(noteName).join('-')).join('　');
+    play(payload.url, `进行 ${item.name}`);
+  } catch (error) {
+    setWork(String(error.message || error));
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** Silence everything: the live voice, and whatever clip is playing. */
+function stopAll() {
+  clearTimeout(live.offTimer);
+  liveSend({type: 'stop'});
+  const player = $('#player');
+  player.pause();
+  player.currentTime = 0;
+  if (live.recorder) live.recorder.stop();
+  live.lifecycle = 'idle';
+  gateState('已停止');
+  live.shown = '已停止';
+  sounding = null;
+  updateStatus();
+  updateVoice();
+  drawMap();
+  setWork('');
 }
 
 /* ---------- held-out preset comparison ---------- */
@@ -1160,6 +1268,8 @@ function wire() {
     scope.carry = 0;
     scopeLayout();
   });
+  $('#stop').addEventListener('click', stopAll);
+  $('#play').addEventListener('click', playProgression);
   $('#rec').addEventListener('click', toggleRecording);
   $('#render').addEventListener('click', renderCurrent);
   $('#gear').addEventListener('click', () => {
@@ -1175,6 +1285,9 @@ function wire() {
   const player = $('#player');
   player.addEventListener('play', () => {
     if ($('#hold').getAttribute('aria-pressed') !== 'true') liveSend({type: 'note_off'});
+  });
+  player.addEventListener('playing', () => {
+    if (live.fileChain) useAnalyser(live.fileChain.analyser, live.playLabel || '渲染片段');
   });
   player.addEventListener('ended', () => {
     if (live.connected && live.chain) useAnalyser(live.chain.analyser, '实时');
@@ -1212,6 +1325,7 @@ async function boot() {
   }));
   coordinate = (status.defaultPcaNormalized || Array(8).fill(0)).slice();
   buildPanel();
+  buildProgressionPicker();
   showGates();
   wire();
   layout();
