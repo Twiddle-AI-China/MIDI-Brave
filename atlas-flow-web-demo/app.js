@@ -639,7 +639,11 @@ const nearestCell = place => nearestCellTo(place, 26);
 
 function moveTo(place, {snap = true} = {}) {
   pointer = place;
+  const previous = hovered;
   hovered = snap ? nearestCell(place) : null;
+  if (audioMode() === 'cached' && hovered && hovered !== previous && live.fileChain) {
+    auditionCell(hovered);
+  }
   coordinate = hovered ? hovered.pca.slice() : (() => {
     const value = coordinate.slice();
     value[0] = place[0];
@@ -653,7 +657,7 @@ function moveTo(place, {snap = true} = {}) {
 }
 
 function sendControl() {
-  if (!live.connected) return;
+  if (audioMode() !== 'live' || !live.connected) return;
   clearTimeout(live.timer);
   live.timer = setTimeout(() => {
     if (live.socket?.readyState !== WebSocket.OPEN) return;
@@ -707,11 +711,15 @@ function updateStatus() {
 }
 
 function updateVoice() {
-  if (!live.connected) {
+  // Cached mode has no socket, so this cannot be gated on the live connection:
+  // what is sounding is whatever last started, from either path.
+  if (!sounding || (!live.connected && audioMode() === 'live')) {
     $('#voice').textContent = '';
     return;
   }
-  const resting = ['idle', 'release', '离线'].includes(live.shown);
+  const resting = audioMode() === 'cached'
+    ? !preview.source
+    : ['idle', 'release', '离线'].includes(live.shown);
   $('#voice').textContent = sounding
     ? `${resting ? '刚才响的' : '正在响'}　${sounding.label}${sounding.loner ? '（单点）' : ''}`
     : '';
@@ -818,12 +826,27 @@ async function connect() {
     live.connected = false;
     live.audible = null;
     live.lifecycle = event.code === 1001 ? '已被另一个标签页接管' : '离线';
-    live.shown = live.lifecycle;
+    // Closing the socket on purpose when switching to cached mode is not an
+    // outage, so it must not report one.
+    live.shown = audioMode() === 'cached' ? '预取模式' : live.lifecycle;
     sounding = null;
     updateStatus();
     updateVoice();
     drawMap();
   };
+}
+
+async function startAudio() {
+  if (audioMode() === 'live') {
+    await connect().catch(error => { live.shown = String(error.message || error); updateStatus(); });
+    return;
+  }
+  await filePlayback().catch(() => null);
+  await live.fileContext?.resume().catch(() => {});
+  applyCompressor(live.fileChain);
+  live.shown = '预取模式';
+  updateStatus();
+  warmPreviews();
 }
 
 function retrigger() {
@@ -954,6 +977,151 @@ async function play(url, label = '渲染片段') {
 }
 
 
+
+/* ---------- cached previews: the responsive path ---------- */
+
+/**
+ * Hovering a cell should make a sound *now*. A live PCM stream cannot promise
+ * that across this link: measured from the laptop, the median block arrives on
+ * time but the worst gap is 3.9 s (22 s at a smaller buffer), while the same
+ * probe run inside Kraken holds a 0.2 s buffer with zero underruns. The network
+ * is the floor, not the model.
+ *
+ * So in cached mode nothing streams. Every preset is rendered once at full rate,
+ * fetched, decoded into memory, and played locally on hover — zero latency, no
+ * dropouts, and no traffic at all once warm. The cost is honest: it is discrete,
+ * one clip per preset per pitch, with no continuous morph between them.
+ */
+const preview = {
+  buffers: new Map(),     // "presetId:note" -> AudioBuffer
+  pending: new Set(),
+  source: null,
+  gain: null,
+  warming: false,
+  note: null,
+};
+
+const previewKey = (cell, note) => `${cell.presetId}:${note}`;
+
+function audioMode() {
+  return $('#mode').value;
+}
+
+async function previewFor(cell, note) {
+  const key = previewKey(cell, note);
+  if (preview.buffers.has(key)) return preview.buffers.get(key);
+  if (preview.pending.has(key)) return null;
+  preview.pending.add(key);
+  try {
+    const response = await fetch('/api/render', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        steps: [{pca: cell.pca.map(v => Number(v.toFixed(4))), note, seconds: 2.5}],
+        seed: Number($('#seed').value) || 0,
+        velocity: 0.8, temperature: 0, morphSeconds: 0.5,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'render failed');
+    const chain = await filePlayback();
+    const bytes = await (await fetch(payload.url)).arrayBuffer();
+    const buffer = await chain.context.decodeAudioData(bytes);
+    preview.buffers.set(key, buffer);
+    return buffer;
+  } catch (error) {
+    setWork(`预取失败 ${error.message || error}`);
+    return null;
+  } finally {
+    preview.pending.delete(key);
+  }
+}
+
+function playPreview(buffer, cell = null) {
+  const chain = live.fileChain;
+  if (!chain || !buffer) return;
+  stopPreview(0.012);
+  const gain = chain.context.createGain();
+  const source = chain.context.createBufferSource();
+  source.buffer = buffer;
+  source.connect(gain);
+  gain.connect(chain.input);
+  gain.gain.value = Number($('#level').value);
+  source.onended = () => {
+    if (preview.source === source) {
+      preview.source = null;
+      live.audible = null;
+      updateVoice();
+      drawMap();
+    }
+  };
+  source.start();
+  preview.source = source;
+  preview.gain = gain;
+  // Mark the voice only once it is actually running, or the HUD reads "just
+  // played" for something that is playing right now.
+  if (cell) {
+    sounding = cell;
+    live.audible = cell.pca;
+    updateVoice();
+    drawMap();
+  }
+  useAnalyser(chain.analyser, '预取片段');
+}
+
+function stopPreview(fade = 0.02) {
+  if (!preview.source) return;
+  const {context} = live.fileChain;
+  const when = context.currentTime;
+  try {
+    preview.gain.gain.cancelScheduledValues(when);
+    preview.gain.gain.setValueAtTime(preview.gain.gain.value, when);
+    preview.gain.gain.linearRampToValueAtTime(0.0001, when + fade);
+    preview.source.stop(when + fade);
+  } catch (_error) { /* already stopped */ }
+  preview.source = null;
+  preview.gain = null;
+}
+
+/** Warm every cell for the current pitch, a few at a time. */
+async function warmPreviews() {
+  const note = Number($('#note').value);
+  if (preview.warming) return;
+  preview.warming = true;
+  preview.note = note;
+  const queue = cells.filter(cell => !preview.buffers.has(previewKey(cell, note)));
+  let done = cells.length - queue.length;
+  const workers = Array.from({length: 3}, async () => {
+    while (queue.length && preview.note === note) {
+      const cell = queue.shift();
+      await previewFor(cell, note);
+      done += 1;
+      setWork(`预取 ${done}/${cells.length}`);
+    }
+  });
+  await Promise.all(workers);
+  preview.warming = false;
+  if (preview.note === note) {
+    setWork(`预取就绪 ${cells.length} 个 · 悬停即响`);
+    if (queue.length === 0) live.shown = '预取模式';
+    updateStatus();
+  } else {
+    warmPreviews();
+  }
+}
+
+async function auditionCell(cell) {
+  const note = Number($('#note').value);
+  const key = previewKey(cell, note);
+  if (preview.buffers.has(key)) {
+    playPreview(preview.buffers.get(key), cell);
+    return;
+  }
+  setWork(`取 ${cell.label}…`);
+  const buffer = await previewFor(cell, note);
+  if (buffer && hovered === cell) playPreview(buffer, cell);
+  if (buffer) setWork('');
+}
+
 /* ---------- chord progressions ---------- */
 
 // Degrees in a major key, written the way they are spoken: 4361 is IV-iii-vi-I.
@@ -1041,6 +1209,7 @@ async function playProgression() {
 /** Silence everything: the live voice, and whatever clip is playing. */
 function stopAll() {
   clearTimeout(live.offTimer);
+  stopPreview(0.03);
   liveSend({type: 'stop'});
   const player = $('#player');
   player.pause();
@@ -1188,9 +1357,9 @@ function wire() {
 
   map.addEventListener('pointerdown', event => {
     map.setPointerCapture(event.pointerId);
-    if (!live.connected) {
+    if (!live.connected && !live.fileChain) {
       $('#curtain').classList.add('gone');
-      connect().catch(error => { live.shown = String(error.message || error); updateStatus(); });
+      startAudio();
     }
     moveTo(place(event));
   });
@@ -1210,6 +1379,7 @@ function wire() {
     pointer = null;
     hovered = null;
     drawMap();
+    if (audioMode() === 'cached') { stopPreview(0.08); return; }
     if (!live.connected || $('#hold').getAttribute('aria-pressed') === 'true') return;
     clearTimeout(live.offTimer);
     live.offTimer = setTimeout(() => {
@@ -1220,12 +1390,14 @@ function wire() {
   map.addEventListener('pointerenter', () => {
     live.inside = true;
     clearTimeout(live.offTimer);
+    if (audioMode() !== 'live') return;
     if (live.connected && ['idle', 'release'].includes(live.lifecycle)) retrigger();
   });
 
   $('#note').addEventListener('input', event => {
     $('#noteOut').textContent = `${event.target.value} · ${noteName(Number(event.target.value))}`;
     sendControl();
+    if (audioMode() === 'cached' && live.fileChain) warmPreviews();
   });
   $('#level').addEventListener('input', event => {
     $('#levelOut').textContent = Number(event.target.value).toFixed(2);
@@ -1280,7 +1452,20 @@ function wire() {
   $('#gate').addEventListener('click', () => $('#gear').click());
   $('#curtain').addEventListener('click', () => {
     $('#curtain').classList.add('gone');
-    connect().catch(error => { live.lifecycle = String(error.message || error); updateStatus(); });
+    startAudio();
+  });
+  $('#mode').addEventListener('change', () => {
+    stopPreview();
+    if (audioMode() === 'live') {
+      preview.note = null;
+      connect().catch(error => { live.shown = String(error.message || error); updateStatus(); });
+    } else {
+      liveSend({type: 'stop'});
+      live.socket?.close();
+      live.shown = '预取模式';
+      updateStatus();
+      warmPreviews();
+    }
   });
   const player = $('#player');
   player.addEventListener('play', () => {
@@ -1330,6 +1515,7 @@ async function boot() {
   wire();
   layout();
   scopeLayout();
+  $('#curtainNote').textContent = '预取模式：先把 50 个 preset 渲染好缓存，之后悬停零延迟';
   const explained = status.pcaExplained || [];
   if (explained.length) {
     $('#axis-note').textContent =

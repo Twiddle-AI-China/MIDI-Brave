@@ -18,7 +18,7 @@
   <div id="board">
     <div id="map-pane">
       <canvas id="map"></canvas>
-      <div id="curtain"><div><b>点一下图谱开始</b><span>之后移动鼠标就是试听，不用按住</span></div></div>
+      <div id="curtain"><div><b>点一下图谱开始</b><span>之后移动鼠标就是试听，不用按住</span><span id="curtainNote"></span></div></div>
       <div id="voice" class="mono"></div>
       <div id="readout" class="mono"></div>
       <div id="legend" class="mono">
@@ -52,6 +52,10 @@
     <span class="divider"></span>
     <button id="comp" class="chip" type="button" aria-pressed="true">压缩</button>
     <span id="compMeter" class="mono">GR —</span>
+    <label class="knob">试听<select id="mode">
+      <option value="cached">预取（跟手）</option>
+      <option value="live">实时流</option>
+    </select></label>
     <button id="hold" class="chip" type="button" aria-pressed="false">常亮</button>
     <button id="stop" class="chip" type="button">■ 停止</button>
     <span class="divider"></span>
@@ -70,6 +74,9 @@
     <section>
       <h3>演奏</h3>
       <label>种子<input id="seed" type="number" value="20260822" step="1"></label>
+      <h3>试听方式</h3>
+      <p class="muted">**预取**：每个 preset 先在 GPU 上渲染一段 2.5 s 全速率音频，取回并解码进内存；之后悬停是本地播放，0 延迟、不会断流。代价是离散的——只有 50 个格点，没有连续渐变。</p>
+      <p class="muted">**实时流**：连续漫游，但要吃这条链路。实测这条路径的中位块间隔正常，最大块间隔却有 3.9 s（缓冲更小时到过 22 s），所以远程一定会卡。局域网里把缓冲调到 0.2 s 就是真实时。</p>
       <h3>实时链路</h3>
       <label>音质<select id="profile"></select></label>
       <label>缓冲<input id="buffer" type="range" min="0.2" max="4" step="0.1" value="1.4"><output id="bufferOut">1.4 s</output></label>
