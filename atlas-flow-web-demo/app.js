@@ -872,6 +872,7 @@ async function renderCurrent() {
   const button = $('#render');
   button.disabled = true;
   setWork('渲染中…');
+  await primeAudio();          // while the click still counts as a gesture
   try {
     const response = await fetch('/api/render', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -964,6 +965,24 @@ async function filePlayback() {
   return chain;
 }
 
+/**
+ * Open the audio graph while a user gesture is still valid.
+ *
+ * Browsers grant audio on a *recent* gesture. Rendering a progression takes
+ * 5-13 s, so creating the AudioContext after that fetch lands well outside the
+ * grant: the context is born suspended, play() rejects, and — because that
+ * rejection used to be swallowed — the result was silence with no error, for
+ * that clip and every clip after it. Call this first, from the click itself.
+ */
+async function primeAudio() {
+  const chain = await filePlayback().catch(error => {
+    setWork(`播放链路失败 ${error.name || error}`);
+    return null;
+  });
+  await live.fileContext?.resume().catch(() => {});
+  return chain && live.fileContext?.state === 'running';
+}
+
 async function play(url, label = '渲染片段') {
   const player = $('#player');
   const chain = await filePlayback().catch(error => {
@@ -976,7 +995,18 @@ async function play(url, label = '渲染片段') {
   // site: switching here races with whatever the element was doing before.
   live.playLabel = label;
   player.src = url;
-  await player.play().catch(() => {});
+  try {
+    await player.play();
+  } catch (error) {
+    // NotAllowedError means the browser refused, not that the audio is broken.
+    setWork(error.name === 'NotAllowedError'
+      ? '浏览器拦截了播放，点一下页面再试'
+      : `播放失败 ${error.name || error}`);
+    return;
+  }
+  if (live.fileContext && live.fileContext.state !== 'running') {
+    setWork('音频上下文被挂起，点一下页面恢复');
+  }
 }
 
 
@@ -1016,6 +1046,7 @@ async function previewFor(cell, note) {
   if (preview.pending.has(key)) return null;
   preview.pending.add(key);
   try {
+    const chain = await filePlayback();
     const response = await fetch('/api/render', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -1026,7 +1057,6 @@ async function previewFor(cell, note) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'render failed');
-    const chain = await filePlayback();
     const bytes = await (await fetch(payload.url)).arrayBuffer();
     const buffer = await chain.context.decodeAudioData(bytes);
     preview.buffers.set(key, buffer);
@@ -1179,6 +1209,7 @@ async function playProgression() {
   button.disabled = true;
   setWork(`${item.name} 渲染中…`);
   if ($('#hold').getAttribute('aria-pressed') !== 'true') liveSend({type: 'note_off'});
+  await primeAudio();          // while the click still counts as a gesture
   try {
     const response = await fetch('/api/render', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1490,6 +1521,16 @@ function wire() {
     if (live.connected) retrigger();
   });
   window.addEventListener('resize', () => { layout(); scopeLayout(); });
+
+  // Surface failures in the page. "my colleague saw some JS errors" is not
+  // something anyone can act on; a line in the rail naming the error is.
+  window.addEventListener('error', event => {
+    setWork(`JS 错误 ${event.message || event.error}`);
+  });
+  window.addEventListener('unhandledrejection', event => {
+    const reason = event.reason;
+    setWork(`未处理错误 ${reason?.name || ''} ${reason?.message || reason}`.trim());
+  });
 }
 
 /* ---------- boot ---------- */
