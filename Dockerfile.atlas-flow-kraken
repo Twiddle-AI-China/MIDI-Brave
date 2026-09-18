@@ -1,0 +1,30 @@
+# Atlas Flow demo image for Kraken (x86_64, Tesla V100 / SM70).
+#
+# The Spark image was aarch64/GB10 and cannot be reused. SM70 has no BF16 or
+# FP8 and no FlashAttention-2, but this model never asks for them: inference
+# runs in FP32 and the numerically sensitive blocks force autocast off.
+#
+# Built from a base that is already present on Kraken, since registry-1.docker.io
+# is unreachable from there. PyPI is reachable, and modern soundfile wheels
+# bundle libsndfile, so no apt step is needed.
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+# PyPI itself trickles from this network (~16 kB/s); the domestic mirror does not.
+RUN pip install --no-cache-dir \
+      --index-url https://mirrors.aliyun.com/pypi/simple/ \
+      --trusted-host mirrors.aliyun.com \
+      aiohttp soundfile scipy
+
+WORKDIR /opt/midibrave
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY configs ./configs
+COPY atlas-flow-web-demo ./atlas-flow-web-demo
+
+RUN python -m compileall -q src
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/midibrave/src \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1

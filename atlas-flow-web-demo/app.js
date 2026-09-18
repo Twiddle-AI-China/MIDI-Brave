@@ -955,6 +955,11 @@ function buildPanel() {
       + `${wire.channels === 1 ? 'mono' : 'stereo'} ${wire.format} · ${(wire.kbitPerSecond / 1000).toFixed(2)} Mbit/s`;
     select.append(option);
   });
+  // Measured on the Kraken link (Jagger -> Octopus -> Kraken, ~2.65 Mbit/s) in a
+  // 30 s roam: 22.05 kHz mono int16 held 1.03x real time with no underruns;
+  // 44.1 kHz mono managed 0.98x with two dropouts; stereo float32 saturates the
+  // link at 0.96x. V100 planning is also slower than the retired GB10 host
+  // (~150 ms re-plan vs ~70 ms), so default to headroom and trade up by hand.
   const preferred = (status.streamProfiles || []).findIndex(wire => wire.kbitPerSecond < 400);
   select.value = String(preferred < 0 ? 0 : preferred);
 
