@@ -117,6 +117,7 @@ class _ClientState:
     buffered_frames: int = 0
     underruns: int = 0
     running: bool = False
+    reported: bool = False
     stream: StreamFormat = field(default_factory=StreamFormat)
     wake_producer: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -155,6 +156,7 @@ async def _receive(
                 if kind == "buffer":
                     state.buffered_frames = int(message["bufferedFrames"])
                     state.underruns = int(message["underruns"])
+                    state.reported = True
                     continue
                 if kind == "stop":
                     session.stop()
@@ -247,11 +249,18 @@ async def _produce(
                     **session.snapshot(),
                 })
             elapsed = time.perf_counter() - started
-            # Filling at 0.35 of real time refills a drained buffer quickly but
+            # Filling faster than real time refills a drained buffer quickly but
             # overshoots the client's ceiling, and every overshoot the client
-            # sheds is an audible discontinuity. 0.6 still recovers faster than
-            # playback drains without running the queue away.
-            pacing = 0.6 if state.buffered_frames < target_frames * 0.5 else 0.97
+            # sheds is an audible discontinuity. Until the client has reported a
+            # buffer level at all, there is nothing to fill toward — bursting
+            # then is pure guesswork, and on a fast link it discarded dozens of
+            # blocks before the first report arrived.
+            if not state.reported:
+                pacing = 0.95
+            elif state.buffered_frames < target_frames * 0.5:
+                pacing = 0.6
+            else:
+                pacing = 0.97
             await asyncio.sleep(max(0.0, block_seconds * pacing - elapsed))
         except asyncio.CancelledError:
             raise

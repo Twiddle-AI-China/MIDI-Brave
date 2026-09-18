@@ -15,6 +15,15 @@ from .atlas_flow_data import lifecycle_frames
 from .atlas_flow_model import AtlasFlowSystem
 
 
+def describe_device(device: torch.device) -> str:
+    """Human-readable device name, for a runtime that no longer assumes CUDA."""
+    if device.type == "cuda":
+        return torch.cuda.get_device_name(device)
+    if device.type == "mps":
+        return "Apple Metal (MPS)"
+    return f"CPU x{torch.get_num_threads()}"
+
+
 LIVE_SOLVER_STEPS = 4
 LIVE_BLOCK_SAMPLES = 4_096
 LIVE_TRANSITION_SECONDS = 0.5
@@ -437,8 +446,6 @@ class AtlasFlowLiveSession:
             if plan.revision != self.requested_revision or self.state == "release":
                 return False
             self.planned_revision = plan.revision
-            self.last_plan_ms = plan.plan_ms
-            self.last_mode = plan.mode
             self.last_error = None
             if self.incoming is not None:
                 self.queued = plan
@@ -452,6 +459,12 @@ class AtlasFlowLiveSession:
             return False
         try:
             plan = self._compute_plan(request)
+            # Record the cost even when the plan is about to be thrown away: a
+            # roam supersedes most plans before they commit, and reporting only
+            # committed ones froze this readout on the cold first plan.
+            with self.lock:
+                self.last_plan_ms = plan.plan_ms
+                self.last_mode = plan.mode
         except Exception as error:
             with self.lock:
                 self.last_error = str(error).strip() or type(error).__name__
@@ -671,8 +684,12 @@ class AtlasFlowLiveEngine:
         device: str = "cuda:0",
     ) -> "AtlasFlowLiveEngine":
         target = torch.device(device)
-        if target.type != "cuda" or not torch.cuda.is_available():
-            raise RuntimeError("Atlas Flow live runtime requires CUDA")
+        if target.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("cuda was requested but no CUDA device is present")
+        if target.type == "mps" and not torch.backends.mps.is_available():
+            raise RuntimeError("mps was requested but no Metal device is present")
+        if target.type not in {"cuda", "mps", "cpu"}:
+            raise RuntimeError(f"unsupported device: {device}")
         config = load_atlas_flow_config(config_path)
         system = AtlasFlowSystem(config.model, config.data).to(target)
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
@@ -712,7 +729,7 @@ class AtlasFlowLiveEngine:
             "ok": True,
             "engine": "midibrave-atlas-flow-pad-live-v2",
             "classId": "pad",
-            "cuda": torch.cuda.get_device_name(self.device),
+            "cuda": describe_device(self.device),
             "sampleRate": self.config.data.sample_rate,
             "blockSamples": LIVE_BLOCK_SAMPLES,
             "blockDeadlineMs": LIVE_BLOCK_SAMPLES / self.config.data.sample_rate * 1000.0,

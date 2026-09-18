@@ -26,6 +26,7 @@ from typing import Mapping, Sequence
 from aiohttp import web
 import numpy as np
 import soundfile as sf
+import torch
 
 from . import atlas_flow_runtime as runtime_module
 from .atlas_flow_runtime import LIVE_BLOCK_SAMPLES, AtlasFlowLiveEngine
@@ -48,6 +49,7 @@ _LOCK = web.AppKey("atlas_flow_demo_lock", asyncio.Lock)
 _CACHE = web.AppKey("atlas_flow_demo_cache", Path)
 _EVALUATION = web.AppKey("atlas_flow_demo_evaluation", Path)
 _WEB = web.AppKey("atlas_flow_demo_web", Path)
+_PROFILE = web.AppKey("atlas_flow_demo_profile", str)
 
 
 def _finite(value: object, name: str) -> float:
@@ -242,12 +244,14 @@ def create_app(
     cache_root: Path,
     evaluation_root: Path,
     web_root: Path,
+    profile: str = "remote",
 ) -> web.Application:
     app = web.Application(client_max_size=64 * 1024)
     app[_ENGINE] = engine
     app[_CACHE] = cache_root
     app[_EVALUATION] = evaluation_root
     app[_WEB] = web_root
+    app[_PROFILE] = profile
     (cache_root / "takes").mkdir(parents=True, exist_ok=True)
     (cache_root / "audition").mkdir(parents=True, exist_ok=True)
 
@@ -281,6 +285,15 @@ def create_app(
         payload["presetIds"] = list(request.app[_ENGINE].atlas.preset_ids)
         payload["streamProfiles"] = supported_profiles(LIVE_BLOCK_SAMPLES)
         payload["pcaExplained"] = explained_variance(request.app[_ENGINE])
+        # The client cannot tell a local server from a tunnelled one — both are
+        # 127.0.0.1 in the browser — so the server states which it is and what
+        # settings suit it. Local: the loopback carries a 0.2 s buffer cleanly,
+        # so continuous roaming is the point. Remote: it does not, so cached
+        # previews are.
+        local = request.app[_PROFILE] == "local"
+        payload["profile"] = request.app[_PROFILE]
+        payload["suggestedMode"] = "live" if local else "cached"
+        payload["suggestedBufferSeconds"] = 0.3 if local else 1.4
         return web.json_response(payload)
 
     async def evaluation(request: web.Request) -> web.Response:
@@ -389,7 +402,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-root", type=Path, required=True)
     parser.add_argument("--evaluation-root", type=Path, required=True)
     parser.add_argument("--web-root", type=Path, required=True)
-    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--device", default="cuda:0",
+                        help="cuda:0, mps or cpu — the runtime no longer requires CUDA")
+    parser.add_argument("--threads", type=int, default=0,
+                        help="torch CPU threads; 0 leaves torch's own default")
+    parser.add_argument("--profile", choices=("local", "remote"), default="remote",
+                        help="local relaxes the client's buffer and defaults to live roaming")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18795)
     return parser.parse_args(argv)
@@ -397,6 +415,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    if args.threads:
+        torch.set_num_threads(args.threads)
     engine = AtlasFlowLiveEngine.load(args.config, args.checkpoint, args.device)
     web.run_app(
         create_app(
@@ -404,6 +424,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             cache_root=args.cache_root,
             evaluation_root=args.evaluation_root,
             web_root=args.web_root,
+            profile=args.profile,
         ),
         host=args.host,
         port=args.port,

@@ -12,6 +12,24 @@ artifact source. The complete architecture, data, training, evaluation,
 operations, limitations, and recovery notes are maintained in
 `docs/Atlas-Flow-v5-完整交接文档-2026-08-26.md`.
 
+## Running it on a laptop
+
+The demo runs with no cluster, no GPU and no tunnel:
+
+```bash
+bash scripts/atlas_flow/fetch_local_model.sh   # once: 85 MB weights + atlas + evaluation
+bash scripts/atlas_flow/local_demo.sh          # then: http://127.0.0.1:18796
+```
+
+Inference needs 22.2 M parameters — 85 MiB at fp32. The 255 MB training checkpoint is
+mostly Adam state, so `fetch_local_model.sh` exports an inference-only copy. Measured on an
+M2: Metal plans a five-second trajectory in ~290 ms warm (CPU ~570 ms, 8.8x real time), and
+sustaining a note costs nothing because the runtime time-warps a plan it already has. The
+first note after launch is slower while Metal compiles.
+
+The server tells the page which deployment it is, so a local run defaults to continuous live
+roaming at a 0.3 s buffer — measured at zero underruns, which the remote link cannot do.
+
 ## Current v2 qualification rollout
 
 The active implementation is under `configs/v2/` and `scripts/v2/`: 44.1 kHz,

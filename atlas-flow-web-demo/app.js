@@ -795,8 +795,11 @@ async function connect() {
         prime: Math.round(value.targetSeconds * value.sampleRate * 0.8),
         reprime: Math.round(0.3 * value.sampleRate),
         // Only a genuine runaway should be shed; ordinary overshoot is cheaper
-        // to keep than to discard, because discarding is audible.
-        cap: Math.round(value.targetSeconds * value.sampleRate * 2.2),
+        // to keep than to discard, because discarding is audible. Shedding also
+        // hides the overflow from the producer — it reports the trimmed level,
+        // so the producer keeps refilling — which is why this sits well clear
+        // of the level the producer is aiming at.
+        cap: Math.round(value.targetSeconds * value.sampleRate * 3.0),
       });
       $('#wire').textContent =
         `${value.sampleRate / 1000}kHz ${value.channels === 1 ? 'mono' : 'stereo'} `
@@ -1515,7 +1518,18 @@ async function boot() {
   wire();
   layout();
   scopeLayout();
-  $('#curtainNote').textContent = '预取模式：先把 50 个 preset 渲染好缓存，之后悬停零延迟';
+  // The server knows whether it is on this machine or across a tunnel; take its
+  // word for it rather than guessing from a hostname that is 127.0.0.1 either way.
+  if (status.suggestedMode) {
+    $('#mode').value = status.suggestedMode;
+  }
+  if (status.suggestedBufferSeconds) {
+    $('#buffer').value = String(status.suggestedBufferSeconds);
+    $('#bufferOut').textContent = `${status.suggestedBufferSeconds.toFixed(1)} s`;
+  }
+  $('#curtainNote').textContent = status.profile === 'local'
+    ? `本机运行（${status.cuda}）：连续漫游，缓冲 ${status.suggestedBufferSeconds} s`
+    : '预取模式：先把 50 个 preset 渲染好缓存，之后悬停零延迟';
   const explained = status.pcaExplained || [];
   if (explained.length) {
     $('#axis-note').textContent =
