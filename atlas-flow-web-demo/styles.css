@@ -42,6 +42,7 @@ body {
 
 #map-pane { position: relative; min-width: 0; }
 #map { display: block; width: 100%; height: 100%; cursor: crosshair; }
+#voice { position: absolute; left: 14px; bottom: 46px; color: var(--ink); pointer-events: none; }
 #readout { position: absolute; left: 14px; bottom: 14px; color: var(--dim); pointer-events: none; white-space: pre; }
 #axis-note { position: absolute; right: 14px; bottom: 14px; color: var(--muted); pointer-events: none; }
 #legend { position: absolute; left: 14px; top: 12px; display: grid; gap: 4px; color: var(--muted); pointer-events: none; }

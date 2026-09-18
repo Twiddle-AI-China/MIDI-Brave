@@ -65,6 +65,7 @@ exec kraken-gpu-run \
   --name "$NAME" \
   --memory 19G \
   --shm-size 2g \
+  --env "ATLAS_FLOW_PLAN_INTERVAL=${ATLAS_FLOW_PLAN_INTERVAL:-0.45}" \
   --mount "$DATA:$DATA:ro" \
   --mount "$ROOT/cache:$ROOT/cache" \
   --mount "$ROOT/repo/configs:/opt/midibrave/configs:ro" \

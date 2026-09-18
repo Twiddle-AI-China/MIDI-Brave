@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import json
 import math
+import os
 from numbers import Real
 from pathlib import Path
 import time
@@ -17,6 +18,14 @@ import numpy as np
 from .atlas_flow_runtime import AtlasFlowLiveEngine
 from .atlas_flow_runtime import DEFAULT_MORPH_SECONDS, LIVE_BLOCK_SAMPLES
 from .atlas_flow_stream import StreamFormat, parse_stream, supported_profiles
+
+
+# Minimum spacing between plans. A roam asks for a new trajectory on every
+# pointer move, and each plan is a GPU burst that competes with block rendering
+# for the same device and interpreter; on V100 a plan costs ~180 ms against
+# ~70 ms on the retired GB10 host, so plans have to be spaced further apart
+# there or the audio buffer starves. Override with ATLAS_FLOW_PLAN_INTERVAL.
+PLAN_INTERVAL_SECONDS = float(os.environ.get("ATLAS_FLOW_PLAN_INTERVAL", "0.25"))
 
 
 _ENGINE = web.AppKey("atlas_flow_engine", AtlasFlowLiveEngine)
@@ -238,7 +247,11 @@ async def _produce(
                     **session.snapshot(),
                 })
             elapsed = time.perf_counter() - started
-            pacing = 0.35 if state.buffered_frames < target_frames * 0.5 else 0.97
+            # Filling at 0.35 of real time refills a drained buffer quickly but
+            # overshoots the client's ceiling, and every overshoot the client
+            # sheds is an audible discontinuity. 0.6 still recovers faster than
+            # playback drains without running the queue away.
+            pacing = 0.6 if state.buffered_frames < target_frames * 0.5 else 0.97
             await asyncio.sleep(max(0.0, block_seconds * pacing - elapsed))
         except asyncio.CancelledError:
             raise
@@ -260,7 +273,7 @@ async def _plan(
         await planner_wake.wait()
         planner_wake.clear()
         while session.plan_pending() and not ws.closed:
-            delay = 0.25 - (time.perf_counter() - last_started)
+            delay = PLAN_INTERVAL_SECONDS - (time.perf_counter() - last_started)
             if delay > 0.0:
                 await asyncio.sleep(delay)
             last_started = time.perf_counter()

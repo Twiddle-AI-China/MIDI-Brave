@@ -20,8 +20,6 @@ const KEYS = {a: 48, w: 49, s: 50, e: 51, d: 52, f: 53, t: 54, g: 55, y: 56, h: 
 const INK = '#f2f2f2';
 const CELL = '#d8d8d8';
 const LONER = '#565656';
-const DRAG_THRESHOLD = 0.45;      // normalised map units before a drag is a route
-const DRAG_MILLISECONDS = 250;
 
 let status = null;
 let evaluation = null;
@@ -29,9 +27,7 @@ let cells = [];
 let coordinate = null;
 let hovered = null;
 let pointer = null;
-let route = null;
-let routeStarted = 0;
-let shownRoute = null;            // only drawn while its take is playing
+let sounding = null;              // the cell the running voice actually landed on
 let selectedTest = null;
 let takes = [];
 
@@ -40,6 +36,11 @@ const live = {
   bytes: 0, since: 0, rate: 0, buffered: 0, underruns: 0, seenUnderruns: 0,
   timer: 0, audible: null, chain: null, fileChain: null, context: null,
   fileContext: null, player: null,
+  // Voice state is shown through a slow gate: telemetry arrives every ~370 ms
+  // and the raw label flickers between held_sustain and release as the pointer
+  // moves, which reads as a fault rather than as information.
+  shown: '离线', pending: '离线', gate: 0,
+  offTimer: 0, inside: false, recorder: null, chunks: [],
 };
 
 /* ---------- map ---------- */
@@ -88,8 +89,18 @@ function drawMap() {
   }
   paint.globalCompositeOperation = 'source-over';
 
-  if (shownRoute) drawPath(shownRoute, 'rgba(242, 242, 242, 0.45)', [4, 4]);
-  if (route) drawPath(route, 'rgba(242, 242, 242, 0.9)', []);
+
+  // A double ring says "this preset is what you are hearing", which a plain
+  // white dot among fifty white dots cannot.
+  if (sounding) {
+    for (const radius of [13, 17]) {
+      paint.beginPath();
+      paint.arc(sounding.x, sounding.y, radius, 0, Math.PI * 2);
+      paint.strokeStyle = 'rgba(242, 242, 242, 0.75)';
+      paint.lineWidth = 1;
+      paint.stroke();
+    }
+  }
 
   for (const cell of cells) {
     if (cell.test) {
@@ -128,10 +139,19 @@ function drawMap() {
     paint.beginPath();
     paint.arc(voice[0], voice[1], 40, 0, Math.PI * 2);
     paint.fill();
+    paint.strokeStyle = INK;
+    paint.lineWidth = 1.5;
     paint.beginPath();
-    paint.arc(voice[0], voice[1], 5, 0, Math.PI * 2);
-    paint.fillStyle = INK;
-    paint.fill();
+    paint.arc(voice[0], voice[1], 6, 0, Math.PI * 2);
+    paint.moveTo(voice[0] - 11, voice[1]);
+    paint.lineTo(voice[0] - 8, voice[1]);
+    paint.moveTo(voice[0] + 8, voice[1]);
+    paint.lineTo(voice[0] + 11, voice[1]);
+    paint.moveTo(voice[0], voice[1] - 11);
+    paint.lineTo(voice[0], voice[1] - 8);
+    paint.moveTo(voice[0], voice[1] + 8);
+    paint.lineTo(voice[0], voice[1] + 11);
+    paint.stroke();
   }
   if (cursor) {
     paint.beginPath();
@@ -146,20 +166,6 @@ function drawMap() {
     paint.textAlign = 'center';
     paint.fillText(hovered.label, hovered.x, hovered.y - 15);
   }
-}
-
-function drawPath(path, colour, dash) {
-  if (path.length < 2) return;
-  paint.strokeStyle = colour;
-  paint.lineWidth = 1.5;
-  paint.setLineDash(dash);
-  paint.beginPath();
-  path.forEach((value, index) => {
-    const [x, y] = map.view.toPixel(value);
-    index ? paint.lineTo(x, y) : paint.moveTo(x, y);
-  });
-  paint.stroke();
-  paint.setLineDash([]);
 }
 
 /* ---------- audio chain: three-band compressor + analyser ---------- */
@@ -618,7 +624,7 @@ function currentControls() {
   };
 }
 
-function nearestCell(place) {
+function nearestCellTo(place, radius = 26) {
   const [px, py] = map.view.toPixel(place);
   let best = null;
   let distance = Infinity;
@@ -626,8 +632,10 @@ function nearestCell(place) {
     const measure = Math.hypot(cell.x - px, cell.y - py);
     if (measure < distance) { distance = measure; best = cell; }
   }
-  return distance <= 26 ? best : null;
+  return distance <= radius ? best : null;
 }
+
+const nearestCell = place => nearestCellTo(place, 26);
 
 function moveTo(place, {snap = true} = {}) {
   pointer = place;
@@ -648,9 +656,14 @@ function sendControl() {
   if (!live.connected) return;
   clearTimeout(live.timer);
   live.timer = setTimeout(() => {
-    if (live.socket?.readyState === WebSocket.OPEN) {
-      live.socket.send(JSON.stringify({type: 'control', seq: ++live.seq, ...currentControls()}));
+    if (live.socket?.readyState !== WebSocket.OPEN) return;
+    // The runtime stops producing once the voice is idle and only a start wakes
+    // it; a control message into an idle voice is silence you cannot explain.
+    if (live.lifecycle === 'idle') {
+      retrigger();
+      return;
     }
+    live.socket.send(JSON.stringify({type: 'control', seq: ++live.seq, ...currentControls()}));
   }, 55);
 }
 
@@ -664,15 +677,44 @@ function updateReadout() {
     : `自由坐标\nPC1 ${coordinate[0].toFixed(2)}   PC2 ${coordinate[1].toFixed(2)}`;
 }
 
+function setWork(text) {
+  $('#work').textContent = text || '';
+}
+
+/** Let a state label settle before showing it. */
+function gateState(label) {
+  live.pending = label;
+  if (live.gate) return;
+  live.gate = setTimeout(() => {
+    live.gate = 0;
+    if (live.shown !== live.pending) {
+      live.shown = live.pending;
+      updateStatus();
+    }
+  }, 450);
+}
+
 function updateStatus() {
-  const parts = [live.lifecycle];
+  const parts = [live.shown];
   if (live.connected) {
     parts.push(`规划 ${live.planMs.toFixed(0)}ms`);
     if (live.rate) parts.push(`${live.rate.toFixed(0)}kbit/s`);
     parts.push(`缓冲 ${live.buffered.toFixed(1)}s`);
     if (live.underruns) parts.push(`欠载 ${live.underruns}`);
+    if (live.dropped) parts.push(`弃流 ${live.dropped}`);
   }
   $('#status').textContent = parts.join('   ·   ');
+}
+
+function updateVoice() {
+  if (!live.connected) {
+    $('#voice').textContent = '';
+    return;
+  }
+  const resting = ['idle', 'release', '离线'].includes(live.shown);
+  $('#voice').textContent = sounding
+    ? `${resting ? '刚才响的' : '正在响'}　${sounding.label}${sounding.loner ? '（单点）' : ''}`
+    : '';
 }
 
 /* ---------- live link ---------- */
@@ -696,6 +738,7 @@ async function connect() {
       if (data.type !== 'buffer') return;
       live.buffered = data.bufferedFrames / wire.sampleRate;
       live.underruns = data.underruns;
+      live.dropped = data.dropped || 0;
       liveSend({type: 'buffer', bufferedFrames: data.bufferedFrames, underruns: data.underruns});
       updateStatus();
     };
@@ -707,7 +750,7 @@ async function connect() {
   live.seq = 0;
   live.bytes = 0;
   live.since = performance.now();
-  live.lifecycle = '连接中';
+  gateState('连接中'); live.shown = '连接中';
   updateStatus();
   useAnalyser(live.chain.analyser, '实时');
 
@@ -743,6 +786,9 @@ async function connect() {
         type: 'format', channels: value.channels, dtype: value.format,
         prime: Math.round(value.targetSeconds * value.sampleRate * 0.8),
         reprime: Math.round(0.3 * value.sampleRate),
+        // Only a genuine runaway should be shed; ordinary overshoot is cheaper
+        // to keep than to discard, because discarding is audible.
+        cap: Math.round(value.targetSeconds * value.sampleRate * 2.2),
       });
       $('#wire').textContent =
         `${value.sampleRate / 1000}kHz ${value.channels === 1 ? 'mono' : 'stereo'} `
@@ -750,13 +796,21 @@ async function connect() {
     }
     if (value.type === 'telemetry') {
       live.lifecycle = value.lifecycle;
+      gateState(value.lifecycle);
       live.planMs = Number(value.planMs) || 0;
       live.audible = value.audiblePcaNormalized || live.audible;
+      // Name the cell nearest what is *audible*, not the cell nearest the plan's
+      // target: during a morph those are different points, and the ring has to
+      // agree with the crosshair or it tells you the wrong preset.
+      const heard = value.audiblePcaNormalized || value.projectedPcaNormalized;
+      if (heard) sounding = nearestCellTo(heard, Infinity);
       updateStatus();
+      updateVoice();
       drawMap();
     }
     if (value.type === 'error') {
       live.lifecycle = value.message;
+      gateState(value.message);
       updateStatus();
     }
   };
@@ -764,93 +818,114 @@ async function connect() {
     live.connected = false;
     live.audible = null;
     live.lifecycle = event.code === 1001 ? '已被另一个标签页接管' : '离线';
+    live.shown = live.lifecycle;
+    sounding = null;
     updateStatus();
+    updateVoice();
     drawMap();
   };
 }
 
 function retrigger() {
   liveSend({type: 'start', seed: Number($('#seed').value) || 0, ...currentControls()});
+  // Telemetry lags by up to ~370 ms; without this the next control tick would
+  // still see 'idle' and start the voice a second time.
+  live.lifecycle = 'planning';
 }
 
 /* ---------- rendered takes ---------- */
 
-function pathLength(path) {
-  let total = 0;
-  for (let index = 1; index < path.length; index++) {
-    total += Math.hypot(path[index][0] - path[index - 1][0], path[index][1] - path[index - 1][1]);
-  }
-  return total;
-}
-
-function sampleRoute(path) {
-  const total = pathLength(path);
-  const stops = Math.min(status.maxSteps || 4, Math.max(2, Math.round(total / 0.5) + 1));
-  const wanted = Array.from({length: stops}, (_, index) => total * index / (stops - 1));
-  const picked = [];
-  let walked = 0;
-  let cursor = 0;
-  for (const distance of wanted) {
-    while (cursor < path.length - 1) {
-      const step = Math.hypot(path[cursor + 1][0] - path[cursor][0], path[cursor + 1][1] - path[cursor][1]);
-      if (walked + step >= distance) break;
-      walked += step;
-      cursor++;
-    }
-    picked.push(path[Math.min(cursor, path.length - 1)]);
-  }
-  const seconds = clamp(10 / picked.length, 1.5, 3.5);
-  return picked.map(place => {
-    const value = coordinate.slice();
-    value[0] = place[0];
-    value[1] = place[1];
-    return {
-      pca: value.map(item => Number(item.toFixed(4))),
-      note: Number($('#note').value),
-      seconds: Number(seconds.toFixed(1)),
-    };
-  });
-}
-
-async function renderRoute(path) {
-  const steps = sampleRoute(path);
-  live.lifecycle = '离线渲染中…';
-  updateStatus();
-  if ($('#hold').getAttribute('aria-pressed') !== 'true') liveSend({type: 'note_off'});
+/** Render the coordinate you are on right now, at full rate, offline.
+ *
+ *  The live stream is decimated to survive the link, and the offline path uses
+ *  the evaluation-grade 8-step solver, so this is the only way to hear the
+ *  model at full bandwidth. It renders where you are — there is no path to
+ *  draw and nothing to aim.
+ */
+async function renderCurrent() {
+  const button = $('#render');
+  button.disabled = true;
+  setWork('渲染中…');
   try {
     const response = await fetch('/api/render', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        steps, seed: Number($('#seed').value) || 0,
-        velocity: Number($('#level').value), temperature: 0,
-        morphSeconds: clamp(steps[0].seconds / 2, 0.5, 5),
+        steps: [{
+          pca: coordinate.map(value => Number(value.toFixed(4))),
+          note: Number($('#note').value),
+          seconds: 4.0,
+        }],
+        seed: Number($('#seed').value) || 0,
+        velocity: Number($('#level').value),
+        temperature: 0,
+        morphSeconds: 1.0,
       }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || `渲染失败 ${response.status}`);
-    payload.path = path;
-    addTake(payload, steps);
-    play(payload.url, '渲染片段', path);
-    live.lifecycle = live.connected ? 'held_sustain' : '离线';
+    addTake(payload, sounding ? sounding.label : '自由坐标');
+    setWork(`${payload.seconds.toFixed(1)}s · ${(payload.bytes / 1024).toFixed(0)}KB`);
+    play(payload.url, '渲染片段');
   } catch (error) {
-    live.lifecycle = String(error.message || error);
+    setWork(String(error.message || error));
+  } finally {
+    button.disabled = false;
   }
-  updateStatus();
 }
 
-function addTake(payload, steps) {
-  takes = [{...payload, steps}, ...takes.filter(item => item.id !== payload.id)].slice(0, 8);
+function addTake(payload, label) {
+  takes = [{...payload, label}, ...takes.filter(item => item.id !== payload.id)].slice(0, 8);
   const host = $('#takes');
   host.textContent = '';
   for (const take of takes) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'chip';
-    button.textContent = `${take.steps.length}点 ${take.seconds.toFixed(1)}s`;
-    button.title = `${(take.bytes / 1024).toFixed(0)} KB · 峰值 ${take.peakDbfs} dBFS · GPU ${(take.renderMs / 1000).toFixed(1)} s`;
-    button.addEventListener('click', () => play(take.url, '渲染片段', take.path));
+    button.textContent = `${take.label} ${take.seconds.toFixed(1)}s`;
+    button.title = take.recorded
+      ? `录制 · ${(take.bytes / 1024).toFixed(0)} KB`
+      : `全速率渲染 · ${(take.bytes / 1024).toFixed(0)} KB · 峰值 ${take.peakDbfs} dBFS · GPU ${(take.renderMs / 1000).toFixed(1)} s`;
+    button.addEventListener('click', () => play(take.url, take.recorded ? '录音' : '渲染片段'));
     host.append(button);
   }
+}
+
+/** Record what you are actually hearing, post-compressor. */
+function toggleRecording() {
+  const button = $('#rec');
+  if (live.recorder) {
+    live.recorder.stop();
+    return;
+  }
+  if (!live.chain || typeof MediaRecorder === 'undefined') {
+    setWork('这个浏览器不支持录制');
+    return;
+  }
+  const destination = live.chain.context.createMediaStreamDestination();
+  live.chain.limiter.connect(destination);
+  live.chunks = [];
+  const recorder = new MediaRecorder(destination.stream);
+  recorder.ondataavailable = event => event.data.size && live.chunks.push(event.data);
+  recorder.onstop = () => {
+    live.chain.limiter.disconnect(destination);
+    live.recorder = null;
+    button.setAttribute('aria-pressed', 'false');
+    button.textContent = '● 录制';
+    const blob = new Blob(live.chunks, {type: recorder.mimeType});
+    const url = URL.createObjectURL(blob);
+    const seconds = (performance.now() - started) / 1000;
+    addTake({
+      id: url, url, seconds, bytes: blob.size, recorded: true,
+      peakDbfs: 0, renderMs: 0,
+    }, '录音');
+    setWork(`录了 ${seconds.toFixed(1)}s`);
+  };
+  const started = performance.now();
+  recorder.start();
+  live.recorder = recorder;
+  button.setAttribute('aria-pressed', 'true');
+  button.textContent = '■ 停止';
+  setWork('录制中…');
 }
 
 async function filePlayback() {
@@ -863,13 +938,11 @@ async function filePlayback() {
   return chain;
 }
 
-async function play(url, label = '渲染片段', path = null) {
+async function play(url, label = '渲染片段') {
   const player = $('#player');
   const chain = await filePlayback().catch(() => null);
   applyCompressor(chain);
   await live.fileContext?.resume().catch(() => {});
-  shownRoute = path;
-  drawMap();
   player.src = url;
   await player.play().catch(() => {});
   if (chain) useAnalyser(chain.analyser, label);
@@ -1003,61 +1076,43 @@ function wire() {
     return map.view.toNormal(event.clientX - box.left, event.clientY - box.top);
   };
 
-  map.addEventListener('pointermove', event => {
-    const here = place(event);
-    if (route) {
-      const last = route.at(-1);
-      if (Math.hypot(here[0] - last[0], here[1] - last[1]) > 0.04) route.push(here);
-    }
-    moveTo(here, {snap: !route});
-  });
+  map.addEventListener('pointermove', event => moveTo(place(event)));
 
   map.addEventListener('pointerdown', event => {
     map.setPointerCapture(event.pointerId);
     if (!live.connected) {
       $('#curtain').classList.add('gone');
-      connect().catch(error => { live.lifecycle = String(error.message || error); updateStatus(); });
-      moveTo(place(event));
-      return;
+      connect().catch(error => { live.shown = String(error.message || error); updateStatus(); });
     }
-    route = [place(event)];
-    routeStarted = performance.now();
-    drawMap();
+    moveTo(place(event));
   });
 
   map.addEventListener('pointerup', event => {
-    const here = place(event);
-    // A route has to be a deliberate stroke, otherwise every click would leave
-    // a trajectory behind and trigger a render.
-    const deliberate = route
-      && pathLength(route) > DRAG_THRESHOLD
-      && performance.now() - routeStarted > DRAG_MILLISECONDS;
-    const drawn = deliberate ? route : null;
-    route = null;
-    if (drawn) {
-      renderRoute(drawn);
-      drawMap();
-      return;
-    }
-    moveTo(here);
-    const cell = nearestCell(here);
+    moveTo(place(event));
+    const cell = nearestCell(place(event));
     if (cell?.test) openTest(cell);
-    else if (selectedTest) { selectedTest = null; $('#modes').hidden = true; }
-    if (live.connected) retrigger();
-    drawMap();
+    else if (selectedTest) { selectedTest = null; $('#modes').hidden = true; drawMap(); }
   });
 
+  // Leaving briefly should not cut the note: a release costs a fresh attack and
+  // a fresh plan when the pointer comes straight back, which is what made the
+  // state label thrash between held_sustain and release.
   map.addEventListener('pointerleave', () => {
-    route = null;
+    live.inside = false;
     pointer = null;
     hovered = null;
     drawMap();
-    if (live.connected && $('#hold').getAttribute('aria-pressed') !== 'true') {
-      liveSend({type: 'note_off'});
-    }
+    if (!live.connected || $('#hold').getAttribute('aria-pressed') === 'true') return;
+    clearTimeout(live.offTimer);
+    live.offTimer = setTimeout(() => {
+      if (!live.inside) liveSend({type: 'note_off'});
+    }, 700);
   });
+
   map.addEventListener('pointerenter', () => {
-    if (live.connected && $('#hold').getAttribute('aria-pressed') !== 'true') retrigger();
+    live.inside = true;
+    clearTimeout(live.offTimer);
+    if (live.connected && ['idle', 'release'].includes(live.lifecycle)) retrigger();
   });
 
   $('#note').addEventListener('input', event => {
@@ -1105,6 +1160,8 @@ function wire() {
     scope.carry = 0;
     scopeLayout();
   });
+  $('#rec').addEventListener('click', toggleRecording);
+  $('#render').addEventListener('click', renderCurrent);
   $('#gear').addEventListener('click', () => {
     const panel = $('#panel');
     panel.hidden = !panel.hidden;
@@ -1120,8 +1177,6 @@ function wire() {
     if ($('#hold').getAttribute('aria-pressed') !== 'true') liveSend({type: 'note_off'});
   });
   player.addEventListener('ended', () => {
-    shownRoute = null;
-    drawMap();
     if (live.connected && live.chain) useAnalyser(live.chain.analyser, '实时');
     else $('#scope-source').textContent = '静音';
   });
@@ -1167,7 +1222,8 @@ async function boot() {
       `PC1 ${(explained[0] * 100).toFixed(0)}% × PC2 ${(explained[1] * 100).toFixed(0)}%`
       + ` ＝ 音色锚点方差的 ${((explained[0] + explained[1]) * 100).toFixed(0)}%`;
   }
-  live.lifecycle = `${status.cuda} · ${status.checkpoint}`;
+  live.lifecycle = '离线';
+  live.shown = `${status.cuda} · ${status.checkpoint}`;
   updateStatus();
 }
 

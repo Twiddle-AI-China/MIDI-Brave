@@ -20,6 +20,10 @@ class AtlasLivePlayer extends AudioWorkletProcessor {
         this.prime = data.prime;
         // A single late block should cost a short gap, not another full prime.
         this.reprime = data.reprime;
+        // The producer fills faster than real time until the first buffer
+        // report reaches it, and anything it overshoots by would otherwise sit
+        // in the queue as permanent latency. Shed it instead.
+        this.cap = data.cap;
         this.reset();
       } else if (data.type === 'pcm') {
         this.push(data.buffer);
@@ -51,6 +55,12 @@ class AtlasLivePlayer extends AudioWorkletProcessor {
     }
     this.queue.push([left, right]);
     this.frames += count;
+    while (this.cap && this.frames > this.cap && this.queue.length > 1) {
+      const [dropped] = this.queue.shift();
+      this.frames -= dropped.length - this.offset;
+      this.offset = 0;
+      this.dropped = (this.dropped || 0) + 1;
+    }
     if (this.frames >= this.threshold) this.primed = true;
   }
 
@@ -85,6 +95,7 @@ class AtlasLivePlayer extends AudioWorkletProcessor {
         bufferedFrames: this.frames,
         underruns: this.underruns,
         primed: this.primed,
+        dropped: this.dropped || 0,
       });
     }
     return true;

@@ -18,12 +18,13 @@
   <div id="board">
     <div id="map-pane">
       <canvas id="map"></canvas>
-      <div id="curtain"><div><b>点一下图谱开始</b><span>移动鼠标＝试听 · 按住横拖一段距离＝画路径</span></div></div>
+      <div id="curtain"><div><b>点一下图谱开始</b><span>之后移动鼠标就是试听，不用按住</span></div></div>
+      <div id="voice" class="mono"></div>
       <div id="readout" class="mono"></div>
       <div id="legend" class="mono">
-        <span><i class="dot-cursor"></i>光标目标</span>
-        <span><i class="dot-voice"></i>当前发声（向目标渐变）</span>
-        <span><i class="dot-test"></i>held-out preset，可点开对照</span>
+        <span><i class="dot-cursor"></i>你指的位置</span>
+        <span><i class="dot-voice"></i>正在响的音色（追着你走）</span>
+        <span><i class="dot-test"></i>held-out preset，可点开四模式对照</span>
       </div>
       <div id="axis-note" class="mono"></div>
     </div>
@@ -51,9 +52,13 @@
     <label class="knob">种子<input id="seed" type="number" value="20260822" step="1"></label>
     <span class="divider"></span>
     <button id="comp" class="chip" type="button" aria-pressed="true">多段压缩</button>
-    <label class="knob">压缩量<input id="compAmount" type="range" min="0" max="1" step="0.01" value="0.55"><output id="compOut">0.55</output></label>
+    <label class="knob">压缩量<input id="compAmount" type="range" min="0" max="1" step="0.01" value="0.3"><output id="compOut">0.30</output></label>
     <span id="compMeter" class="mono">GR —</span>
     <button id="hold" class="chip" type="button" aria-pressed="false">常亮</button>
+    <span class="divider"></span>
+    <button id="rec" class="chip" type="button" aria-pressed="false">● 录制</button>
+    <button id="render" class="chip" type="button">全速率渲染</button>
+    <span id="work" class="mono"></span>
     <div id="modes" class="modes" hidden></div>
     <div id="takes" class="takes"></div>
     <audio id="player" preload="none"></audio>
@@ -63,8 +68,9 @@
     <section>
       <h3>实时链路</h3>
       <label>音质<select id="profile"></select></label>
-      <label>缓冲<input id="buffer" type="range" min="0.2" max="4" step="0.1" value="1.2"><output id="bufferOut">1.2 s</output></label>
+      <label>缓冲<input id="buffer" type="range" min="0.2" max="4" step="0.1" value="1.4"><output id="bufferOut">1.4 s</output></label>
       <p class="mono muted" id="wire">—</p>
+      <p class="muted">缓冲就是延迟。这条链路（Jagger→Octopus→Kraken，约 2.65 Mbit/s）＋V100 规划实测：1.4 s 时 40 秒零欠载；1.2 s 出 2 次；1.0 s 出 3 次；0.6 s 出 9 次。想更低延迟只能进公司局域网。</p>
     </section>
     <section>
       <h3>多段压缩</h3>
