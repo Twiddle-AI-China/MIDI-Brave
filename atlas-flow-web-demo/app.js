@@ -17,6 +17,18 @@ const noteName = value => `${NOTES[value % 12]}${Math.floor(value / 12) - 1}`;
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 const KEYS = {a: 48, w: 49, s: 50, e: 51, d: 52, f: 53, t: 54, g: 55, y: 56, h: 57, u: 58, j: 59, k: 60};
 
+// Not every browser decodes Ogg Vorbis (Safari notably), and an undecodable
+// clip is silence with an error. Ask the browser what it can play.
+const AUDIO_FORMAT = (() => {
+  const probe = document.createElement('audio');
+  return probe.canPlayType('audio/ogg; codecs=vorbis') ? 'ogg' : 'mp3';
+})();
+const pickAudio = payload =>
+  (payload.urls && payload.urls[AUDIO_FORMAT]) || payload.url;
+// Evaluation rows name their clips .ogg; the server transcodes on demand, so
+// asking for the other extension is enough.
+const auditionUrl = path => path.replace(/\.ogg$/, `.${AUDIO_FORMAT}`);
+
 const INK = '#f2f2f2';
 const CELL = '#d8d8d8';
 const LONER = '#565656';
@@ -892,7 +904,7 @@ async function renderCurrent() {
     if (!response.ok) throw new Error(payload.error || `渲染失败 ${response.status}`);
     addTake(payload, sounding ? sounding.label : '自由坐标');
     setWork(`${payload.seconds.toFixed(1)}s · ${(payload.bytes / 1024).toFixed(0)}KB`);
-    play(payload.url, '渲染片段');
+    play(pickAudio(payload), '渲染片段');
   } catch (error) {
     setWork(String(error.message || error));
   } finally {
@@ -912,7 +924,8 @@ function addTake(payload, label) {
     button.title = take.recorded
       ? `录制 · ${(take.bytes / 1024).toFixed(0)} KB`
       : `全速率渲染 · ${(take.bytes / 1024).toFixed(0)} KB · 峰值 ${take.peakDbfs} dBFS · GPU ${(take.renderMs / 1000).toFixed(1)} s`;
-    button.addEventListener('click', () => play(take.url, take.recorded ? '录音' : '渲染片段'));
+    button.addEventListener('click', () => play(take.recorded ? take.url : pickAudio(take),
+                                                take.recorded ? '录音' : '渲染片段'));
     host.append(button);
   }
 }
@@ -1057,7 +1070,7 @@ async function previewFor(cell, note) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'render failed');
-    const bytes = await (await fetch(payload.url)).arrayBuffer();
+    const bytes = await (await fetch(pickAudio(payload))).arrayBuffer();
     const buffer = await chain.context.decodeAudioData(bytes);
     preview.buffers.set(key, buffer);
     return buffer;
@@ -1232,7 +1245,7 @@ async function playProgression() {
       + `${payload.cached ? ' · 缓存' : ` · GPU ${(payload.renderMs / 1000).toFixed(1)}s`}`);
     $('#chordNote').textContent =
       `${item.name} 于 ${noteName(root)}：` + chords.map(c => c.map(noteName).join('-')).join('　');
-    play(payload.url, `进行 ${item.name}`);
+    play(pickAudio(payload), `进行 ${item.name}`);
   } catch (error) {
     setWork(String(error.message || error));
   } finally {
@@ -1310,7 +1323,7 @@ function openTest(cell) {
     const position = restart ? 0 : player.currentTime;
     const playing = restart || !player.paused;
     liveSend({type: 'note_off'});
-    play(row.audio[mode], `对照 ${mode.toUpperCase()}`).then(() => {
+    play(auditionUrl(row.audio[mode]), `对照 ${mode.toUpperCase()}`).then(() => {
       player.currentTime = position;
       if (!playing) player.pause();
     });

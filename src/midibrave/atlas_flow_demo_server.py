@@ -34,7 +34,7 @@ from .atlas_flow_runtime_server import create_app as create_runtime_app
 from .atlas_flow_stream import supported_profiles
 
 
-RENDER_SCHEMA = "midibrave.atlas-flow.demo-take.v2"
+RENDER_SCHEMA = "midibrave.atlas-flow.demo-take.v3"
 OFFLINE_SOLVER_STEPS = 8
 MAX_STEPS = 8
 MAX_VOICES = 4
@@ -219,6 +219,19 @@ def encode_vorbis(audio: np.ndarray, rate: int) -> bytes:
     return buffer.getvalue()
 
 
+# Vorbis is the smaller encoding, but not every browser decodes it — Safari
+# notably — and a clip that will not decode is silence plus an error, which is
+# indistinguishable from a broken model to whoever is listening. So every take
+# is written twice and the client picks what it can actually play.
+def encode_mp3(audio: np.ndarray, rate: int) -> bytes:
+    buffer = io.BytesIO()
+    sf.write(buffer, np.clip(audio, -1.0, 1.0), rate, format="MP3")
+    return buffer.getvalue()
+
+
+AUDIO_TYPES = {".ogg": "audio/ogg", ".mp3": "audio/mpeg"}
+
+
 def explained_variance(engine: AtlasFlowLiveEngine) -> list[float]:
     """Share of anchor variance each atlas axis carries, for honest axis labels."""
     atlas = engine.atlas
@@ -313,7 +326,8 @@ def create_app(
 
     async def audition(request: web.Request) -> web.Response:
         name = _safe_name(request.match_info["name"])
-        if not name.endswith(".ogg"):
+        suffix = Path(name).suffix
+        if suffix not in AUDIO_TYPES:
             raise web.HTTPNotFound(text="unsupported audition format")
         target = request.app[_CACHE] / "audition" / name
         if not target.is_file():
@@ -323,15 +337,19 @@ def create_app(
 
             def transcode() -> None:
                 data, rate = sf.read(source, dtype="float32", always_2d=True)
-                payload = encode_vorbis(data[:, 0], int(rate))
-                temporary = target.with_suffix(".ogg.tmp")
+                encode = encode_vorbis if suffix == ".ogg" else encode_mp3
+                payload = encode(data[:, 0], int(rate))
+                temporary = target.with_suffix(suffix + ".tmp")
                 temporary.write_bytes(payload)
                 temporary.replace(target)
 
             await asyncio.get_running_loop().run_in_executor(
                 request.app[_EXECUTOR], transcode,
             )
-        return web.FileResponse(target, headers={"Cache-Control": "public, max-age=86400"})
+        return web.FileResponse(target, headers={
+            "Content-Type": AUDIO_TYPES[suffix],
+            "Cache-Control": "public, max-age=86400",
+        })
 
     async def render(request: web.Request) -> web.Response:
         engine_ref = request.app[_ENGINE]
@@ -357,6 +375,10 @@ def create_app(
                     request.app[_EXECUTOR], encode_vorbis,
                     result["audio"], result["sampleRate"],
                 )
+                alternate = await loop.run_in_executor(
+                    request.app[_EXECUTOR], encode_mp3,
+                    result["audio"], result["sampleRate"],
+                )
             except (RuntimeError, TypeError, ValueError) as error:
                 return web.json_response({"error": str(error)}, status=500)
         payload = {key: value for key, value in result.items() if key != "audio"}
@@ -364,6 +386,10 @@ def create_app(
             "schema": RENDER_SCHEMA,
             "id": identifier,
             "url": f"/api/take/{identifier}.ogg",
+            "urls": {
+                "ogg": f"/api/take/{identifier}.ogg",
+                "mp3": f"/api/take/{identifier}.mp3",
+            },
             "bytes": len(encoded),
             "take": take,
             "cached": False,
@@ -371,14 +397,23 @@ def create_app(
         temporary = audio_path.with_suffix(".ogg.tmp")
         temporary.write_bytes(encoded)
         temporary.replace(audio_path)
+        spare = audio_path.with_suffix(".mp3")
+        temporary = spare.with_suffix(".mp3.tmp")
+        temporary.write_bytes(alternate)
+        temporary.replace(spare)
         meta_path.write_text(json.dumps(payload), encoding="utf-8")
         return web.json_response(payload)
 
     async def take_audio(request: web.Request) -> web.FileResponse:
         target = request.app[_CACHE] / "takes" / _safe_name(request.match_info["name"])
-        if target.suffix != ".ogg" or not target.is_file():
+        if target.suffix not in AUDIO_TYPES or not target.is_file():
             raise web.HTTPNotFound(text="take not found")
-        return web.FileResponse(target, headers={"Cache-Control": "public, max-age=86400"})
+        # Without an explicit type aiohttp serves .ogg as application/octet-stream,
+        # which stricter browsers refuse to decode — silence with an error.
+        return web.FileResponse(target, headers={
+            "Content-Type": AUDIO_TYPES[target.suffix],
+            "Cache-Control": "public, max-age=86400",
+        })
 
     async def health(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "checkpoint": request.app[_ENGINE].checkpoint.name})
