@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Atlas Flow · Pad</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="stage">
+  <header id="top">
+    <span class="brand">ATLAS FLOW<em>PAD TOP50 · 研究原型</em></span>
+    <span id="status" class="mono">连接中…</span>
+    <button id="gate" class="chip" type="button">—</button>
+    <button id="gear" class="chip" type="button">设置</button>
+  </header>
+
+  <div id="board">
+    <div id="map-pane">
+      <canvas id="map"></canvas>
+      <div id="curtain"><div><b>点一下图谱开始</b><span>移动鼠标＝试听 · 按住横拖一段距离＝画路径</span></div></div>
+      <div id="readout" class="mono"></div>
+      <div id="legend" class="mono">
+        <span><i class="dot-cursor"></i>光标目标</span>
+        <span><i class="dot-voice"></i>当前发声（向目标渐变）</span>
+        <span><i class="dot-test"></i>held-out preset，可点开对照</span>
+      </div>
+      <div id="axis-note" class="mono"></div>
+    </div>
+
+    <div id="scope-pane">
+      <div id="scope-head">
+        <select id="view">
+          <option value="spectrogram">频谱图 SPECTROGRAM</option>
+          <option value="spectrum">频谱 SPECTRUM</option>
+          <option value="ridge">瀑布 WATERFALL</option>
+          <option value="wave">波形 OSCILLOSCOPE</option>
+          <option value="loudness">响度 LOUDNESS</option>
+        </select>
+        <span id="scope-range">—</span>
+        <span id="scope-source">静音</span>
+      </div>
+      <canvas id="scope"></canvas>
+    </div>
+  </div>
+
+  <footer id="rail">
+    <label class="knob">音高<input id="note" type="range" min="36" max="71" step="1" value="50"><output id="noteOut">50 · D3</output></label>
+    <label class="knob">力度<input id="level" type="range" min="0" max="1" step="0.01" value="0.8"><output id="levelOut">0.80</output></label>
+    <label class="knob">渐变<input id="morph" type="range" min="0.5" max="5" step="0.1" value="0.6"><output id="morphOut">0.6 s</output></label>
+    <label class="knob">种子<input id="seed" type="number" value="20260822" step="1"></label>
+    <span class="divider"></span>
+    <button id="comp" class="chip" type="button" aria-pressed="true">多段压缩</button>
+    <label class="knob">压缩量<input id="compAmount" type="range" min="0" max="1" step="0.01" value="0.55"><output id="compOut">0.55</output></label>
+    <span id="compMeter" class="mono">GR —</span>
+    <button id="hold" class="chip" type="button" aria-pressed="false">常亮</button>
+    <div id="modes" class="modes" hidden></div>
+    <div id="takes" class="takes"></div>
+    <audio id="player" preload="none"></audio>
+  </footer>
+
+  <aside id="panel" hidden>
+    <section>
+      <h3>实时链路</h3>
+      <label>音质<select id="profile"></select></label>
+      <label>缓冲<input id="buffer" type="range" min="0.2" max="4" step="0.1" value="1.2"><output id="bufferOut">1.2 s</output></label>
+      <p class="mono muted" id="wire">—</p>
+    </section>
+    <section>
+      <h3>多段压缩</h3>
+      <label>低/中<input id="crossLow" type="range" min="80" max="600" step="10" value="220"><output id="crossLowOut">220 Hz</output></label>
+      <label>中/高<input id="crossHigh" type="range" min="1200" max="6000" step="100" value="2600"><output id="crossHighOut">2600 Hz</output></label>
+      <label>输出<input id="makeup" type="range" min="-18" max="12" step="0.5" value="0"><output id="makeupOut">0.0 dB</output></label>
+      <p class="mono muted" id="bands">—</p>
+      <p class="muted">三段 LR4 分频，每段独立压缩。模型本身的响度一致性是未通过的门禁之一（Flow RMS 误差中位 9.2 dB），压缩只是听感补偿，不代表模型达标。</p>
+    </section>
+    <section>
+      <h3>8 维坐标</h3>
+      <div id="axes" class="axes"></div>
+      <p class="muted">鼠标控制 PC1/PC2，其余六维在此微调。所有坐标都会先投影到合法局部凸包。</p>
+    </section>
+    <section>
+      <h3>这是什么</h3>
+      <p class="muted">Pad 单声部研究原型。每个细胞是一个 preset 的 128D 音色锚点，经 8 维 PCA 投影；鼠标位置就是坐标，Flow 预测轨迹、解码器注入 MIDI 音高。</p>
+      <p class="muted" id="gates"></p>
+      <p class="muted" id="limits"></p>
+    </section>
+  </aside>
+</div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
