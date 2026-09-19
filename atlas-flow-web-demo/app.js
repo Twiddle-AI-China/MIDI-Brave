@@ -239,7 +239,8 @@ function drawMap() {
   }
 
   if (trajectory.points.length > 1) drawTrajectory(view);
-  if (sounding) drawInset(view, sounding);
+  // The inset is a luxury; on a narrow map it would cover the atlas it annotates.
+  if (sounding && view.width > 620) drawInset(view, sounding);
 }
 
 function drawTrajectory(view) {
@@ -1620,9 +1621,23 @@ async function playProgression() {
   const root = Number($('#note').value);
   const seconds = clamp(20 / item.degrees.length, 1.5, 3.0);
   const chords = item.degrees.map(degree => triad(root, degree));
+  // With a drawn path, the progression walks it: chord n sits at the point n
+  // steps along the stroke, so the harmony and the timbre sweep together
+  // instead of the chords all sharing one coordinate.
+  const onPath = trajectory.points.length >= 2;
+  if (onPath) measurePath();
+  const placeFor = index => {
+    if (!onPath) return coordinate;
+    const at = pointAt(chords.length === 1 ? 0 : index / (chords.length - 1));
+    const value = coordinate.slice();
+    value[0] = at[0];
+    value[1] = at[1];
+    return value;
+  };
   button.disabled = true;
-  setWork(`${item.name} 渲染中…`);
-  if ($('#hold').getAttribute('aria-pressed') !== 'true') {
+  setWork(`${item.name} 渲染中…${onPath ? '（沿轨迹）' : ''}`);
+  // A walking path is the live voice the user asked for; do not cut it off.
+  if (!trajectory.playing && $('#hold').getAttribute('aria-pressed') !== 'true') {
     liveSend({type: 'note_off'});
     live.lifecycle = 'release';     // so the next roam starts the voice again
   }
@@ -1631,21 +1646,24 @@ async function playProgression() {
     const response = await fetch('/api/render', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        steps: chords.map(notes => ({
-          pca: coordinate.map(value => Number(value.toFixed(4))),
+        steps: chords.map((notes, index) => ({
+          pca: placeFor(index).map(value => Number(value.toFixed(4))),
           notes,
           seconds: Number(seconds.toFixed(1)),
         })),
         seed: Number($('#seed').value) || 0,
         velocity: Number($('#level').value),
         temperature: 0,
-        morphSeconds: 0.5,
+        // Along a path the chords are travelling, so give the morph most of the
+        // step to cross; standing still it only needs to settle.
+        morphSeconds: onPath ? clamp(seconds * 0.8, 0.5, 5) : 0.5,
       }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || `渲染失败 ${response.status}`);
-    addTake(payload, `${item.name} ${noteName(root)}`);
+    addTake(payload, `${item.name} ${noteName(root)}${onPath ? ' ↗' : ''}`);
     setWork(`${item.name} · ${payload.voices} 声部 · ${payload.seconds.toFixed(1)}s`
+      + `${onPath ? ' · 沿轨迹' : ''}`
       + `${payload.cached ? ' · 缓存' : ` · GPU ${(payload.renderMs / 1000).toFixed(1)}s`}`);
     $('#chordNote').textContent =
       `${item.name} 于 ${noteName(root)}：` + chords.map(c => c.map(noteName).join('-')).join('　');

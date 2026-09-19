@@ -9,7 +9,9 @@
   --muted: #6e6e6e;
   --rail: 56px;
   --top: 42px;
-  --scope: 430px;
+  /* The scope earns its width on a big display and must not eat the map on a
+     small one, so it scales with the viewport between hard bounds. */
+  --scope: clamp(240px, 26vw, 430px);
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -21,7 +23,7 @@ body {
 .mono { font-size: 10.5px; letter-spacing: .02em; }
 .muted { color: var(--muted); }
 
-#stage { display: grid; grid-template-rows: var(--top) 1fr var(--rail); height: 100vh; }
+#stage { display: grid; grid-template-rows: var(--top) minmax(0, 1fr) auto; height: 100vh; }
 
 #top { display: flex; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--line); }
 .brand { font-weight: 600; letter-spacing: .14em; font-size: 12px; }
@@ -71,7 +73,11 @@ body {
 #scope-source { margin-left: auto; color: var(--dim); }
 #scope { display: block; width: 100%; height: 100%; }
 
-#rail { display: flex; align-items: center; gap: 12px; padding: 0 14px; border-top: 1px solid var(--line); overflow-x: auto; overflow-y: hidden; }
+#rail {
+  display: flex; align-items: center; gap: 12px; padding: 6px 14px;
+  border-top: 1px solid var(--line); min-height: var(--rail);
+  flex-wrap: wrap; row-gap: 8px;
+}
 /* Nothing in the rail may shrink: a squeezed control wraps its label into a
    stack of single characters, which is how it looked before. */
 #rail > * { flex: 0 0 auto; }
@@ -109,3 +115,42 @@ audio { display: none; }
 .axes label { grid-template-columns: 64px 1fr 40px; }
 
 .knob select { background: #0b0b0b; border: 1px solid var(--line); color: var(--ink); border-radius: 3px; padding: 3px 5px; font: inherit; font-size: 10.5px; }
+
+/* ---------- responsive ---------- */
+
+/* Laptop widths: tighten the knobs before anything has to be dropped. */
+@media (max-width: 1440px) {
+  .knob input[type=range] { width: 66px; }
+  .knob output { min-width: 42px; }
+  #rail { gap: 10px; }
+}
+
+/* Narrow: the least-used readouts go first, not the controls. */
+@media (max-width: 1180px) {
+  #legend span:nth-child(3) { display: none; }
+  #axis-note { display: none; }
+  .knob input[type=range] { width: 54px; }
+}
+
+/* No room for a scope; the map takes the whole board. */
+@media (max-width: 1000px) {
+  #board { grid-template-columns: minmax(0, 1fr); }
+  #scope-pane { display: none; }
+  #panel { width: min(340px, 92vw); }
+}
+
+/* Phone-ish or a very narrow window: keep only what plays sound. */
+@media (max-width: 820px) {
+  #legend { display: none; }
+  .brand em { display: none; }
+  #status { font-size: 9.5px; }
+  .knob { font-size: 10px; }
+  #takes { margin-left: 0; }
+}
+
+/* Short windows: the chrome must not crowd out the map. */
+@media (max-height: 700px) {
+  :root { --top: 36px; --rail: 48px; }
+  #legend { display: none; }
+  #rail { padding: 4px 12px; row-gap: 6px; }
+}

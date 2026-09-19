@@ -284,13 +284,17 @@ def create_app(
     app.on_cleanup.append(cleanup)
 
     async def index(request: web.Request) -> web.FileResponse:
-        return web.FileResponse(request.app[_WEB] / "index.html")
+        return web.FileResponse(request.app[_WEB] / "index.html",
+                                headers={"Cache-Control": "no-cache"})
 
     async def asset(request: web.Request) -> web.FileResponse:
         target = request.app[_WEB] / _safe_name(request.match_info["filename"])
         if not target.is_file():
             raise web.HTTPNotFound(text="asset not found")
-        return web.FileResponse(target)
+        # Revalidate every time. These files are edited constantly and served
+        # over loopback or a LAN, so the cost is nil — and a stale stylesheet or
+        # bundle has already cost hours of chasing bugs that were not there.
+        return web.FileResponse(target, headers={"Cache-Control": "no-cache"})
 
     async def status(request: web.Request) -> web.Response:
         payload = dict(request.app[_ENGINE].status())

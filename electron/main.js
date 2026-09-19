@@ -99,6 +99,8 @@ async function start() {
   window = new BrowserWindow({
     width: 1560,
     height: 900,
+    minWidth: 860,
+    minHeight: 560,
     backgroundColor: '#000000',
     title: 'Atlas Flow',
     webPreferences: {nodeIntegration: false, contextIsolation: true},
