@@ -242,10 +242,11 @@ async def _produce(
                                     "underruns": state.underruns, **snapshot})
                 state.pause()
                 continue
-            # Telemetry drives the on-map voice marker, so keep it twice as
-            # frequent as the original dashboard needed. It is a few hundred
+            # Telemetry drives the on-map voice marker. At every fourth block it
+            # arrived about 2.7 times a second, which the eye reads as the marker
+            # teleporting; every second block halves that. It is a few hundred
             # bytes against an audio stream measured in kilobytes.
-            if block_index % 4 == 0:
+            if block_index % 2 == 0:
                 p50, p95 = np.percentile(render_times, (50, 95))
                 await ws.send_json({
                     "type": "telemetry",

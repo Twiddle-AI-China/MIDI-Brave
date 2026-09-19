@@ -458,7 +458,16 @@ class AtlasFlowLiveSession:
 
     def _commit_plan(self, plan: RenderPlan) -> bool:
         with self.lock:
-            if plan.revision != self.requested_revision or self.state == "release":
+            if self.state == "release":
+                return False
+            # A plan costs longer than the gap between pointer moves — ~300 ms on
+            # Metal against a drag that emits every ~100 ms — so requiring it to
+            # still be the newest request discarded every plan made while the
+            # pointer was moving. The voice only advanced once the user stopped,
+            # which reads as a frozen map. Accept anything newer than what is
+            # already sounding; plan_pending() stays true against the newest
+            # request, so the planner immediately chases it.
+            if plan.revision <= self.planned_revision:
                 return False
             self.planned_revision = plan.revision
             self.last_error = None

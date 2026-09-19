@@ -40,6 +40,7 @@ let coordinate = null;
 let hovered = null;
 let pointer = null;
 let sounding = null;              // the cell the running voice actually landed on
+const staticLayer = {canvas: document.createElement('canvas'), ready: false};
 let selectedTest = null;
 let takes = [];
 
@@ -52,6 +53,9 @@ const live = {
   // and the raw label flickers between held_sustain and release as the pointer
   // moves, which reads as a fault rather than as information.
   shown: '离线', pending: '离线', gate: 0,
+  // Telemetry arrives a few times a second; the marker is eased toward it every
+  // animation frame so the voice glides instead of stepping.
+  shownAudible: null, motion: 0,
   offTimer: 0, inside: false, recorder: null, chunks: [],
 };
 
@@ -78,28 +82,48 @@ function layout() {
     ],
   };
   for (const cell of cells) [cell.x, cell.y] = map.view.toPixel(cell.pca);
+  staticLayer.ready = false;
   drawMap();
+}
+
+/**
+ * The colonies and the cells never move, so they are drawn once into an
+ * offscreen canvas. Fifty radial gradients are far too expensive to repaint at
+ * animation rate, and the voice marker needs animation rate to look like
+ * motion rather than teleportation.
+ */
+function paintStatic() {
+  const view = map.view;
+  if (!view) return;
+  const ratio = window.devicePixelRatio || 1;
+  const layer = staticLayer.canvas;
+  layer.width = Math.round(view.width * ratio);
+  layer.height = Math.round(view.height * ratio);
+  const ink = layer.getContext('2d');
+  ink.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ink.clearRect(0, 0, view.width, view.height);
+
+  ink.globalCompositeOperation = 'lighter';
+  for (const cell of cells) {
+    const radius = cell.loner ? 34 : 66;
+    const glow = ink.createRadialGradient(cell.x, cell.y, 0, cell.x, cell.y, radius);
+    glow.addColorStop(0, `rgba(255, 255, 255, ${cell.loner ? 0.035 : 0.055})`);
+    glow.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ink.fillStyle = glow;
+    ink.beginPath();
+    ink.arc(cell.x, cell.y, radius, 0, Math.PI * 2);
+    ink.fill();
+  }
+  ink.globalCompositeOperation = 'source-over';
+  staticLayer.ready = true;
 }
 
 function drawMap() {
   const view = map.view;
   if (!view) return;
   paint.clearRect(0, 0, view.width, view.height);
-
-  // Colonies: cells of the same component bleed into one another. Nothing here
-  // animates — it is a fixed picture of the atlas graph.
-  paint.globalCompositeOperation = 'lighter';
-  for (const cell of cells) {
-    const radius = cell.loner ? 34 : 66;
-    const glow = paint.createRadialGradient(cell.x, cell.y, 0, cell.x, cell.y, radius);
-    glow.addColorStop(0, `rgba(255, 255, 255, ${cell.loner ? 0.035 : 0.055})`);
-    glow.addColorStop(1, 'rgba(255, 255, 255, 0)');
-    paint.fillStyle = glow;
-    paint.beginPath();
-    paint.arc(cell.x, cell.y, radius, 0, Math.PI * 2);
-    paint.fill();
-  }
-  paint.globalCompositeOperation = 'source-over';
+  if (!staticLayer.ready) paintStatic();
+  paint.drawImage(staticLayer.canvas, 0, 0, view.width, view.height);
 
 
   // A double ring says "this preset is what you are hearing", which a plain
@@ -128,7 +152,7 @@ function drawMap() {
     paint.fill();
   }
 
-  const voice = live.audible && view.toPixel(live.audible);
+  const voice = live.shownAudible && view.toPixel(live.shownAudible);
   const cursor = pointer && view.toPixel(pointer);
 
   // The leash makes the lag explicit: the voice is still travelling to the
@@ -711,6 +735,46 @@ function gateState(label) {
   }, 450);
 }
 
+/** Ease the drawn voice position toward the last reported one, at 60 fps. */
+function animateVoice(now) {
+  live.motion = 0;
+  const target = live.audible;
+  const shown = live.shownAudible;
+  if (!target) {
+    if (shown) { live.shownAudible = null; drawMap(); }
+    return;
+  }
+  if (!shown) {
+    live.shownAudible = target.slice();
+    drawMap();
+    return;
+  }
+  const elapsed = Math.min(0.1, (now - (live.lastFrame || now)) / 1000);
+  live.lastFrame = now;
+  // Exponential approach with a ~90 ms time constant: fast enough to keep up
+  // with a telemetry step, slow enough to read as movement.
+  const factor = 1 - Math.exp(-elapsed / 0.09);
+  let moved = 0;
+  for (let axis = 0; axis < shown.length; axis++) {
+    const delta = (target[axis] - shown[axis]) * factor;
+    shown[axis] += delta;
+    moved += Math.abs(delta);
+  }
+  // Keep the ring on the cell nearest what is *drawn*, so the two agree.
+  const near = nearestCellTo(shown, Infinity);
+  const changed = near !== sounding;
+  if (changed) { sounding = near; updateVoice(); }
+  if (moved > 1e-5 || changed) drawMap();
+  if (moved > 1e-5) live.motion = requestAnimationFrame(animateVoice);
+}
+
+function nudgeVoice() {
+  if (!live.motion) {
+    live.lastFrame = performance.now();
+    live.motion = requestAnimationFrame(animateVoice);
+  }
+}
+
 function updateStatus() {
   const parts = [live.shown];
   if (live.connected) {
@@ -826,11 +890,8 @@ async function connect() {
       // Name the cell nearest what is *audible*, not the cell nearest the plan's
       // target: during a morph those are different points, and the ring has to
       // agree with the crosshair or it tells you the wrong preset.
-      const heard = value.audiblePcaNormalized || value.projectedPcaNormalized;
-      if (heard) sounding = nearestCellTo(heard, Infinity);
+      nudgeVoice();
       updateStatus();
-      updateVoice();
-      drawMap();
     }
     if (value.type === 'error') {
       live.lifecycle = value.message;
@@ -841,6 +902,7 @@ async function connect() {
   live.socket.onclose = event => {
     live.connected = false;
     live.audible = null;
+    live.shownAudible = null;
     live.lifecycle = event.code === 1001 ? '已被另一个标签页接管' : '离线';
     // Closing the socket on purpose when switching to cached mode is not an
     // outage, so it must not report one.
@@ -1098,6 +1160,7 @@ function playPreview(buffer, cell = null) {
     if (preview.source === source) {
       preview.source = null;
       live.audible = null;
+      live.shownAudible = null;
       updateVoice();
       drawMap();
     }
@@ -1110,6 +1173,7 @@ function playPreview(buffer, cell = null) {
   if (cell) {
     sounding = cell;
     live.audible = cell.pca;
+    live.shownAudible = cell.pca.slice();   // a cached clip has no morph to trace
     updateVoice();
     drawMap();
   }
@@ -1599,6 +1663,24 @@ async function boot() {
   live.shown = `${status.cuda} · ${status.checkpoint}`;
   updateStatus();
 }
+
+// A small read-only window into the running instrument. Bug reports about this
+// page have so far been "it is silent" or "it froze"; being able to ask for the
+// actual numbers turns those into something answerable.
+window.atlasDebug = () => ({
+  mode: audioMode(),
+  connected: live.connected,
+  lifecycle: live.lifecycle,
+  shownState: live.shown,
+  target: coordinate && coordinate.slice(0, 2),
+  audible: live.audible && live.audible.slice(0, 2),
+  drawn: live.shownAudible && live.shownAudible.slice(0, 2),
+  sounding: sounding && sounding.label,
+  buffered: live.buffered,
+  underruns: live.underruns,
+  planMs: live.planMs,
+  format: AUDIO_FORMAT,
+});
 
 boot().catch(error => {
   $('#status').textContent = `GPU 服务离线 · ${error.message || error}`;
