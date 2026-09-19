@@ -31,17 +31,14 @@
 
     <div id="scope-pane">
       <div id="scope-head">
-        <select id="view">
-          <option value="spectrogram">频谱图 SPECTROGRAM</option>
-          <option value="spectrum">频谱 SPECTRUM</option>
-          <option value="ridge">瀑布 WATERFALL</option>
-          <option value="wave">波形 OSCILLOSCOPE</option>
-          <option value="loudness">响度 LOUDNESS</option>
-        </select>
+        <button id="drawer" class="chip" type="button" title="收起/展开">›</button>
+        <b>[SCOPE]</b>
         <span id="scope-range">—</span>
         <span id="scope-source">静音</span>
       </div>
-      <canvas id="scope"></canvas>
+      <div class="scope-cell"><span class="scope-tag">SPECTROGRAM</span><canvas id="scope-spectrogram"></canvas></div>
+      <div class="scope-cell"><span class="scope-tag">WATERFALL</span><canvas id="scope-ridge"></canvas></div>
+      <div class="scope-cell"><span class="scope-tag">LOUDNESS</span><canvas id="scope-loudness"></canvas></div>
     </div>
   </div>
 

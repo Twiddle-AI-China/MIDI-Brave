@@ -421,49 +421,65 @@ function activeChain() {
 
 /* ---------- scope: several views of the same analyser ---------- */
 
+/**
+ * Three views of the same signal, stacked: spectrogram, waterfall, loudness.
+ *
+ * One analyser pass per frame feeds all three, so the cost is the drawing, not
+ * the analysis. Each view keeps its own history because they scroll at
+ * different rates and would otherwise fight over one buffer.
+ */
 const scope = {
-  canvas: $('#scope'),
-  strip: document.createElement('canvas'),
-  width: 0, height: 0,
   analyser: null,
   source: '静音',
   running: false,
-  view: 'spectrogram',
-  freq: null, time: null, rows: null,
-  last: 0, carry: 0,
-  peaks: null,
-  ridges: [],
-  levels: [],
+  freq: null,
+  time: null,
+  last: 0,
+  views: [],
 };
 
 const mel = frequency => 2595 * Math.log10(1 + frequency / 700);
 const melInverse = value => 700 * (10 ** (value / 2595) - 1);
 
-function scopeLayout() {
-  const box = scope.canvas.getBoundingClientRect();
-  const ratio = window.devicePixelRatio || 1;
-  scope.width = Math.max(140, Math.round(box.width));
-  scope.height = Math.max(90, Math.round(box.height));
-  scope.canvas.width = Math.round(box.width * ratio);
-  scope.canvas.height = Math.round(box.height * ratio);
-  scope.canvas.getContext('2d').setTransform(ratio, 0, 0, ratio, 0, 0);
-  scope.strip.width = scope.width;
-  scope.strip.height = scope.height;
-  const strip = scope.strip.getContext('2d');
-  strip.fillStyle = '#000';
-  strip.fillRect(0, 0, scope.width, scope.height);
-  scope.rows = null;
-  scope.peaks = null;
+function makeView(key, draw) {
+  const canvas = $(`#scope-${key}`);
+  return {
+    key, draw, canvas,
+    strip: document.createElement('canvas'),
+    width: 0, height: 0, carry: 0,
+    rows: null, ridges: [], levels: [],
+  };
 }
 
-function melRows(analyser, rate) {
+function scopeLayout() {
+  const ratio = window.devicePixelRatio || 1;
+  for (const view of scope.views) {
+    const box = view.canvas.getBoundingClientRect();
+    if (box.width < 2 || box.height < 2) continue;    // drawer shut
+    view.width = Math.max(80, Math.round(box.width));
+    view.height = Math.max(40, Math.round(box.height));
+    view.canvas.width = Math.round(box.width * ratio);
+    view.canvas.height = Math.round(box.height * ratio);
+    view.canvas.getContext('2d').setTransform(ratio, 0, 0, ratio, 0, 0);
+    view.strip.width = view.width;
+    view.strip.height = view.height;
+    const ink = view.strip.getContext('2d');
+    ink.fillStyle = '#000';
+    ink.fillRect(0, 0, view.width, view.height);
+    view.rows = null;
+    view.ridges = [];
+    view.levels = [];
+  }
+}
+
+function melRows(view, analyser, rate) {
   const bins = analyser.frequencyBinCount;
   const nyquist = rate / 2;
   const top = mel(nyquist);
   const bottom = mel(40);
-  return Array.from({length: scope.height}, (_, row) => {
-    const high = melInverse(bottom + (top - bottom) * (1 - row / scope.height));
-    const low = melInverse(bottom + (top - bottom) * (1 - (row + 1) / scope.height));
+  return Array.from({length: view.height}, (_, row) => {
+    const high = melInverse(bottom + (top - bottom) * (1 - row / view.height));
+    const low = melInverse(bottom + (top - bottom) * (1 - (row + 1) / view.height));
     return [
       Math.max(0, Math.floor(low / nyquist * bins)),
       Math.max(1, Math.min(bins, Math.ceil(high / nyquist * bins))),
@@ -474,12 +490,37 @@ function melRows(analyser, rate) {
 function useAnalyser(analyser, label) {
   scope.analyser = analyser;
   scope.source = label;
-  scope.rows = null;
+  for (const view of scope.views) view.rows = null;
   $('#scope-source').textContent = label;
   if (!scope.running) {
     scope.running = true;
     scope.last = performance.now();
     requestAnimationFrame(scopeFrame);
+  }
+}
+
+/**
+ * Point the scope at whatever is actually making sound.
+ *
+ * Stopping a clip with pause() fires no 'ended', so the scope used to stay
+ * aimed at a silent file chain: hovering the map made sound again while the
+ * display stayed flat. This is called whenever playback state changes, and
+ * from the telemetry handler, so it self-heals however it got there.
+ */
+function restoreScopeSource() {
+  const player = $('#player');
+  const fileBusy = (player && !player.paused && !player.ended)
+    || !!live.loop || !!preview.source;
+  if (fileBusy) {
+    if (live.fileChain) useAnalyser(live.fileChain.analyser, live.playLabel || '渲染片段');
+    return;
+  }
+  if (live.connected && live.chain) {
+    useAnalyser(live.chain.analyser, '实时');
+  } else {
+    scope.analyser = null;
+    scope.source = '静音';
+    $('#scope-source').textContent = '静音';
   }
 }
 
@@ -494,88 +535,53 @@ function scopeFrame(now) {
   if (!scope.freq || scope.freq.length !== analyser.frequencyBinCount) {
     scope.freq = new Uint8Array(analyser.frequencyBinCount);
     scope.time = new Uint8Array(analyser.fftSize);
-    scope.rows = null;
+    for (const view of scope.views) view.rows = null;
   }
   analyser.getByteFrequencyData(scope.freq);
   analyser.getByteTimeDomainData(scope.time);
-  if (!scope.rows) {
-    scope.rows = melRows(analyser, rate);
+  $('#scope-range').textContent = `40Hz–${(rate / 2000).toFixed(1)}kHz`;
+
+  for (const view of scope.views) {
+    if (!view.width || view.canvas.clientWidth < 2) continue;
+    const context = view.canvas.getContext('2d');
+    context.fillStyle = '#000';
+    context.fillRect(0, 0, view.width, view.height);
+    view.draw(context, view, {rate, elapsed});
   }
-  $('#scope-range').textContent = ['wave', 'loudness'].includes(scope.view)
-    ? '' : `40Hz–${(rate / 2000).toFixed(1)}kHz`;
-  const context = scope.canvas.getContext('2d');
-  context.fillStyle = '#000';
-  context.fillRect(0, 0, scope.width, scope.height);
-  VIEWS[scope.view](context, {rate, elapsed});
   updateCompressorMeter();
 }
 
-/** Spectrogram. Columns advance on wall-clock time, so a dropped animation
- *  frame stretches the picture instead of punching a black hole in it. */
-function viewSpectrogram(context, {rate, elapsed}) {
-  const strip = scope.strip.getContext('2d');
-  scope.carry += elapsed * 64;
-  const columns = clamp(Math.floor(scope.carry), 0, 10);
-  scope.carry -= columns;
+function viewSpectrogram(context, view, {rate, elapsed}) {
+  const strip = view.strip.getContext('2d');
+  if (!view.rows) view.rows = melRows(view, scope.analyser, rate);
+  view.carry += elapsed * 64;
+  const columns = clamp(Math.floor(view.carry), 0, 10);
+  view.carry -= columns;
   if (columns > 0) {
     strip.globalCompositeOperation = 'copy';
-    strip.drawImage(scope.strip, -columns, 0);
+    strip.drawImage(view.strip, -columns, 0);
     strip.globalCompositeOperation = 'source-over';
     const dropped = live.underruns > live.seenUnderruns;
     live.seenUnderruns = live.underruns;
-    for (let row = 0; row < scope.height; row++) {
-      const [low, high] = scope.rows[row];
+    for (let row = 0; row < view.height; row++) {
+      const [low, high] = view.rows[row];
       let sum = 0;
       for (let bin = low; bin < high; bin++) sum += scope.freq[bin];
       const level = (sum / Math.max(1, high - low) / 255) ** 1.2;
       const shade = Math.round(clamp(level, 0, 1) * 255);
       strip.fillStyle = `rgb(${shade}, ${shade}, ${shade})`;
-      strip.fillRect(scope.width - columns, row, columns, 1);
+      strip.fillRect(view.width - columns, row, columns, 1);
     }
     if (dropped) {
-      // Mark a real audio dropout instead of leaving an unexplained gap.
       strip.fillStyle = '#ffffff';
-      strip.fillRect(scope.width - columns, scope.height - 3, Math.max(1, columns), 3);
+      strip.fillRect(view.width - columns, view.height - 3, Math.max(1, columns), 3);
     }
   }
-  context.drawImage(scope.strip, 0, 0);
-  frequencyGrid(context, rate);
-  context.fillStyle = 'rgba(242, 242, 242, 0.5)';
-  context.textAlign = 'right';
-  context.font = '9px ui-monospace, monospace';
-  context.fillText(`${(scope.width / 64).toFixed(1)} s`, scope.width - 6, scope.height - 6);
+  context.drawImage(view.strip, 0, 0);
+  frequencyGrid(context, view, rate);
 }
 
-/** Instantaneous spectrum on a log axis, with a falling peak hold. */
-function viewSpectrum(context, {rate, elapsed}) {
-  const bins = scope.freq.length;
-  const nyquist = rate / 2;
-  const bars = Math.min(180, Math.floor(scope.width / 3));
-  if (!scope.peaks || scope.peaks.length !== bars) scope.peaks = new Float32Array(bars);
-  const lowest = 40;
-  const span = Math.log2(nyquist / lowest);
-  context.lineWidth = 1;
-  for (let index = 0; index < bars; index++) {
-    const from = lowest * 2 ** (span * index / bars);
-    const to = lowest * 2 ** (span * (index + 1) / bars);
-    const start = Math.max(0, Math.floor(from / nyquist * bins));
-    const end = Math.max(start + 1, Math.min(bins, Math.ceil(to / nyquist * bins)));
-    let peak = 0;
-    for (let bin = start; bin < end; bin++) peak = Math.max(peak, scope.freq[bin]);
-    const level = peak / 255;
-    scope.peaks[index] = Math.max(level, scope.peaks[index] - elapsed * 0.55);
-    const x = index / bars * scope.width;
-    const width = scope.width / bars - 1;
-    context.fillStyle = `rgba(242, 242, 242, ${0.25 + 0.65 * level})`;
-    context.fillRect(x, scope.height * (1 - level), width, scope.height * level);
-    context.fillStyle = 'rgba(242, 242, 242, 0.85)';
-    context.fillRect(x, scope.height * (1 - scope.peaks[index]) - 1, width, 1);
-  }
-  logFrequencyGrid(context, rate, lowest);
-}
-
-/** Waterfall as stacked ridgelines — the shape of the timbre over time. */
-function viewRidge(context, {rate, elapsed}) {
+function viewRidge(context, view, {rate, elapsed}) {
   const bands = 72;
   const bins = scope.freq.length;
   const nyquist = rate / 2;
@@ -591,29 +597,29 @@ function viewRidge(context, {rate, elapsed}) {
     for (let bin = start; bin < end; bin++) peak = Math.max(peak, scope.freq[bin]);
     line[index] = peak / 255;
   }
-  scope.carry += elapsed * 22;
-  while (scope.carry >= 1) {
-    scope.carry -= 1;
-    scope.ridges.unshift(line);
-    if (scope.ridges.length > 46) scope.ridges.pop();
+  view.carry += elapsed * 22;
+  while (view.carry >= 1) {
+    view.carry -= 1;
+    view.ridges.unshift(line);
+    if (view.ridges.length > 34) view.ridges.pop();
   }
-  const step = scope.height / 52;
-  const amplitude = scope.height / 4.6;
+  const step = view.height / 38;
+  const amplitude = view.height / 3.4;
   context.save();
   context.beginPath();
-  context.rect(0, 0, scope.width, scope.height - 12);
+  context.rect(0, 0, view.width, view.height - 10);
   context.clip();
-  for (let index = scope.ridges.length - 1; index >= 0; index--) {
-    const ridge = scope.ridges[index];
-    const base = scope.height - 10 - index * step;
-    const fade = 1 - index / scope.ridges.length;
+  for (let index = view.ridges.length - 1; index >= 0; index--) {
+    const ridge = view.ridges[index];
+    const base = view.height - 8 - index * step;
+    const fade = 1 - index / view.ridges.length;
     context.beginPath();
     context.moveTo(0, base);
     for (let band = 0; band < ridge.length; band++) {
-      const x = band / (ridge.length - 1) * scope.width;
+      const x = band / (ridge.length - 1) * view.width;
       context.lineTo(x, base - ridge[band] ** 1.3 * amplitude);
     }
-    context.lineTo(scope.width, base);
+    context.lineTo(view.width, base);
     context.closePath();
     context.fillStyle = '#000';
     context.fill();
@@ -622,36 +628,10 @@ function viewRidge(context, {rate, elapsed}) {
     context.stroke();
   }
   context.restore();
-  logFrequencyGrid(context, rate, lowest, true);
+  logFrequencyGrid(context, view, rate, lowest, true);
 }
 
-/** Triggered oscilloscope: lock on a rising zero crossing so the wave stands still. */
-function viewWave(context) {
-  const samples = scope.time;
-  let trigger = 0;
-  for (let index = 1; index < samples.length / 2; index++) {
-    if (samples[index - 1] < 128 && samples[index] >= 128) { trigger = index; break; }
-  }
-  const count = Math.floor(samples.length / 2);
-  context.strokeStyle = 'rgba(242, 242, 242, 0.14)';
-  context.beginPath();
-  context.moveTo(0, scope.height / 2);
-  context.lineTo(scope.width, scope.height / 2);
-  context.stroke();
-  context.beginPath();
-  for (let index = 0; index < count; index++) {
-    const value = (samples[trigger + index] - 128) / 128;
-    const x = index / (count - 1) * scope.width;
-    const y = scope.height / 2 - value * scope.height * 0.42;
-    index ? context.lineTo(x, y) : context.moveTo(x, y);
-  }
-  context.strokeStyle = INK;
-  context.lineWidth = 1.2;
-  context.stroke();
-}
-
-/** Loudness history with the compressor's gain reduction on top. */
-function viewLoudness(context, {elapsed}) {
+function viewLoudness(context, view, {elapsed}) {
   let sum = 0;
   let peak = 0;
   for (const sample of scope.time) {
@@ -664,33 +644,33 @@ function viewLoudness(context, {elapsed}) {
   const reduction = chain
     ? chain.compressors.reduce((total, item) => total + item.reduction, 0) / 3
     : 0;
-  scope.carry += elapsed * 40;
-  while (scope.carry >= 1) {
-    scope.carry -= 1;
-    scope.levels.push({
+  view.carry += elapsed * 40;
+  while (view.carry >= 1) {
+    view.carry -= 1;
+    view.levels.push({
       rms: 20 * Math.log10(Math.max(rms, 1e-5)),
       peak: 20 * Math.log10(Math.max(peak, 1e-5)),
       reduction,
     });
-    if (scope.levels.length > scope.width) scope.levels.shift();
+    if (view.levels.length > view.width) view.levels.shift();
   }
-  const toY = db => scope.height * (1 - clamp((db + 72) / 72, 0, 1));
+  const toY = db => view.height * (1 - clamp((db + 72) / 72, 0, 1));
   context.font = '9px ui-monospace, monospace';
   context.textAlign = 'left';
-  for (const db of [-6, -18, -30, -42, -54, -66]) {
+  for (const db of [-6, -24, -42, -60]) {
     const y = toY(db);
     context.strokeStyle = 'rgba(242, 242, 242, 0.09)';
     context.beginPath();
     context.moveTo(0, y);
-    context.lineTo(scope.width, y);
+    context.lineTo(view.width, y);
     context.stroke();
-    context.fillStyle = 'rgba(242, 242, 242, 0.34)';
+    context.fillStyle = 'rgba(242, 242, 242, 0.32)';
     context.fillText(`${db}`, 4, y - 3);
   }
   const trace = (key, style, width) => {
     context.beginPath();
-    scope.levels.forEach((value, index) => {
-      const x = scope.width - scope.levels.length + index;
+    view.levels.forEach((value, index) => {
+      const x = view.width - view.levels.length + index;
       const y = toY(value[key]);
       index ? context.lineTo(x, y) : context.moveTo(x, y);
     });
@@ -698,73 +678,62 @@ function viewLoudness(context, {elapsed}) {
     context.lineWidth = width;
     context.stroke();
   };
-  trace('peak', 'rgba(242, 242, 242, 0.32)', 1);
+  trace('peak', 'rgba(242, 242, 242, 0.30)', 1);
   trace('rms', INK, 1.4);
   context.beginPath();
-  scope.levels.forEach((value, index) => {
-    const x = scope.width - scope.levels.length + index;
-    const y = -value.reduction / 24 * scope.height;
+  view.levels.forEach((value, index) => {
+    const x = view.width - view.levels.length + index;
+    const y = -value.reduction / 24 * view.height;
     index ? context.lineTo(x, y) : context.moveTo(x, y);
   });
-  context.strokeStyle = 'rgba(242, 242, 242, 0.55)';
+  context.strokeStyle = 'rgba(242, 242, 242, 0.5)';
   context.setLineDash([3, 3]);
   context.lineWidth = 1;
   context.stroke();
   context.setLineDash([]);
-  const latest = scope.levels.at(-1);
+  const latest = view.levels.at(-1);
   if (latest) {
     context.textAlign = 'right';
     context.fillStyle = INK;
-    context.fillText(`RMS ${latest.rms.toFixed(1)} dB   峰值 ${latest.peak.toFixed(1)} dB`,
-      scope.width - 6, 14);
-    context.fillStyle = 'rgba(242, 242, 242, 0.6)';
-    context.fillText(`虚线＝压缩增益衰减 ${latest.reduction.toFixed(1)} dB（满幅 24 dB）`,
-      scope.width - 6, 26);
+    context.fillText(`RMS ${latest.rms.toFixed(1)}  峰值 ${latest.peak.toFixed(1)} dB`
+      + `  压缩 ${latest.reduction.toFixed(1)}`, view.width - 6, 12);
   }
 }
 
-function frequencyGrid(context, rate) {
+function frequencyGrid(context, view, rate) {
   const top = mel(rate / 2);
   const bottom = mel(40);
   context.font = '9px ui-monospace, monospace';
   context.textAlign = 'left';
-  for (const frequency of [100, 250, 500, 1000, 2000, 4000, 8000, 16000]) {
+  for (const frequency of [250, 1000, 4000, 16000]) {
     if (frequency >= rate / 2) continue;
-    const y = scope.height * (1 - (mel(frequency) - bottom) / (top - bottom));
+    const y = view.height * (1 - (mel(frequency) - bottom) / (top - bottom));
     context.strokeStyle = 'rgba(242, 242, 242, 0.10)';
     context.beginPath();
     context.moveTo(0, y);
-    context.lineTo(scope.width, y);
+    context.lineTo(view.width, y);
     context.stroke();
-    context.fillStyle = 'rgba(242, 242, 242, 0.36)';
+    context.fillStyle = 'rgba(242, 242, 242, 0.34)';
     context.fillText(frequency >= 1000 ? `${frequency / 1000}k` : String(frequency), 4, y - 3);
   }
 }
 
-function logFrequencyGrid(context, rate, lowest, faint = false) {
+function logFrequencyGrid(context, view, rate, lowest, faint = false) {
   const span = Math.log2(rate / 2 / lowest);
   context.font = '9px ui-monospace, monospace';
   context.textAlign = 'center';
-  for (const frequency of [100, 250, 500, 1000, 2000, 4000, 8000, 16000]) {
+  for (const frequency of [250, 1000, 4000, 16000]) {
     if (frequency >= rate / 2) continue;
-    const x = Math.log2(frequency / lowest) / span * scope.width;
+    const x = Math.log2(frequency / lowest) / span * view.width;
     context.strokeStyle = `rgba(242, 242, 242, ${faint ? 0.05 : 0.09})`;
     context.beginPath();
     context.moveTo(x, 0);
-    context.lineTo(x, scope.height - 12);
+    context.lineTo(x, view.height - 10);
     context.stroke();
-    context.fillStyle = 'rgba(242, 242, 242, 0.36)';
-    context.fillText(frequency >= 1000 ? `${frequency / 1000}k` : String(frequency), x, scope.height - 3);
+    context.fillStyle = 'rgba(242, 242, 242, 0.34)';
+    context.fillText(frequency >= 1000 ? `${frequency / 1000}k` : String(frequency), x, view.height - 2);
   }
 }
-
-const VIEWS = {
-  spectrogram: viewSpectrogram,
-  spectrum: viewSpectrum,
-  ridge: viewRidge,
-  wave: viewWave,
-  loudness: viewLoudness,
-};
 
 function updateCompressorMeter() {
   const chain = activeChain();
@@ -1044,6 +1013,7 @@ async function connect() {
       // agree with the crosshair or it tells you the wrong preset.
       nudgeVoice();
       updateStatus();
+      if (scope.source !== '实时') restoreScopeSource();
     }
     if (value.type === 'error') {
       live.lifecycle = value.message;
@@ -1698,6 +1668,7 @@ function stopAll() {
   updateStatus();
   updateVoice();
   drawMap();
+  restoreScopeSource();
   setWork('');
 }
 
@@ -1956,12 +1927,12 @@ function wire() {
       applyCompressor(live.fileChain);
     });
   }
-  $('#view').addEventListener('change', event => {
-    scope.view = event.target.value;
-    scope.ridges = [];
-    scope.levels = [];
-    scope.carry = 0;
-    scopeLayout();
+  $('#drawer').addEventListener('click', () => {
+    const board = $('#board');
+    const shut = board.classList.toggle('drawer-shut');
+    $('#drawer').textContent = shut ? '‹' : '›';
+    // Both panes changed width; the map and every scope canvas must re-measure.
+    requestAnimationFrame(() => { layout(); scopeLayout(); });
   });
   $('#stop').addEventListener('click', stopAll);
   $('#play').addEventListener('click', playProgression);
@@ -2020,13 +1991,9 @@ function wire() {
   player.addEventListener('play', () => {
     if ($('#hold').getAttribute('aria-pressed') !== 'true') liveSend({type: 'note_off'});
   });
-  player.addEventListener('playing', () => {
-    if (live.fileChain) useAnalyser(live.fileChain.analyser, live.playLabel || '渲染片段');
-  });
-  player.addEventListener('ended', () => {
-    if (live.connected && live.chain) useAnalyser(live.chain.analyser, '实时');
-    else $('#scope-source').textContent = '静音';
-  });
+  player.addEventListener('playing', restoreScopeSource);
+  player.addEventListener('ended', restoreScopeSource);
+  player.addEventListener('pause', restoreScopeSource);
 
   window.addEventListener('keydown', event => {
     const key = event.key.toLowerCase();
@@ -2072,6 +2039,11 @@ async function boot() {
   buildProgressionPicker();
   showGates();
   wire();
+  scope.views = [
+    makeView('spectrogram', viewSpectrogram),
+    makeView('ridge', viewRidge),
+    makeView('loudness', viewLoudness),
+  ];
   layout();
   scopeLayout();
   // The server knows whether it is on this machine or across a tunnel; take its

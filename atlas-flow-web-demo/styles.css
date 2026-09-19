@@ -60,7 +60,24 @@ body {
 #curtain span { color: var(--muted); font-size: 11px; }
 #curtain.gone { display: none; }
 
-#scope-pane { position: relative; border-left: 1px solid var(--line); min-width: 0; display: grid; grid-template-rows: 26px 1fr; }
+#scope-pane {
+  position: relative; border-left: 1px solid var(--line); min-width: 0;
+  display: grid; grid-template-rows: 26px repeat(3, minmax(0, 1fr));
+}
+.scope-cell { position: relative; min-height: 0; border-top: 1px solid var(--line-soft); }
+.scope-cell:first-of-type { border-top: 0; }
+.scope-cell canvas { display: block; width: 100%; height: 100%; }
+.scope-tag {
+  position: absolute; left: 8px; top: 6px; z-index: 1; pointer-events: none;
+  font-size: 9px; letter-spacing: .14em; color: rgba(242, 242, 242, 0.42);
+}
+/* Collapsed, the pane becomes a spine you can reopen — the map takes the rest. */
+#board.drawer-shut { grid-template-columns: minmax(0, 1fr) 26px; }
+#board.drawer-shut .scope-cell,
+#board.drawer-shut #scope-range,
+#board.drawer-shut #scope-source,
+#board.drawer-shut #scope-head b { display: none; }
+#board.drawer-shut #scope-head { padding: 0 4px; }
 #scope-head {
   display: flex; align-items: center; gap: 10px; padding: 0 10px;
   border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 10px; letter-spacing: .08em;
@@ -71,7 +88,7 @@ body {
 }
 #scope-head select option { background: #0b0b0b; }
 #scope-source { margin-left: auto; color: var(--dim); }
-#scope { display: block; width: 100%; height: 100%; }
+
 
 #rail {
   display: flex; align-items: center; gap: 12px; padding: 6px 14px;
