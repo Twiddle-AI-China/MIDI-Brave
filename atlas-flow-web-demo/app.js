@@ -55,7 +55,7 @@ const live = {
   shown: '离线', pending: '离线', gate: 0,
   // Telemetry arrives a few times a second; the marker is eased toward it every
   // animation frame so the voice glides instead of stepping.
-  shownAudible: null, motion: 0,
+  shownAudible: null, motion: 0, loop: null,
   offTimer: 0, inside: false, recorder: null, chunks: [],
 };
 
@@ -988,8 +988,12 @@ function addTake(payload, label) {
     button.title = take.recorded
       ? `录制 · ${(take.bytes / 1024).toFixed(0)} KB`
       : `全速率渲染 · ${(take.bytes / 1024).toFixed(0)} KB · 峰值 ${take.peakDbfs} dBFS · GPU ${(take.renderMs / 1000).toFixed(1)} s`;
-    button.addEventListener('click', () => play(take.recorded ? take.url : pickAudio(take),
-                                                take.recorded ? '录音' : '渲染片段'));
+    button.addEventListener('click', () => {
+      const url = take.recorded ? take.url : pickAudio(take);
+      const label = take.recorded ? '录音' : take.label;
+      if (looping() && !take.recorded) playLooping(url, label, take.take?.release ?? 2.4);
+      else play(url, label);
+    });
     host.append(button);
   }
 }
@@ -1234,6 +1238,80 @@ async function auditionCell(cell) {
   if (buffer) setWork('');
 }
 
+
+/* ---------- looping a progression ---------- */
+
+/**
+ * Play a rendered take as an endless loop.
+ *
+ * Repeating the file directly would not do: every take ends with the model's
+ * 2.4 s release, so each cycle would decay into silence and then restart. The
+ * loop therefore ends where the last chord ends, and the seam is crossfaded —
+ * splicing a sustained pad back to its own start is otherwise a click.
+ *
+ * It runs on its own source rather than the shared one, so a loop keeps playing
+ * while you roam the map over it.
+ */
+async function playLooping(url, label, releaseSeconds) {
+  const chain = await filePlayback().catch(() => null);
+  if (!chain) return;
+  await live.fileContext?.resume().catch(() => {});
+  applyCompressor(chain);
+  stopLoop(0.02);
+
+  const bytes = await (await fetch(url)).arrayBuffer();
+  const decoded = await chain.context.decodeAudioData(bytes);
+  const rate = decoded.sampleRate;
+  const release = Math.max(0, releaseSeconds || 0);
+  const crossfade = Math.min(0.25, decoded.duration * 0.05);
+  const loopEnd = Math.max(crossfade + 0.1, decoded.duration - release);
+
+  // Rebuild the buffer with its own tail mixed into its head, so the splice at
+  // the seam is a crossfade instead of a step.
+  const looped = chain.context.createBuffer(decoded.numberOfChannels,
+    Math.floor(loopEnd * rate), rate);
+  const span = Math.floor(crossfade * rate);
+  for (let channel = 0; channel < decoded.numberOfChannels; channel++) {
+    const source = decoded.getChannelData(channel);
+    const target = looped.getChannelData(channel);
+    target.set(source.subarray(0, looped.length));
+    for (let index = 0; index < span; index++) {
+      const fade = index / span;
+      const tail = source[Math.floor(loopEnd * rate) + index] || 0;
+      target[index] = target[index] * fade + tail * (1 - fade);
+    }
+  }
+
+  const gain = chain.context.createGain();
+  gain.gain.value = Number($('#level').value);
+  const source = chain.context.createBufferSource();
+  source.buffer = looped;
+  source.loop = true;
+  source.loopStart = 0;
+  source.loopEnd = looped.duration;
+  source.connect(gain);
+  gain.connect(chain.input);
+  source.start();
+  live.loop = {source, gain};
+  useAnalyser(chain.analyser, `${label} ↻`);
+  setWork(`${label} 循环中 · ${looped.duration.toFixed(1)}s/圈 · 停止或再按循环可结束`);
+}
+
+function stopLoop(fade = 0.05) {
+  if (!live.loop) return;
+  const {context} = live.fileChain;
+  const when = context.currentTime;
+  try {
+    live.loop.gain.gain.cancelScheduledValues(when);
+    live.loop.gain.gain.setValueAtTime(live.loop.gain.gain.value, when);
+    live.loop.gain.gain.linearRampToValueAtTime(0.0001, when + fade);
+    live.loop.source.stop(when + fade);
+  } catch (_error) { /* already stopped */ }
+  live.loop = null;
+}
+
+const looping = () => $('#loop').getAttribute('aria-pressed') === 'true';
+
 /* ---------- chord progressions ---------- */
 
 // Degrees in a major key, written the way they are spoken: 4361 is IV-iii-vi-I.
@@ -1314,7 +1392,12 @@ async function playProgression() {
       + `${payload.cached ? ' · 缓存' : ` · GPU ${(payload.renderMs / 1000).toFixed(1)}s`}`);
     $('#chordNote').textContent =
       `${item.name} 于 ${noteName(root)}：` + chords.map(c => c.map(noteName).join('-')).join('　');
-    play(pickAudio(payload), `进行 ${item.name}`);
+    const release = payload.take?.release ?? 2.4;
+    if (looping()) {
+      await playLooping(pickAudio(payload), `进行 ${item.name}`, release);
+    } else {
+      play(pickAudio(payload), `进行 ${item.name}`);
+    }
   } catch (error) {
     setWork(String(error.message || error));
   } finally {
@@ -1326,6 +1409,7 @@ async function playProgression() {
 function stopAll() {
   clearTimeout(live.offTimer);
   stopPreview(0.03);
+  stopLoop(0.05);
   liveSend({type: 'stop'});
   const player = $('#player');
   player.pause();
@@ -1558,6 +1642,11 @@ function wire() {
   });
   $('#stop').addEventListener('click', stopAll);
   $('#play').addEventListener('click', playProgression);
+  $('#loop').addEventListener('click', event => {
+    const on = event.target.getAttribute('aria-pressed') === 'true';
+    event.target.setAttribute('aria-pressed', String(!on));
+    if (on) { stopLoop(); setWork(''); }
+  });
   $('#rec').addEventListener('click', toggleRecording);
   $('#render').addEventListener('click', renderCurrent);
   $('#gear').addEventListener('click', () => {
