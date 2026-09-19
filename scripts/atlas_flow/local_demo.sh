@@ -61,6 +61,7 @@ exec env PYTHONPATH="$ROOT/src" "$PYTHON" -m midibrave.atlas_flow_demo_server \
   --evaluation-root "$evaluation" \
   --web-root "$ROOT/atlas-flow-web-demo" \
   --profile local \
+  ${ATLAS_PARENT_PID:+--parent-pid "$ATLAS_PARENT_PID"} \
   --device "$DEVICE" \
   --threads "$THREADS" \
   --host 127.0.0.1 \

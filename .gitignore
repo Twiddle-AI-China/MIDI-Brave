@@ -68,3 +68,8 @@ Thumbs.db
 # local CPU deployment: model weights and its virtualenv
 local-model/
 .venv-local/
+
+# electron shell: dependencies, build output, and the machine-specific root
+electron/node_modules/
+electron/dist/
+electron/config.json

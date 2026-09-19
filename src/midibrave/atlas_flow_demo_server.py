@@ -19,7 +19,10 @@ import io
 import json
 import math
 from numbers import Real
+import os
 from pathlib import Path
+import signal
+import threading
 import time
 from typing import Mapping, Sequence
 
@@ -443,13 +446,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                         help="torch CPU threads; 0 leaves torch's own default")
     parser.add_argument("--profile", choices=("local", "remote"), default="remote",
                         help="local relaxes the client's buffer and defaults to live roaming")
+    parser.add_argument("--parent-pid", type=int, default=0,
+                        help="exit when this process disappears; a force-quit desktop shell "
+                             "cannot clean up after itself, and an orphaned server holds "
+                             "the GPU and the port")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18795)
     return parser.parse_args(argv)
 
 
+def _exit_with_parent(pid: int) -> None:
+    while True:
+        time.sleep(1.0)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            # Signal ourselves rather than exiting from a worker thread, so
+            # aiohttp runs its normal shutdown and releases the port.
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    if args.parent_pid:
+        threading.Thread(target=_exit_with_parent, args=(args.parent_pid,),
+                         daemon=True, name="parent-watch").start()
     if args.threads:
         torch.set_num_threads(args.threads)
     engine = AtlasFlowLiveEngine.load(args.config, args.checkpoint, args.device)
