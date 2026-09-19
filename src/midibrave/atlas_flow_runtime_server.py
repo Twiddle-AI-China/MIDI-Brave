@@ -231,8 +231,15 @@ async def _produce(
                 del render_times[:-256]
             block_index += 1
             # An idle voice is silence, and silence is not worth a thin link.
-            # The next start message resumes production.
-            if session.snapshot()["lifecycle"] == "idle":
+            # The next start message resumes production — but say so on the way
+            # out, because telemetry lives in this loop: pausing silently left
+            # the client sending control messages into a stopped producer,
+            # which is what made roaming look dead after a rendered take.
+            snapshot = session.snapshot()
+            if snapshot["lifecycle"] == "idle":
+                await ws.send_json({"type": "telemetry", "renderP50Ms": 0.0,
+                                    "renderP95Ms": 0.0, "bufferedFrames": state.buffered_frames,
+                                    "underruns": state.underruns, **snapshot})
                 state.pause()
                 continue
             # Telemetry drives the on-map voice marker, so keep it twice as

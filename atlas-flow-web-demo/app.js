@@ -673,9 +673,10 @@ function sendControl() {
   clearTimeout(live.timer);
   live.timer = setTimeout(() => {
     if (live.socket?.readyState !== WebSocket.OPEN) return;
-    // The runtime stops producing once the voice is idle and only a start wakes
-    // it; a control message into an idle voice is silence you cannot explain.
-    if (live.lifecycle === 'idle') {
+    // The runtime stops producing once the voice is idle, and while it is in
+    // release it ignores control messages outright — so in either state a
+    // control is silence you cannot explain. Only a start wakes it.
+    if (live.lifecycle === 'idle' || live.lifecycle === 'release') {
       retrigger();
       return;
     }
@@ -884,6 +885,7 @@ async function renderCurrent() {
   const button = $('#render');
   button.disabled = true;
   setWork('渲染中…');
+  if ($('#hold').getAttribute('aria-pressed') !== 'true') live.lifecycle = 'release';
   await primeAudio();          // while the click still counts as a gesture
   try {
     const response = await fetch('/api/render', {
@@ -1221,7 +1223,10 @@ async function playProgression() {
   const chords = item.degrees.map(degree => triad(root, degree));
   button.disabled = true;
   setWork(`${item.name} 渲染中…`);
-  if ($('#hold').getAttribute('aria-pressed') !== 'true') liveSend({type: 'note_off'});
+  if ($('#hold').getAttribute('aria-pressed') !== 'true') {
+    liveSend({type: 'note_off'});
+    live.lifecycle = 'release';     // so the next roam starts the voice again
+  }
   await primeAudio();          // while the click still counts as a gesture
   try {
     const response = await fetch('/api/render', {
