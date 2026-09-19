@@ -59,6 +59,71 @@ const live = {
 
 /* ---------- map ---------- */
 
+/**
+ * A k-nearest-neighbour graph over the atlas, computed in the full 8-D space
+ * rather than in the two dimensions you can see.
+ *
+ * This is the honest version of what the fifty dots used to say. PC1 and PC2
+ * carry 42.3% and 19.8% of the variance, so more than a third of what
+ * separates two presets happens on axes this projection cannot draw. Two dots
+ * sitting next to each other on screen are not necessarily neighbours, and the
+ * graph is where that shows: an edge is dashed when most of the pair's real
+ * distance lives in the six hidden axes, so its endpoints look far closer than
+ * they are.
+ */
+const KNN = 3;
+// A kNN edge on this atlas keeps a median of 0.36 of its true 8-D length once
+// projected, so "loses something" describes almost every edge and is not worth
+// drawing. Dashing the worst quarter (measured: 27% fall below this) makes the
+// dash mean something you can act on.
+const FOLDED = 0.25;
+let edges = [];
+
+const distance = (a, b, dims) => {
+  let sum = 0;
+  for (let i = 0; i < dims; i++) sum += (a[i] - b[i]) ** 2;
+  return Math.sqrt(sum);
+};
+
+function buildNeighbourGraph() {
+  const seen = new Set();
+  const found = [];
+  cells.forEach((cell, index) => {
+    const ranked = cells
+      .map((other, j) => ({other, j, d: distance(cell.pca, other.pca, 8)}))
+      .filter(item => item.j !== index)
+      .sort((left, right) => left.d - right.d)
+      .slice(0, KNN);
+    cell.neighbours = ranked.map(item => item.other);
+    for (const item of ranked) {
+      const key = index < item.j ? `${index}:${item.j}` : `${item.j}:${index}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const flat = distance(cell.pca, item.other.pca, 2);
+      found.push({
+        a: cell, b: item.other, d: item.d,
+        // How much of the separation survives the projection. Low means the
+        // pair is drawn far closer together than it really is.
+        shown: item.d > 1e-6 ? flat / item.d : 1,
+      });
+    }
+  });
+  const near = Math.min(...found.map(edge => edge.d));
+  const far = Math.max(...found.map(edge => edge.d));
+  const span = Math.max(far - near, 1e-6);
+  for (const edge of found) edge.weight = 1 - (edge.d - near) / span;
+  edges = found;
+}
+
+/** Trace one edge; the caller owns stroke style and dash. */
+function edgePath(context, edge) {
+  context.beginPath();
+  context.moveTo(edge.a.x, edge.a.y);
+  context.lineTo(edge.b.x, edge.b.y);
+  context.stroke();
+}
+
+
 const map = $('#map');
 const paint = map.getContext('2d');
 
@@ -136,18 +201,16 @@ function paintStatic() {
   }
   ink.textBaseline = 'alphabetic';
 
-  ink.globalCompositeOperation = 'lighter';
-  for (const cell of cells) {
-    const radius = cell.loner ? 34 : 66;
-    const glow = ink.createRadialGradient(cell.x, cell.y, 0, cell.x, cell.y, radius);
-    glow.addColorStop(0, `rgba(255, 255, 255, ${cell.loner ? 0.035 : 0.055})`);
-    glow.addColorStop(1, 'rgba(255, 255, 255, 0)');
-    ink.fillStyle = glow;
-    ink.beginPath();
-    ink.arc(cell.x, cell.y, radius, 0, Math.PI * 2);
-    ink.fill();
+  // Fifty soft haloes used to sit here. They filled the same space without
+  // saying anything; the graph says who is next to whom, and where the
+  // projection is lying about it.
+  ink.lineWidth = 1;
+  for (const edge of edges) {
+    ink.strokeStyle = `rgba(242, 242, 242, ${(0.05 + 0.13 * edge.weight).toFixed(3)})`;
+    ink.setLineDash(edge.shown < FOLDED ? [2, 4] : []);
+    edgePath(ink, edge);
   }
-  ink.globalCompositeOperation = 'source-over';
+  ink.setLineDash([]);
   staticLayer.ready = true;
 }
 
@@ -162,6 +225,15 @@ function drawMap() {
   // A double ring says "this preset is what you are hearing", which a plain
   // white dot among fifty white dots cannot.
   if (sounding) {
+    // Its edges brighten, so you can see which presets you are between.
+    paint.lineWidth = 1;
+    for (const edge of edges) {
+      if (edge.a !== sounding && edge.b !== sounding) continue;
+      paint.strokeStyle = `rgba(242, 242, 242, ${(0.22 + 0.3 * edge.weight).toFixed(3)})`;
+      paint.setLineDash(edge.shown < FOLDED ? [2, 4] : []);
+      edgePath(paint, edge);
+    }
+    paint.setLineDash([]);
     for (const radius of [13, 17]) {
       paint.beginPath();
       paint.arc(sounding.x, sounding.y, radius, 0, Math.PI * 2);
@@ -201,13 +273,15 @@ function drawMap() {
     paint.setLineDash([]);
   }
   if (voice) {
-    const glow = paint.createRadialGradient(voice[0], voice[1], 0, voice[0], voice[1], 40);
-    glow.addColorStop(0, 'rgba(255, 255, 255, 0.16)');
-    glow.addColorStop(1, 'rgba(255, 255, 255, 0)');
-    paint.fillStyle = glow;
+    // The last soft halo on the map. A dashed reticle holds the same amount of
+    // attention without blurring the hairlines it sits on top of.
+    paint.strokeStyle = 'rgba(242, 242, 242, 0.30)';
+    paint.lineWidth = 1;
+    paint.setLineDash([2, 4]);
     paint.beginPath();
-    paint.arc(voice[0], voice[1], 40, 0, Math.PI * 2);
-    paint.fill();
+    paint.arc(voice[0], voice[1], 17, 0, Math.PI * 2);
+    paint.stroke();
+    paint.setLineDash([]);
     paint.strokeStyle = INK;
     paint.lineWidth = 1.5;
     paint.beginPath();
@@ -2096,6 +2170,7 @@ async function boot() {
     test: tests.has(point.presetId),
     x: 0, y: 0,
   }));
+  buildNeighbourGraph();
   coordinate = (status.defaultPcaNormalized || Array(8).fill(0)).slice();
   buildPanel();
   buildProgressionPicker();
@@ -2158,6 +2233,16 @@ window.atlasDebug = () => ({
   })(),
   scopeSource: $('#scope-source').textContent,
   slots: scope.views.map(view => view.key),
+  graph: {
+    k: KNN,
+    edges: edges.length,
+    // Pairs the projection draws far closer together than they really are.
+    folded: edges.filter(edge => edge.shown < FOLDED).length,
+    shownRange: edges.length
+      ? [Math.min(...edges.map(edge => edge.shown)), Math.max(...edges.map(edge => edge.shown))]
+        .map(value => Number(value.toFixed(3)))
+      : null,
+  },
 });
 
 boot().catch(error => {
