@@ -115,9 +115,8 @@ body {
   border-radius: 3px; padding: 3px 6px; font: inherit; font-size: 10.5px;
 }
 #compMeter { color: var(--dim); min-width: 92px; }
-.modes, .takes { display: flex; align-items: center; gap: 5px; overflow-x: auto; }
+.takes { display: flex; align-items: center; gap: 5px; overflow-x: auto; }
 .takes { margin-left: auto; }
-.modes { border-left: 1px solid var(--line); padding-left: 14px; }
 audio { display: none; }
 
 #panel[hidden] { display: none; }
@@ -171,7 +170,7 @@ audio { display: none; }
   /* The rail is the last thing that may overflow: let its two scrolling
      strips give up their width instead of pushing the page sideways. */
   #rail { gap: 8px; padding: 6px 10px; }
-  .modes, .takes { min-width: 0; flex: 1 1 auto; }
+  .takes { min-width: 0; flex: 1 1 auto; }
   #info { left: 10px; right: 10px; width: auto; }
 }
 

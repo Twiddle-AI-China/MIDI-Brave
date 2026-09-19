@@ -27,7 +27,6 @@ const pickAudio = payload =>
   (payload.urls && payload.urls[AUDIO_FORMAT]) || payload.url;
 // Evaluation rows name their clips .ogg; the server transcodes on demand, so
 // asking for the other extension is enough.
-const auditionUrl = path => path.replace(/\.ogg$/, `.${AUDIO_FORMAT}`);
 
 const INK = '#f2f2f2';
 const CELL = '#d8d8d8';
@@ -41,7 +40,6 @@ let hovered = null;
 let pointer = null;
 let sounding = null;              // the cell the running voice actually landed on
 const staticLayer = {canvas: document.createElement('canvas'), ready: false};
-let selectedTest = null;
 let takes = [];
 
 const live = {
@@ -177,7 +175,7 @@ function drawMap() {
     if (cell.test) {
       paint.beginPath();
       paint.arc(cell.x, cell.y, 11, 0, Math.PI * 2);
-      paint.strokeStyle = cell === selectedTest ? INK : 'rgba(242, 242, 242, 0.34)';
+      paint.strokeStyle = 'rgba(242, 242, 242, 0.34)';
       paint.lineWidth = 1;
       paint.stroke();
     }
@@ -1776,68 +1774,6 @@ function stopAll() {
   setWork('');
 }
 
-/* ---------- held-out preset comparison ---------- */
-
-function openTest(cell) {
-  selectedTest = cell;
-  const rows = (evaluation?.rows || []).filter(row => row.preset_id === cell.presetId);
-  const host = $('#modes');
-  host.hidden = false;
-  let note = rows[0]?.note;
-  let mode = 'source';
-
-  const render = () => {
-    host.textContent = '';
-    const close = document.createElement('button');
-    close.type = 'button';
-    close.className = 'chip';
-    close.textContent = '×';
-    close.addEventListener('click', () => {
-      selectedTest = null;
-      host.hidden = true;
-      drawMap();
-    });
-    host.append(close);
-    const label = document.createElement('span');
-    label.className = 'mono muted';
-    label.textContent = cell.label;
-    host.append(label);
-    for (const row of rows) {
-      const chip = document.createElement('button');
-      chip.type = 'button';
-      chip.className = `chip${row.note === note ? ' on' : ''}`;
-      chip.textContent = noteName(row.note);
-      chip.addEventListener('click', () => { note = row.note; render(); swap(true); });
-      host.append(chip);
-    }
-    for (const name of ['source', 'dynamic', 'static', 'flow']) {
-      const chip = document.createElement('button');
-      chip.type = 'button';
-      chip.className = `chip${name === mode ? ' on' : ''}`;
-      chip.textContent = name.toUpperCase();
-      chip.addEventListener('click', () => { mode = name; render(); swap(false); });
-      host.append(chip);
-    }
-  };
-
-  const swap = restart => {
-    const row = rows.find(item => item.note === note);
-    if (!row) return;
-    const player = $('#player');
-    const position = restart ? 0 : player.currentTime;
-    const playing = restart || !player.paused;
-    liveSend({type: 'note_off'});
-    play(auditionUrl(row.audio[mode]), `对照 ${mode.toUpperCase()}`).then(() => {
-      player.currentTime = position;
-      if (!playing) player.pause();
-    });
-  };
-
-  render();
-  swap(true);
-  drawMap();
-}
-
 /* ---------- panel ---------- */
 
 function syncAxes() {
@@ -1980,9 +1916,6 @@ function wire() {
     }
     if (trajectory.playing) return;
     moveTo(place(event));
-    const cell = nearestCell(place(event));
-    if (cell?.test) openTest(cell);
-    else if (selectedTest) { selectedTest = null; $('#modes').hidden = true; drawMap(); }
   });
 
   // Leaving briefly should not cut the note: a release costs a fresh attack and

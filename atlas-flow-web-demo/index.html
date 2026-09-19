@@ -45,7 +45,6 @@
     <button id="stop" class="chip" type="button" data-info="停止|停下所有声音：实时声部、循环、片段、录制。">■ 停止</button>
     <button id="draw" class="chip" type="button" aria-pressed="false" data-info="画轨迹|在图谱上拖一条线，音色沿着它往返。周期在设置里。">○ 画轨迹</button>
     <span id="work" class="mono"></span>
-    <div id="modes" class="modes" hidden></div>
     <div id="takes" class="takes"></div>
     <audio id="player" preload="none"></audio>
   </footer>
@@ -99,7 +98,7 @@
     </section>
     <section>
       <h3>这是什么</h3>
-      <p class="muted">图谱读法：细空心圈＝你指的位置，十字＝正在响的音色（追着你走），双圈＝它最近的 preset，带圈细胞是 held-out，可点开四模式对照。</p>
+      <p class="muted">图谱读法：细空心圈＝你指的位置，十字＝正在响的音色（追着你走），双圈＝它最近的 preset。带圈的三个是 held-out——模型训练时没见过，听到的完全是生成的。</p>
       <p class="muted">Pad 单声部研究原型。每个细胞是一个 preset 的 128D 音色锚点，经 8 维 PCA 投影；鼠标位置就是坐标，Flow 预测轨迹、解码器注入 MIDI 音高。带圈的细胞是 held-out test preset，点开可比较四种模式。</p>
       <p class="muted" id="gates"></p>
       <p class="muted" id="limits"></p>
