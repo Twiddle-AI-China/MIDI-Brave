@@ -459,16 +459,56 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _parent_alive(pid: int) -> bool:
+    """Is the process that launched us still running?
+
+    ``os.kill(pid, 0)`` is the usual probe and is exactly wrong on Windows,
+    where os.kill ignores the signal for anything but the two console events
+    and calls TerminateProcess instead -- so the liveness check would kill the
+    parent it was checking on. Windows gets an OpenProcess/GetExitCodeProcess
+    probe, which only reads.
+    """
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    import ctypes
+    from ctypes import wintypes
+
+    SYNCHRONIZE = 0x00100000
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(
+        SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _exit_with_parent(pid: int) -> None:
     while True:
         time.sleep(1.0)
-        try:
-            os.kill(pid, 0)
-        except OSError:
-            # Signal ourselves rather than exiting from a worker thread, so
-            # aiohttp runs its normal shutdown and releases the port.
-            os.kill(os.getpid(), signal.SIGTERM)
-            return
+        if _parent_alive(pid):
+            continue
+        if os.name == "nt":
+            # No SIGTERM handler on Windows, and raising it in a worker thread
+            # does nothing. Leaving is the whole job; the OS reclaims the port.
+            os._exit(0)
+        # Signal ourselves rather than exiting from a worker thread, so
+        # aiohttp runs its normal shutdown and releases the port.
+        os.kill(os.getpid(), signal.SIGTERM)
+        return
 
 
 def main(argv: Sequence[str] | None = None) -> None:

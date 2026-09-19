@@ -1,12 +1,16 @@
 {
   "name": "atlas-flow-desktop",
-  "version": "0.1.0",
+  "productName": "AtlasFlow",
+  "version": "1.0.0",
   "private": true,
-  "description": "Atlas Flow \u2014 the Pad Top50 timbre map, running entirely on this machine",
+  "description": "Atlas Flow — the Pad Top50 timbre map, running entirely on this machine",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "pack": "node prepack.js && electron-packager . AtlasFlow --platform=darwin --arch=arm64 --out=dist --overwrite --app-bundle-id=ai.twiddle.atlasflow --app-version=0.1.0"
+    "build:server": "node build-server.js",
+    "pack": "node prepack.js && node pack.js",
+    "build": "npm run build:server && npm run pack",
+    "test": "node smoke.js"
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",
