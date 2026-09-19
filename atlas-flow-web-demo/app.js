@@ -438,6 +438,13 @@ const scope = {
   views: [],
 };
 
+// Measured across the atlas: centroids run 90–1033 Hz and 85% rolloff never
+// passes 1.4 kHz, so a pad puts nearly everything under ~2 kHz. Drawing up to
+// Nyquist spent three quarters of the pane on silence and squeezed every real
+// difference into the left edge, which is why the waterfall looked static.
+const SCOPE_CEILING = 4000;
+const scopeTop = rate => Math.min(SCOPE_CEILING, rate / 2);
+
 const mel = frequency => 2595 * Math.log10(1 + frequency / 700);
 const melInverse = value => 700 * (10 ** (value / 2595) - 1);
 
@@ -475,7 +482,7 @@ function scopeLayout() {
 function melRows(view, analyser, rate) {
   const bins = analyser.frequencyBinCount;
   const nyquist = rate / 2;
-  const top = mel(nyquist);
+  const top = mel(scopeTop(rate));
   const bottom = mel(40);
   return Array.from({length: view.height}, (_, row) => {
     const high = melInverse(bottom + (top - bottom) * (1 - row / view.height));
@@ -539,7 +546,8 @@ function scopeFrame(now) {
   }
   analyser.getByteFrequencyData(scope.freq);
   analyser.getByteTimeDomainData(scope.time);
-  $('#scope-range').textContent = `40Hz–${(rate / 2000).toFixed(1)}kHz`;
+  $('#scope-range').textContent =
+    `40Hz–${(scopeTop(rate) / 1000).toFixed(1)}kHz · 流 ${(rate / 2000).toFixed(1)}kHz`;
 
   for (const view of scope.views) {
     if (!view.width || view.canvas.clientWidth < 2) continue;
@@ -586,7 +594,7 @@ function viewRidge(context, view, {rate, elapsed}) {
   const bins = scope.freq.length;
   const nyquist = rate / 2;
   const lowest = 40;
-  const span = Math.log2(nyquist / lowest);
+  const span = Math.log2(scopeTop(rate) / lowest);
   const line = new Float32Array(bands);
   for (let index = 0; index < bands; index++) {
     const from = lowest * 2 ** (span * index / bands);
@@ -654,10 +662,13 @@ function viewLoudness(context, view, {elapsed}) {
     });
     if (view.levels.length > view.width) view.levels.shift();
   }
-  const toY = db => view.height * (1 - clamp((db + 72) / 72, 0, 1));
+  // -72 dB of range put every trace in the top third. The model's output sits
+  // around -26 RMS and -17 peak, so the window is the part that carries signal.
+  const FLOOR = -42;
+  const toY = db => view.height * (1 - clamp((db - FLOOR) / -FLOOR, 0, 1));
   context.font = '9px ui-monospace, monospace';
   context.textAlign = 'left';
-  for (const db of [-6, -24, -42, -60]) {
+  for (const db of [-6, -12, -24, -36]) {
     const y = toY(db);
     context.strokeStyle = 'rgba(242, 242, 242, 0.09)';
     context.beginPath();
@@ -701,12 +712,12 @@ function viewLoudness(context, view, {elapsed}) {
 }
 
 function frequencyGrid(context, view, rate) {
-  const top = mel(rate / 2);
+  const top = mel(scopeTop(rate));
   const bottom = mel(40);
   context.font = '9px ui-monospace, monospace';
   context.textAlign = 'left';
-  for (const frequency of [250, 1000, 4000, 16000]) {
-    if (frequency >= rate / 2) continue;
+  for (const frequency of [100, 250, 500, 1000, 2000]) {
+    if (frequency >= scopeTop(rate)) continue;
     const y = view.height * (1 - (mel(frequency) - bottom) / (top - bottom));
     context.strokeStyle = 'rgba(242, 242, 242, 0.10)';
     context.beginPath();
@@ -719,11 +730,11 @@ function frequencyGrid(context, view, rate) {
 }
 
 function logFrequencyGrid(context, view, rate, lowest, faint = false) {
-  const span = Math.log2(rate / 2 / lowest);
+  const span = Math.log2(scopeTop(rate) / lowest);
   context.font = '9px ui-monospace, monospace';
   context.textAlign = 'center';
-  for (const frequency of [250, 1000, 4000, 16000]) {
-    if (frequency >= rate / 2) continue;
+  for (const frequency of [100, 250, 500, 1000, 2000]) {
+    if (frequency >= scopeTop(rate)) continue;
     const x = Math.log2(frequency / lowest) / span * view.width;
     context.strokeStyle = `rgba(242, 242, 242, ${faint ? 0.05 : 0.09})`;
     context.beginPath();
@@ -1930,7 +1941,8 @@ function wire() {
   $('#drawer').addEventListener('click', () => {
     const board = $('#board');
     const shut = board.classList.toggle('drawer-shut');
-    $('#drawer').textContent = shut ? '‹' : '›';
+    $('#drawer').textContent = shut ? '‹ SCOPE' : '›';
+    $('#drawer').title = shut ? '展开频谱' : '收起频谱';
     // Both panes changed width; the map and every scope canvas must re-measure.
     requestAnimationFrame(() => { layout(); scopeLayout(); });
   });

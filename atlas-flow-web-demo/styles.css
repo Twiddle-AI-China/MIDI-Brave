@@ -71,13 +71,23 @@ body {
   position: absolute; left: 8px; top: 6px; z-index: 1; pointer-events: none;
   font-size: 9px; letter-spacing: .14em; color: rgba(242, 242, 242, 0.42);
 }
-/* Collapsed, the pane becomes a spine you can reopen — the map takes the rest. */
+/* Collapsed, the pane becomes a full-height spine you reopen by clicking it —
+   a 26px button tucked in a corner was, fairly, not findable. */
 #board.drawer-shut { grid-template-columns: minmax(0, 1fr) 26px; }
 #board.drawer-shut .scope-cell,
 #board.drawer-shut #scope-range,
 #board.drawer-shut #scope-source,
 #board.drawer-shut #scope-head b { display: none; }
-#board.drawer-shut #scope-head { padding: 0 4px; }
+#board.drawer-shut #scope-pane { grid-template-rows: 1fr; }
+#board.drawer-shut #scope-head {
+  padding: 0; border-bottom: 0; align-items: stretch; cursor: pointer;
+}
+#board.drawer-shut #drawer {
+  width: 100%; height: 100%; border: 0; border-radius: 0;
+  display: flex; align-items: center; justify-content: center;
+  writing-mode: vertical-rl; letter-spacing: .3em; font-size: 9px;
+}
+#board.drawer-shut #drawer:hover { background: #101010; color: var(--ink); }
 #scope-head {
   display: flex; align-items: center; gap: 10px; padding: 0 10px;
   border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 10px; letter-spacing: .08em;
