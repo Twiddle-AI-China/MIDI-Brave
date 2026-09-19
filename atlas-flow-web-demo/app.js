@@ -947,13 +947,13 @@ function moveTo(place, {snap = true} = {}) {
  * immediately when the window has passed and schedules the trailing edge
  * otherwise, which guarantees a message at least every 55 ms while moving.
  */
-function sendControl() {
+function sendControl(overrides = null) {
   if (audioMode() !== 'live' || !live.connected) return;
   const now = performance.now();
   const since = now - (live.lastSent || 0);
   if (since < 55) {
     if (!live.timer) {
-      live.timer = setTimeout(() => { live.timer = 0; sendControl(); }, 55 - since);
+      live.timer = setTimeout(() => { live.timer = 0; sendControl(overrides); }, 55 - since);
     }
     return;
   }
@@ -969,7 +969,8 @@ function sendControl() {
       retrigger();
       return;
     }
-    live.socket.send(JSON.stringify({type: 'control', seq: ++live.seq, ...currentControls()}));
+    live.socket.send(JSON.stringify(
+      {type: 'control', seq: ++live.seq, ...currentControls(), ...(overrides || {})}));
   })();
 }
 
@@ -1555,6 +1556,9 @@ const trajectory = {
   forward: true,
   frame: 0,
   last: 0,
+  speed: null,       // per-phase speed profile, see buildSpeedProfile
+  sent: 0,           // when the last target was actually emitted
+  sentAt: null,      // and where, so the next one can be a real step away
 };
 
 const drawArmed = () => $('#draw').getAttribute('aria-pressed') === 'true';
@@ -1586,6 +1590,142 @@ function pointAt(phase) {
   return [ax + (bx - ax) * ratio, ay + (by - ay) * ratio];
 }
 
+/**
+ * A speed profile along the stroke, so the walk reads as a hand and not as a
+ * turntable.
+ *
+ * Constant arc-length speed was the obvious thing and the wrong one: it takes
+ * hairpins at the same rate as straights, which is the one thing a hand never
+ * does. People obey the two-thirds power law when they draw — through a curve
+ * of radius R the hand travels at a speed proportional to R^(1/3) — so that is
+ * what this computes, from the curvature of the stroke the user actually drew.
+ * The ends get an ease as well, because the walk reverses there and hitting a
+ * wall at full speed is audible.
+ *
+ * The profile is normalised by its harmonic mean, so varying the speed does not
+ * change how long a lap takes: the 周期 dial still means what it says.
+ */
+const PATH_SAMPLES = 160;
+const EASE_SPAN = 0.12;
+
+function buildSpeedProfile() {
+  const count = PATH_SAMPLES;
+  const samples = [];
+  for (let index = 0; index < count; index++) samples.push(pointAt(index / (count - 1)));
+  const ds = trajectory.total / (count - 1) || 1e-6;
+  const speed = new Array(count).fill(1);
+  for (let index = 1; index < count - 1; index++) {
+    const dx = samples[index - 1][0] - 2 * samples[index][0] + samples[index + 1][0];
+    const dy = samples[index - 1][1] - 2 * samples[index][1] + samples[index + 1][1];
+    const curvature = Math.hypot(dx, dy) / (ds * ds);
+    speed[index] = Math.cbrt(1 / Math.max(curvature, 1e-6));
+  }
+  speed[0] = speed[1];
+  speed[count - 1] = speed[count - 2];
+
+  // Normalise against the median rather than the mean, then band it: one
+  // scribbled hairpin should colour the walk, not halt it.
+  const median = [...speed].sort((a, b) => a - b)[count >> 1] || 1;
+  for (let index = 0; index < count; index++) {
+    speed[index] = clamp(speed[index] / median, 0.4, 1.7);
+  }
+  for (let index = 0; index < count; index++) {
+    const phase = index / (count - 1);
+    const edge = Math.min(phase, 1 - phase) / EASE_SPAN;
+    if (edge < 1) speed[index] *= 0.3 + 0.7 * (edge * edge * (3 - 2 * edge));
+  }
+  let harmonic = 0;
+  for (const value of speed) harmonic += 1 / value;
+  harmonic /= count;
+  for (let index = 0; index < count; index++) speed[index] *= harmonic;
+  trajectory.speed = speed;
+}
+
+function speedAt(phase) {
+  const profile = trajectory.speed;
+  if (!profile?.length) return 1;
+  const place = clamp(phase, 0, 1) * (profile.length - 1);
+  const index = Math.floor(place);
+  const next = profile[index + 1] ?? profile[index];
+  return profile[index] + (next - profile[index]) * (place - index);
+}
+
+/**
+ * Move the *sound* along the path, which is a different problem from moving
+ * the marker.
+ *
+ * The runtime does not sweep through latent space. It renders a point and
+ * crossfades to it, one plan at a time, from a queue one deep: plans start at
+ * most every 0.25 s and each takes as long as it takes (~0.3-0.9 s here).
+ * Emitting a target every frame did not make the timbre move faster, it made
+ * every render land almost on top of the last one — consecutive points 55 ms
+ * apart on the path are nearly the same timbre, so the crossfade had nothing
+ * to cross and the walk sounded static.
+ *
+ * So emit on distance covered, sized to what the pipeline is actually
+ * achieving, and set the crossfade to about the gap between steps: one render
+ * is still fading up as the next is planned. Stepped underneath, continuous on
+ * the ear.
+ */
+/**
+ * Lift a drawn point from the plane into the full 8-D space.
+ *
+ * A stroke only moves PC1 and PC2. The other six axes stayed wherever the
+ * coordinate panel last left them, so a trajectory swept a flat slice of the
+ * atlas: measured, a step moved 0.106 in the plane -- a full neighbour spacing
+ * there -- but only 0.106 of the 0.827 that separates neighbouring presets in
+ * 8-D. Most of what makes two pads sound different was pinned down for the
+ * whole walk, which is why the timbre barely moved.
+ *
+ * So the hidden axes follow the presets the path is passing: an
+ * inverse-distance blend of the nearest few, in the plane. The path still owns
+ * where you are; the atlas fills in the rest.
+ */
+const NEIGHBOUR_SPACING = 0.098;
+// Every cell contributes, weighted by a Gaussian a few neighbour-spacings
+// wide. Taking a hard nearest-three instead made the blend jump each time the
+// walk crossed a rank boundary: 8-D travel came out at 41.8 for a span of 3.7,
+// eleven times more movement than ground covered, which is jitter, not motion.
+const LIFT_BANDWIDTH = NEIGHBOUR_SPACING * 3;
+
+function liftToAtlas(place) {
+  const lifted = coordinate.slice();
+  lifted[0] = place[0];
+  lifted[1] = place[1];
+  if (!cells.length) return lifted;
+  let total = 0;
+  const blend = new Array(8).fill(0);
+  for (const cell of cells) {
+    const reach = Math.hypot(cell.pca[0] - place[0], cell.pca[1] - place[1]) / LIFT_BANDWIDTH;
+    const weight = Math.exp(-reach * reach) + 1e-4;
+    total += weight;
+    for (let axis = 2; axis < 8; axis++) blend[axis] += cell.pca[axis] * weight;
+  }
+  for (let axis = 2; axis < 8; axis++) lifted[axis] = blend[axis] / total;
+  return lifted;
+}
+
+function stepTrajectoryVoice(place, now) {
+  const plan = clamp((live.planMs || 300) / 1000, 0.25, 1.4);
+  const since = (now - (trajectory.sent || 0)) / 1000;
+  if (since < plan * 0.9) return;
+  const from = trajectory.sentAt;
+  const moved = from ? Math.hypot(place[0] - from[0], place[1] - from[1]) : Infinity;
+  // A stride worth rendering, measured against the atlas rather than against
+  // the clock: presets sit a median 0.098 apart in the plane a path moves
+  // through, so a step shorter than that renders a timbre you have already
+  // heard. Gating on the plan cadence instead (what this did first) emitted at
+  // exactly the rate the server already managed, which measured as no change
+  // at all.
+  if (moved < NEIGHBOUR_SPACING * 0.8) return;
+  trajectory.sent = now;
+  trajectory.sentAt = place.slice();
+  // Crossfade for the gap just measured, not longer. A 0.6 s morph across a
+  // 0.33 s step means every render is still fading when the next one starts,
+  // so the voice never actually arrives anywhere -- a low-pass on the walk.
+  sendControl({morphSeconds: clamp(since, 0.5, 5)});
+}
+
 function walkTrajectory(now) {
   if (!trajectory.playing) return;
   trajectory.frame = requestAnimationFrame(walkTrajectory);
@@ -1594,16 +1734,20 @@ function walkTrajectory(now) {
   trajectory.last = now;
   // There and back, so a stroke reads as a sweep rather than a jump cut at the
   // end of every lap.
-  trajectory.phase += (trajectory.forward ? 1 : -1) * elapsed / lap;
+  trajectory.phase += (trajectory.forward ? 1 : -1) * elapsed / lap * speedAt(trajectory.phase);
   if (trajectory.phase >= 1) { trajectory.phase = 1; trajectory.forward = false; }
   if (trajectory.phase <= 0) { trajectory.phase = 0; trajectory.forward = true; }
   const place = pointAt(trajectory.phase);
   if (!place) return;
-  coordinate[0] = place[0];
-  coordinate[1] = place[1];
+  coordinate = liftToAtlas(place);
+  // The ring glides at frame rate and the crosshair steps along behind it, so
+  // the leash between them shows how far the sound is lagging the path. The
+  // ring used not to move at all here, which is half of why the walk looked
+  // dead even when it was working.
+  pointer = place.slice();
   hovered = null;
   syncAxes();
-  sendControl();
+  stepTrajectoryVoice(place, now);
   updateReadout();
   drawMap();
 }
@@ -1611,6 +1755,9 @@ function walkTrajectory(now) {
 function startTrajectory() {
   if (trajectory.points.length < 2) return;
   measurePath();
+  buildSpeedProfile();
+  trajectory.sent = 0;
+  trajectory.sentAt = null;
   trajectory.playing = true;
   trajectory.last = performance.now();
   setWork(`[PATH] ${trajectory.points.length} 点 · ${Number($('#lap').value).toFixed(1)}s 单程`);
@@ -1633,6 +1780,8 @@ function stopTrajectory(clear = false) {
     trajectory.total = 0;
     trajectory.phase = 0;
     trajectory.forward = true;
+    trajectory.speed = null;
+    trajectory.sentAt = null;
   }
   drawMap();
 }
@@ -2231,6 +2380,7 @@ window.atlasDebug = () => ({
     for (const value of frame) sum += value * value;
     return Number((20 * Math.log10(Math.sqrt(sum / frame.length) + 1e-9)).toFixed(1));
   })(),
+  full: coordinate && coordinate.slice(),
   scopeSource: $('#scope-source').textContent,
   slots: scope.views.map(view => view.key),
   graph: {
