@@ -238,7 +238,40 @@ function drawMap() {
     paint.fillText(hovered.label, hovered.x, hovered.y - 15);
   }
 
+  if (trajectory.points.length > 1) drawTrajectory(view);
   if (sounding) drawInset(view, sounding);
+}
+
+function drawTrajectory(view) {
+  paint.strokeStyle = trajectory.playing
+    ? 'rgba(242, 242, 242, 0.45)'
+    : 'rgba(242, 242, 242, 0.28)';
+  paint.lineWidth = 1;
+  paint.setLineDash(trajectory.drawing ? [] : [5, 4]);
+  paint.beginPath();
+  trajectory.points.forEach((value, index) => {
+    const [x, y] = view.toPixel(value);
+    index ? paint.lineTo(x, y) : paint.moveTo(x, y);
+  });
+  paint.stroke();
+  paint.setLineDash([]);
+
+  for (const end of [trajectory.points[0], trajectory.points.at(-1)]) {
+    const [x, y] = view.toPixel(end);
+    paint.strokeStyle = 'rgba(242, 242, 242, 0.5)';
+    paint.strokeRect(x - 3.5, y - 3.5, 7, 7);
+  }
+
+  if (trajectory.playing) {
+    const place = pointAt(trajectory.phase);
+    if (place) {
+      const [x, y] = view.toPixel(place);
+      paint.beginPath();
+      paint.arc(x, y, 4, 0, Math.PI * 2);
+      paint.fillStyle = INK;
+      paint.fill();
+    }
+  }
 }
 
 /**
@@ -788,10 +821,30 @@ function moveTo(place, {snap = true} = {}) {
   drawMap();
 }
 
+/**
+ * Rate-limit control messages — as a throttle, not a debounce.
+ *
+ * This was a debounce: every call reset the timer, so a continuous stream of
+ * calls postponed the send forever. A real mouse drag emits faster than the
+ * 55 ms window, and the trajectory walker emits every animation frame, so in
+ * both cases nothing was ever sent and the voice sat still. A throttle sends
+ * immediately when the window has passed and schedules the trailing edge
+ * otherwise, which guarantees a message at least every 55 ms while moving.
+ */
 function sendControl() {
   if (audioMode() !== 'live' || !live.connected) return;
+  const now = performance.now();
+  const since = now - (live.lastSent || 0);
+  if (since < 55) {
+    if (!live.timer) {
+      live.timer = setTimeout(() => { live.timer = 0; sendControl(); }, 55 - since);
+    }
+    return;
+  }
   clearTimeout(live.timer);
-  live.timer = setTimeout(() => {
+  live.timer = 0;
+  live.lastSent = now;
+  (() => {
     if (live.socket?.readyState !== WebSocket.OPEN) return;
     // The runtime stops producing once the voice is idle, and while it is in
     // release it ignores control messages outright — so in either state a
@@ -801,7 +854,7 @@ function sendControl() {
       return;
     }
     live.socket.send(JSON.stringify({type: 'control', seq: ++live.seq, ...currentControls()}));
-  }, 55);
+  })();
 }
 
 function liveSend(message) {
@@ -1337,6 +1390,112 @@ async function auditionCell(cell) {
 }
 
 
+
+/* ---------- drawn trajectories ---------- */
+
+/**
+ * A path the voice travels, rather than a path that renders something.
+ *
+ * You draw a stroke across the atlas; the voice then walks it end to end and
+ * back, and the timbre interpolates only along that route. The engine already
+ * morphs between coordinates, so this only has to decide *which* coordinate to
+ * ask for at each moment — the whole feature is client-side.
+ *
+ * Only PC1 and PC2 come from the stroke; the other six dimensions stay wherever
+ * the panel has them, because the map cannot express them.
+ */
+const trajectory = {
+  points: [],        // normalised [pc1, pc2] along the stroke
+  lengths: [],       // cumulative arc length, for even-speed travel
+  total: 0,
+  drawing: false,
+  playing: false,
+  phase: 0,          // 0..1 along the path
+  forward: true,
+  frame: 0,
+  last: 0,
+};
+
+const drawArmed = () => $('#draw').getAttribute('aria-pressed') === 'true';
+
+function measurePath() {
+  trajectory.lengths = [0];
+  let total = 0;
+  for (let index = 1; index < trajectory.points.length; index++) {
+    const [ax, ay] = trajectory.points[index - 1];
+    const [bx, by] = trajectory.points[index];
+    total += Math.hypot(bx - ax, by - ay);
+    trajectory.lengths.push(total);
+  }
+  trajectory.total = total;
+}
+
+/** Position at arc-length fraction `phase`, so speed is even along the stroke. */
+function pointAt(phase) {
+  const points = trajectory.points;
+  if (points.length < 2) return points[0] || null;
+  const wanted = clamp(phase, 0, 1) * trajectory.total;
+  let index = 1;
+  while (index < trajectory.lengths.length - 1 && trajectory.lengths[index] < wanted) index++;
+  const before = trajectory.lengths[index - 1];
+  const span = Math.max(1e-9, trajectory.lengths[index] - before);
+  const ratio = clamp((wanted - before) / span, 0, 1);
+  const [ax, ay] = points[index - 1];
+  const [bx, by] = points[index];
+  return [ax + (bx - ax) * ratio, ay + (by - ay) * ratio];
+}
+
+function walkTrajectory(now) {
+  if (!trajectory.playing) return;
+  trajectory.frame = requestAnimationFrame(walkTrajectory);
+  const lap = Math.max(0.5, Number($('#lap').value));
+  const elapsed = Math.min(0.25, (now - (trajectory.last || now)) / 1000);
+  trajectory.last = now;
+  // There and back, so a stroke reads as a sweep rather than a jump cut at the
+  // end of every lap.
+  trajectory.phase += (trajectory.forward ? 1 : -1) * elapsed / lap;
+  if (trajectory.phase >= 1) { trajectory.phase = 1; trajectory.forward = false; }
+  if (trajectory.phase <= 0) { trajectory.phase = 0; trajectory.forward = true; }
+  const place = pointAt(trajectory.phase);
+  if (!place) return;
+  coordinate[0] = place[0];
+  coordinate[1] = place[1];
+  hovered = null;
+  syncAxes();
+  sendControl();
+  updateReadout();
+  drawMap();
+}
+
+function startTrajectory() {
+  if (trajectory.points.length < 2) return;
+  measurePath();
+  trajectory.playing = true;
+  trajectory.last = performance.now();
+  setWork(`[PATH] ${trajectory.points.length} 点 · ${Number($('#lap').value).toFixed(1)}s 单程`);
+  if (audioMode() === 'live' && !live.connected) {
+    connect().catch(() => {});
+  } else if (['idle', 'release'].includes(live.lifecycle)) {
+    retrigger();
+  }
+  cancelAnimationFrame(trajectory.frame);
+  trajectory.frame = requestAnimationFrame(walkTrajectory);
+}
+
+function stopTrajectory(clear = false) {
+  trajectory.playing = false;
+  cancelAnimationFrame(trajectory.frame);
+  trajectory.frame = 0;
+  if (clear) {
+    trajectory.points = [];
+    trajectory.lengths = [];
+    trajectory.total = 0;
+    trajectory.phase = 0;
+    trajectory.forward = true;
+  }
+  drawMap();
+}
+
 /* ---------- looping a progression ---------- */
 
 /**
@@ -1506,6 +1665,7 @@ async function playProgression() {
 /** Silence everything: the live voice, and whatever clip is playing. */
 function stopAll() {
   clearTimeout(live.offTimer);
+  stopTrajectory();          // keeps the path so it can be resumed
   stopPreview(0.03);
   stopLoop(0.05);
   liveSend({type: 'stop'});
@@ -1657,7 +1817,20 @@ function wire() {
     return map.view.toNormal(event.clientX - box.left, event.clientY - box.top);
   };
 
-  map.addEventListener('pointermove', event => moveTo(place(event)));
+  map.addEventListener('pointermove', event => {
+    const here = place(event);
+    if (trajectory.drawing) {
+      const last = trajectory.points.at(-1);
+      // Thin the stroke: raw pointer samples are far denser than the path needs.
+      if (!last || Math.hypot(here[0] - last[0], here[1] - last[1]) > 0.02) {
+        trajectory.points.push(here);
+        drawMap();
+      }
+      return;
+    }
+    if (trajectory.playing) return;      // the path owns the voice while it runs
+    moveTo(here);
+  });
 
   map.addEventListener('pointerdown', event => {
     map.setPointerCapture(event.pointerId);
@@ -1665,10 +1838,29 @@ function wire() {
       $('#curtain').classList.add('gone');
       startAudio();
     }
+    if (drawArmed()) {
+      stopTrajectory(true);
+      trajectory.drawing = true;
+      trajectory.points = [place(event)];
+      drawMap();
+      return;
+    }
     moveTo(place(event));
   });
 
   map.addEventListener('pointerup', event => {
+    if (trajectory.drawing) {
+      trajectory.drawing = false;
+      if (trajectory.points.length >= 2) {
+        startTrajectory();
+      } else {
+        setWork('轨迹太短，再画一条');
+        trajectory.points = [];
+      }
+      drawMap();
+      return;
+    }
+    if (trajectory.playing) return;
     moveTo(place(event));
     const cell = nearestCell(place(event));
     if (cell?.test) openTest(cell);
@@ -1683,6 +1875,7 @@ function wire() {
     pointer = null;
     hovered = null;
     drawMap();
+    if (trajectory.playing || trajectory.drawing) return;
     if (audioMode() === 'cached') { stopPreview(0.08); return; }
     if (!live.connected || $('#hold').getAttribute('aria-pressed') === 'true') return;
     clearTimeout(live.offTimer);
@@ -1754,6 +1947,23 @@ function wire() {
   });
   $('#stop').addEventListener('click', stopAll);
   $('#play').addEventListener('click', playProgression);
+  $('#draw').addEventListener('click', event => {
+    const on = event.target.getAttribute('aria-pressed') === 'true';
+    event.target.setAttribute('aria-pressed', String(!on));
+    markToggle(event.target);
+    if (on) {
+      stopTrajectory(true);        // disarming clears the path
+      setWork('');
+    } else {
+      setWork('在图谱上拖一条线，松手后音色沿着它往返');
+    }
+  });
+  $('#lap').addEventListener('input', event => {
+    $('#lapOut').textContent = `${Number(event.target.value).toFixed(1)} s`;
+    if (trajectory.playing) {
+      setWork(`[PATH] ${trajectory.points.length} 点 · ${Number(event.target.value).toFixed(1)}s 单程`);
+    }
+  });
   $('#loop').addEventListener('click', event => {
     const on = event.target.getAttribute('aria-pressed') === 'true';
     event.target.setAttribute('aria-pressed', String(!on));
@@ -1885,6 +2095,10 @@ window.atlasDebug = () => ({
   underruns: live.underruns,
   planMs: live.planMs,
   format: AUDIO_FORMAT,
+  path: trajectory.points.length
+    ? {points: trajectory.points.length, playing: trajectory.playing,
+       phase: Number(trajectory.phase.toFixed(3))}
+    : null,
 });
 
 boot().catch(error => {
