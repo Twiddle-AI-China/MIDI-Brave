@@ -11,13 +11,13 @@
   <header id="top">
     <span class="brand">MIDI-BRAVE: ATLAS FLOW - PAD</span>
     <span id="top-note" class="mono"></span>
-    <button id="gear" class="chip" type="button">设置</button>
+    <button id="gear" class="chip" type="button" data-en="SETTINGS">设置</button>
   </header>
 
   <div id="board">
     <div id="map-pane">
       <canvas id="map"></canvas>
-      <div id="curtain"><div><b>点一下图谱开始</b><span>之后移动鼠标就是试听，不用按住</span><span id="curtainNote"></span></div></div>
+      <div id="curtain"><div><b data-en="Click the atlas to begin">点一下图谱开始</b><span data-en="After that, moving the pointer is the audition — no need to hold">之后移动鼠标就是试听，不用按住</span><span id="curtainNote"></span></div></div>
       <div id="info" class="mono">
         <div id="info-title">—</div>
         <div id="info-body"></div>
@@ -30,20 +30,20 @@
         <button id="drawer" class="chip" type="button" title="收起/展开">›</button>
         <b>[SCOPE]</b>
         <span id="scope-range">—</span>
-        <span id="scope-source">静音</span>
+        <span id="scope-source" data-en="silent">静音</span>
       </div>
-      <div class="scope-cell" data-info="频谱窗格|显示你此刻听到的声音。三格显示什么在设置里改。"><span class="scope-tag">SPECTROGRAM</span><canvas id="scope-spectrogram"></canvas></div>
+      <div class="scope-cell" data-info="频谱窗格|显示你此刻听到的声音。三格显示什么在设置里改。" data-info-en="SCOPE|What you are hearing, right now. Which view sits in each pane is a setting."><span class="scope-tag">SPECTROGRAM</span><canvas id="scope-spectrogram"></canvas></div>
       <div class="scope-cell"><span class="scope-tag">WATERFALL</span><canvas id="scope-ridge"></canvas></div>
       <div class="scope-cell"><span class="scope-tag">LOUDNESS</span><canvas id="scope-loudness"></canvas></div>
     </div>
   </div>
 
   <footer id="rail">
-    <label class="knob" data-info="和弦进行|按度数写的进行，音高滑杆是调式主音。有轨迹时和弦会沿轨迹逐个落点。">进行<select id="progression"></select></label>
-    <button id="play" class="chip" type="button" data-info="弹|渲染并播放选中的进行。每个和弦是三个独立声部叠加——模型是单声部的。">▶ 弹</button>
-    <button id="loop" class="chip" type="button" aria-pressed="false" data-info="循环|把进行接成无缝循环，可以在它上面继续漫游。">○ 循环</button>
-    <button id="stop" class="chip" type="button" data-info="停止|停下所有声音：实时声部、循环、片段、录制。">■ 停止</button>
-    <button id="draw" class="chip" type="button" aria-pressed="false" data-info="画轨迹|在图谱上拖一条线，音色沿着它往返。周期在设置里。">○ 画轨迹</button>
+    <label class="knob" data-info="和弦进行|按度数写的进行，音高滑杆是调式主音。有轨迹时和弦会沿轨迹逐个落点。" data-info-en="PROGRESSION|Written in scale degrees; the pitch slider is the tonic. With a path drawn, each chord lands further along it." data-en="prog">进行<select id="progression"></select></label>
+    <button id="play" class="chip" type="button" data-info="弹|渲染并播放选中的进行。每个和弦是三个独立声部叠加——模型是单声部的。" data-info-en="PLAY|Render and play the selected progression. Each chord is three separate voices summed — the model is monophonic." data-en="▶ PLAY">▶ 弹</button>
+    <button id="loop" class="chip" type="button" aria-pressed="false" data-info="循环|把进行接成无缝循环，可以在它上面继续漫游。" data-info-en="LOOP|Splice the progression into a seamless loop. You can keep roaming over it." data-en="○ LOOP">○ 循环</button>
+    <button id="stop" class="chip" type="button" data-info="停止|停下所有声音：实时声部、循环、片段、录制。" data-info-en="STOP|Everything: the live voice, the loop, clips, recording." data-en="■ STOP">■ 停止</button>
+    <button id="draw" class="chip" type="button" aria-pressed="false" data-info="画轨迹|在图谱上拖一条线，音色沿着它往返。周期在设置里。" data-info-en="DRAW PATH|Drag a line across the atlas and the timbre walks it, there and back. Lap time is a setting." data-en="○ DRAW">○ 画轨迹</button>
     <span id="work" class="mono"></span>
     <div id="takes" class="takes"></div>
     <audio id="player" preload="none"></audio>
@@ -51,55 +51,63 @@
 
   <aside id="panel" hidden>
     <section>
-      <h3>演奏</h3>
-      <label data-info="音高|实时声部的 MIDI 音高，也是和弦进行的调式主音。训练音域 36–71。">音高<input id="note" type="range" min="36" max="71" step="1" value="50"><output id="noteOut">50 · D3</output></label>
-      <label data-info="力度|只作输出增益。训练数据里 velocity 固定为 127，模型没有学过力度。">力度<input id="level" type="range" min="0" max="1" step="0.01" value="0.8"><output id="levelOut">0.80</output></label>
-      <label data-info="渐变|从当前音色走到新音色要花多久。感知延迟约等于缓冲加这个值。">渐变<input id="morph" type="range" min="0.5" max="5" step="0.1" value="0.6"><output id="morphOut">0.6 s</output></label>
-      <label data-info="周期|画出的轨迹走完单程要多久。">周期<input id="lap" type="range" min="2" max="60" step="0.5" value="10"><output id="lapOut">10.0 s</output></label>
-      <button id="hold" class="chip" type="button" aria-pressed="false" data-info="常亮|开着的话实时声部一直响，不随鼠标离开图谱而收声，方便对比音色。">○ 常亮</button>
-      <label data-info="种子|Flow 采样的随机种子。同种子同坐标必定复现同一段音频。">种子<input id="seed" type="number" value="20260822" step="1"></label>
+      <h3 data-en="LANGUAGE">语言</h3>
+      <label data-info="语言|界面语言，选择会记住。" data-info-en="LANGUAGE|Interface language. Your choice is remembered."
+        data-en="language">语言<select id="lang">
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+      </select></label>
     </section>
     <section>
-      <h3>频谱窗格</h3>
-      <label data-info="上格|右侧三格从上到下分别显示什么。">上格<select id="slot0" class="slot"></select></label>
-      <label data-info="中格|右侧三格从上到下分别显示什么。">中格<select id="slot1" class="slot"></select></label>
-      <label data-info="下格|右侧三格从上到下分别显示什么。">下格<select id="slot2" class="slot"></select></label>
-      <p class="muted">实测这批 pad 的能量几乎都在 1.3 kHz 以下，所以频率轴封顶 4 kHz；表头会同时标出实际流的上限。</p>
+      <h3 data-en="PERFORMANCE">演奏</h3>
+      <label data-info="音高|实时声部的 MIDI 音高，也是和弦进行的调式主音。训练音域 36–71。" data-info-en="PITCH|MIDI pitch of the live voice, and the tonic of any progression. Trained range is 36–71." data-en="pitch">音高<input id="note" type="range" min="36" max="71" step="1" value="50"><output id="noteOut">50 · D3</output></label>
+      <label data-info="力度|只作输出增益。训练数据里 velocity 固定为 127，模型没有学过力度。" data-info-en="LEVEL|Output gain only. Velocity was fixed at 127 throughout training, so the model never learned it." data-en="level">力度<input id="level" type="range" min="0" max="1" step="0.01" value="0.8"><output id="levelOut">0.80</output></label>
+      <label data-info="渐变|从当前音色走到新音色要花多久。感知延迟约等于缓冲加这个值。" data-info-en="MORPH|How long it takes to cross to a new timbre. Perceived latency is roughly buffer plus this." data-en="morph">渐变<input id="morph" type="range" min="0.5" max="5" step="0.1" value="0.6"><output id="morphOut">0.6 s</output></label>
+      <label data-info="周期|画出的轨迹走完单程要多久。" data-info-en="LAP|How long one pass along the drawn path takes." data-en="lap">周期<input id="lap" type="range" min="2" max="60" step="0.5" value="10"><output id="lapOut">10.0 s</output></label>
+      <button id="hold" class="chip" type="button" aria-pressed="false" data-info="常亮|开着的话实时声部一直响，不随鼠标离开图谱而收声，方便对比音色。" data-info-en="HOLD|Keeps the live voice sounding when the pointer leaves the atlas. Useful for comparing timbres." data-en="○ HOLD">○ 常亮</button>
+      <label data-info="种子|Flow 采样的随机种子。同种子同坐标必定复现同一段音频。" data-info-en="SEED|Random seed for the flow sampler. Same seed and coordinate always reproduce the same audio." data-en="seed">种子<input id="seed" type="number" value="20260822" step="1"></label>
     </section>
     <section>
-      <h3>多段压缩</h3>
-      <button id="comp" class="chip" type="button" aria-pressed="true" data-info="多段压缩|三段 LR4 分频各自压缩。响度一致性是模型没过的门禁之一，这是听感补偿，不是模型达标。">● 压缩</button>
+      <h3 data-en="SCOPE PANES">频谱窗格</h3>
+      <label data-info="上格|右侧三格从上到下分别显示什么。" data-info-en="TOP PANE|What each of the three panes shows, top to bottom." data-en="top">上格<select id="slot0" class="slot"></select></label>
+      <label data-info="中格|右侧三格从上到下分别显示什么。" data-info-en="MIDDLE PANE|What each of the three panes shows, top to bottom." data-en="middle">中格<select id="slot1" class="slot"></select></label>
+      <label data-info="下格|右侧三格从上到下分别显示什么。" data-info-en="BOTTOM PANE|What each of the three panes shows, top to bottom." data-en="bottom">下格<select id="slot2" class="slot"></select></label>
+      <p class="muted" data-en="Measured: these pads put nearly all their energy below 1.3 kHz, so the frequency axis stops at 4 kHz. The header also states the stream's own ceiling.">实测这批 pad 的能量几乎都在 1.3 kHz 以下，所以频率轴封顶 4 kHz；表头会同时标出实际流的上限。</p>
+    </section>
+    <section>
+      <h3 data-en="MULTIBAND">多段压缩</h3>
+      <button id="comp" class="chip" type="button" aria-pressed="true" data-info="多段压缩|三段 LR4 分频各自压缩。响度一致性是模型没过的门禁之一，这是听感补偿，不是模型达标。" data-info-en="MULTIBAND|Three LR4 bands, each compressed. Loudness consistency is one of the gates the model does not pass; this compensates for the ear, it does not fix the model." data-en="● COMP">● 压缩</button>
       <span id="compMeter" class="mono">GR —</span>
-      <label data-info="压缩量|同时推高压缩器前的增益并加大压缩比。模型输出很轻，不推上去压缩器够不着。">压缩量<input id="compAmount" type="range" min="0" max="1" step="0.01" value="0.3"><output id="compOut">0.30</output></label>
-      <label data-info="低/中分频|低频段与中频段的分界。">低/中<input id="crossLow" type="range" min="80" max="600" step="10" value="220"><output id="crossLowOut">220 Hz</output></label>
-      <label data-info="中/高分频|中频段与高频段的分界。">中/高<input id="crossHigh" type="range" min="1200" max="6000" step="100" value="2600"><output id="crossHighOut">2600 Hz</output></label>
-      <label data-info="输出|压缩之后的总增益。链路末端还有一道砖墙限幅。">输出<input id="makeup" type="range" min="-18" max="12" step="0.5" value="0"><output id="makeupOut">0.0 dB</output></label>
+      <label data-info="压缩量|同时推高压缩器前的增益并加大压缩比。模型输出很轻，不推上去压缩器够不着。" data-info-en="AMOUNT|Raises pre-compressor gain and ratio together. The model's output is quiet enough that the compressor cannot otherwise reach it." data-en="amount">压缩量<input id="compAmount" type="range" min="0" max="1" step="0.01" value="0.3"><output id="compOut">0.30</output></label>
+      <label data-info="低/中分频|低频段与中频段的分界。" data-info-en="LOW/MID|Where the low band ends and the mid begins." data-en="low/mid">低/中<input id="crossLow" type="range" min="80" max="600" step="10" value="220"><output id="crossLowOut">220 Hz</output></label>
+      <label data-info="中/高分频|中频段与高频段的分界。" data-info-en="MID/HIGH|Where the mid band ends and the high begins." data-en="mid/high">中/高<input id="crossHigh" type="range" min="1200" max="6000" step="100" value="2600"><output id="crossHighOut">2600 Hz</output></label>
+      <label data-info="输出|压缩之后的总增益。链路末端还有一道砖墙限幅。" data-info-en="OUTPUT|Makeup gain after compression. A brickwall limiter still sits at the end of the chain." data-en="output">输出<input id="makeup" type="range" min="-18" max="12" step="0.5" value="0"><output id="makeupOut">0.0 dB</output></label>
       <p class="mono muted" id="bands">—</p>
     </section>
     <section>
-      <h3>试听方式</h3>
-      <label data-info="试听方式|预取：每个 preset 先渲染好缓存，悬停零延迟但离散。实时流：连续漫游，吃链路带宽。">方式<select id="mode">
-        <option value="cached">预取（跟手）</option>
-        <option value="live">实时流</option>
+      <h3 data-en="AUDITION">试听方式</h3>
+      <label data-info="试听方式|预取：每个 preset 先渲染好缓存，悬停零延迟但离散。实时流：连续漫游，吃链路带宽。" data-info-en="AUDITION|Prefetch: every preset rendered up front, so hovering is instant but discrete. Live stream: continuous roaming, at the cost of bandwidth." data-en="mode">方式<select id="mode">
+        <option value="cached" data-en="prefetch (instant)">预取（跟手）</option>
+        <option value="live" data-en="live stream">实时流</option>
       </select></label>
-      <label data-info="音质|实时流的线路格式。窄链路降档位，局域网可以升上去。">音质<select id="profile"></select></label>
-      <label data-info="缓冲|缓冲就是延迟，也是抗抖动的余量。本机 0.3 s 足够，远程要 1.4 s 才不断。">缓冲<input id="buffer" type="range" min="0.2" max="4" step="0.1" value="0.6"><output id="bufferOut">0.6 s</output></label>
+      <label data-info="音质|实时流的线路格式。窄链路降档位，局域网可以升上去。" data-info-en="WIRE|Stream format. Step down on a narrow link, step up on a LAN." data-en="wire">音质<select id="profile"></select></label>
+      <label data-info="缓冲|缓冲就是延迟，也是抗抖动的余量。本机 0.3 s 足够，远程要 1.4 s 才不断。" data-info-en="BUFFER|Buffer is latency, and also the margin against jitter. 0.3 s is enough locally; remote needs 1.4 s to stay unbroken." data-en="buffer">缓冲<input id="buffer" type="range" min="0.2" max="4" step="0.1" value="0.6"><output id="bufferOut">0.6 s</output></label>
       <p class="mono muted" id="wire">—</p>
     </section>
     <section>
-      <h3>导出</h3>
-      <button id="rec" class="chip" type="button" aria-pressed="false" data-info="录制|把你正在听到的（经过压缩之后的）录成一段，可回放。">○ 录制</button>
-      <button id="render" class="chip" type="button" data-info="渲染|在当前坐标上以全速率离线渲染一段，比实时流带宽更完整。">渲染</button>
+      <h3 data-en="EXPORT">导出</h3>
+      <button id="rec" class="chip" type="button" aria-pressed="false" data-info="录制|把你正在听到的（经过压缩之后的）录成一段，可回放。" data-info-en="RECORD|Capture what you are hearing, compression included, as a take you can replay." data-en="○ REC">○ 录制</button>
+      <button id="render" class="chip" type="button" data-info="渲染|在当前坐标上以全速率离线渲染一段，比实时流带宽更完整。" data-info-en="RENDER|Render a take offline at full rate from the current coordinate — more complete than the stream's bandwidth allows." data-en="RENDER">渲染</button>
     </section>
     <section>
-      <h3>8 维坐标</h3>
+      <h3 data-en="8-D COORDINATE">8 维坐标</h3>
       <div id="axes" class="axes"></div>
-      <p class="muted">鼠标控制 PC1/PC2，其余六维在此微调。所有坐标都会先投影到合法局部凸包。</p>
+      <p class="muted" data-en="The pointer drives PC1/PC2; the other six are trimmed here. Every coordinate is projected onto the legal local hull first.">鼠标控制 PC1/PC2，其余六维在此微调。所有坐标都会先投影到合法局部凸包。</p>
     </section>
     <section>
-      <h3>这是什么</h3>
-      <p class="muted">连线是 8 维空间里的 k=3 最近邻图，粗略说就是「谁挨着谁」——按 8 维距离算，不是按画面距离。越近的边越亮。PC1/PC2 只装得下 42.3% 和 19.8% 的方差，所以一条边平均只有 36% 的真实长度画得出来；<b>虚线</b>是最差的那四分之一（不到 25%）：图上挨着，实际上差得远，听感上的跳变多半就在这些地方。</p>
-      <p class="muted">图谱读法：细空心圈＝你指的位置，十字＝正在响的音色（追着你走），双圈＝它最近的 preset，它的近邻连线会一起点亮。带圈的三个是 held-out——模型训练时没见过，听到的完全是生成的。</p>
+      <h3 data-en="WHAT IS THIS">这是什么</h3>
+      <p class="muted" data-en="The lines are a k=3 nearest-neighbour graph over the atlas — who is next to whom — measured in the full 8-D space, not in screen distance. Closer pairs are brighter. PC1 and PC2 hold only 42.3% and 19.8% of the variance, so an edge keeps a median 36% of its true length once drawn; dashed marks the worst quarter (under 25%): adjacent on screen, far apart in fact. That is usually where roaming jumps.">连线是 8 维空间里的 k=3 最近邻图，粗略说就是「谁挨着谁」——按 8 维距离算，不是按画面距离。越近的边越亮。PC1/PC2 只装得下 42.3% 和 19.8% 的方差，所以一条边平均只有 36% 的真实长度画得出来；虚线是最差的那四分之一（不到 25%）：图上挨着，实际上差得远，听感上的跳变多半就在这些地方。</p>
+      <p class="muted" data-en="Reading the map: the thin ring is where you are pointing; the crosshair is the timbre actually sounding, chasing it; the double ring is that timbre's nearest preset, whose own edges light up with it. The three ringed cells are held out — the model never saw them, so what you hear there is entirely generated.">图谱读法：细空心圈＝你指的位置，十字＝正在响的音色（追着你走），双圈＝它最近的 preset，它的近邻连线会一起点亮。带圈的三个是 held-out——模型训练时没见过，听到的完全是生成的。</p>
       <p class="muted">Pad 单声部研究原型。每个细胞是一个 preset 的 128D 音色锚点，经 8 维 PCA 投影；鼠标位置就是坐标，Flow 预测轨迹、解码器注入 MIDI 音高。带圈的细胞是 held-out test preset，点开可比较四种模式。</p>
       <p class="muted" id="gates"></p>
       <p class="muted" id="limits"></p>

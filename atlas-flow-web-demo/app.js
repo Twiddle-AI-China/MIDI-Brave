@@ -43,19 +43,159 @@ const staticLayer = {canvas: document.createElement('canvas'), ready: false};
 let takes = [];
 
 const live = {
-  socket: null, seq: 0, connected: false, lifecycle: '离线', planMs: 0,
+  socket: null, seq: 0, connected: false, lifecycle: 'offline', planMs: 0,
   bytes: 0, since: 0, rate: 0, buffered: 0, underruns: 0, seenUnderruns: 0,
   timer: 0, audible: null, chain: null, fileChain: null, context: null,
   fileContext: null, player: null,
   // Voice state is shown through a slow gate: telemetry arrives every ~370 ms
   // and the raw label flickers between held_sustain and release as the pointer
   // moves, which reads as a fault rather than as information.
-  shown: '离线', pending: '离线', gate: 0,
+  shown: 'offline', pending: 'offline', gate: 0,
   // Telemetry arrives a few times a second; the marker is eased toward it every
   // animation frame so the voice glides instead of stepping.
   shownAudible: null, motion: 0, loop: null,
   offTimer: 0, inside: false, recorder: null, chunks: [],
 };
+
+/* ---------- language ---------- */
+
+/**
+ * Two languages, one string table.
+ *
+ * Static page text carries its English in a `data-en` attribute and its
+ * Chinese in the markup, so the DOM is its own dictionary and only the strings
+ * the script builds at runtime need a key here. Nothing in this table is ever
+ * compared against: state is ASCII keys everywhere, and this turns keys into
+ * words only at the moment of drawing them.
+ */
+const STRINGS = {
+  'scope.silent':       ['静音', 'silent'],
+  'scope.live':         ['实时', 'live'],
+  'scope.clip':         ['渲染片段', 'clip'],
+  'scope.preview':      ['预取片段', 'preview'],
+  'scope.loop':         ['循环', 'loop'],
+  'state.offline':      ['离线', 'offline'],
+  'state.connecting':   ['连接中', 'connecting'],
+  'state.cached':       ['预取模式', 'cached'],
+  'state.stopped':      ['已停止', 'stopped'],
+  'state.disconnected': ['未连接', 'not connected'],
+  'state.taken_over':   ['已被另一个标签页接管', 'taken over by another tab'],
+  'meta.plan':          ['规划', 'plan'],
+  'meta.buffer':        ['缓冲', 'buffer'],
+  'meta.underrun':      ['欠载', 'underrun'],
+  'meta.dropped':       ['弃流', 'dropped'],
+  'voice.loner':        ['（单点）', ' (isolated)'],
+  'voice.sounding':     ['正在响', 'sounding'],
+  'voice.resting':      ['刚才响的', 'last sounded'],
+  'voice.component':    ['连通域', 'component'],
+  'view.spectrogram':   ['频谱图 SPECTROGRAM', 'SPECTROGRAM'],
+  'view.ridge':         ['瀑布 WATERFALL', 'WATERFALL'],
+  'view.loudness':      ['响度 LOUDNESS', 'LOUDNESS'],
+  'view.spectrum':      ['频谱 SPECTRUM', 'SPECTRUM'],
+  'view.wave':          ['波形 OSCILLOSCOPE', 'OSCILLOSCOPE'],
+  'scope.stream':       ['流', 'stream'],
+  'level.peak':         ['峰值', 'peak'],
+  'level.squeeze':      ['压缩', 'comp'],
+  'level.limit':        ['限幅', 'limit'],
+  'band.low':           ['低', 'low'],
+  'band.mid':           ['中', 'mid'],
+  'band.high':          ['高', 'high'],
+  'wire.ceiling':       ['上限', 'ceiling'],
+  'work.rendering':     ['渲染中…', 'rendering...'],
+  'work.renderFailed':  ['渲染失败', 'render failed'],
+  'work.freeCoord':     ['自由坐标', 'free coordinate'],
+  'work.noRecorder':    ['这个浏览器不支持录制', 'this browser cannot record'],
+  'work.recording':     ['录制中…', 'recording...'],
+  'work.recorded':      ['录了', 'recorded'],
+  'work.recordChip':    ['○ 录制', '○ REC'],
+  'work.recordingChip': ['● 录制中', '● RECORDING'],
+  'work.recordTake':    ['录音', 'recording'],
+  'work.chainFailed':   ['播放链路失败', 'audio chain failed'],
+  'work.blocked':       ['浏览器拦截了播放，点一下页面再试', 'the browser blocked playback, click the page and retry'],
+  'work.suspended':     ['音频上下文被挂起，点一下页面恢复', 'audio context suspended, click the page to resume'],
+  'work.playFailed':    ['播放失败', 'playback failed'],
+  'work.prefetchFail':  ['预取失败', 'prefetch failed'],
+  'work.prefetch':      ['预取', 'prefetching'],
+  'work.prefetchDone':  ['预取就绪', 'prefetched'],
+  'work.prefetchHint':  ['个 · 悬停即响', ' presets · hover to hear'],
+  'work.fetching':      ['取', 'fetching'],
+  'work.jsError':       ['JS 错误', 'JS error'],
+  'work.unhandled':     ['未处理错误', 'unhandled error'],
+  'take.recorded':      ['录制', 'recording'],
+  'take.rendered':      ['全速率渲染', 'full-rate render'],
+  'path.points':        ['点', 'points'],
+  'path.oneWay':        ['s 单程', 's one way'],
+  'path.hint':          ['在图谱上拖一条线，松手后音色沿着它往返',
+                         'drag a line across the atlas; the timbre walks it and back'],
+  'loop.running':       ['循环中', 'looping'],
+  'loop.perLap':        ['s/圈 · 停止或再按循环可结束', 's/lap · stop, or press loop again, to end'],
+  'prog.voices':        ['声部', 'voices'],
+  'prog.cached':        ['缓存', 'cached'],
+  'prog.onPath':        ['沿轨迹', 'along the path'],
+  'prog.at':            ['于', 'in'],
+  'prog.canon':         ['卡农 15634125', 'Canon 15634125'],
+  'prog.label':         ['进行', 'progression'],
+  'curtain.local':      ['本机运行', 'running locally'],
+  'curtain.localTail':  ['：连续漫游，缓冲', ': continuous roaming, buffer'],
+  'curtain.remote':     ['预取模式：先把 50 个 preset 渲染好缓存，之后悬停零延迟',
+                         'prefetch mode: all 50 presets are rendered up front, then hovering is instant'],
+  'gates.auto':         ['自动门禁', 'automatic gates'],
+  'prog.progName':      ['进行', 'progression'],
+  'work.pathShort':     ['轨迹太短，再画一条', 'that path is too short, draw another'],
+  'drawer.open':        ['展开频谱', 'open the scope'],
+  'drawer.shut':        ['收起频谱', 'collapse the scope'],
+  'boot.failed':        ['启动失败', 'failed to start'],
+};
+
+const languages = ['zh', 'en'];
+let language = localStorage.getItem('atlas.lang') === 'en' ? 'en' : 'zh';
+
+const t = key => (STRINGS[key] || [key, key])[language === 'en' ? 1 : 0];
+
+/** Most progressions are digits and need no translation; one is not. */
+const progName = item => (item.key ? t(item.key) : item.name);
+
+/**
+ * Swap every translatable string on the page.
+ *
+ * The Chinese in the markup is the original; the English lives beside it in
+ * `data-en` (and `data-info-en` for the hover explanations). Each element's
+ * Chinese is captured once on first use, so this can be toggled any number of
+ * times without the two languages contaminating each other.
+ */
+function applyLanguage() {
+  document.documentElement.lang = language === 'en' ? 'en' : 'zh-CN';
+  localStorage.setItem('atlas.lang', language);
+  for (const node of document.querySelectorAll('[data-en]')) {
+    // A <label> wraps the control it names, so writing textContent would
+    // delete the slider or select inside it. Only the element's own leading
+    // text may be swapped.
+    const own = [...node.childNodes]
+      .find(item => item.nodeType === Node.TEXT_NODE && item.textContent.trim());
+    const target = node.children.length && own ? own : node;
+    if (node.dataset.zh === undefined) node.dataset.zh = target.textContent;
+    target.textContent = language === 'en' ? node.dataset.en : node.dataset.zh;
+  }
+  for (const node of document.querySelectorAll('[data-info-en]')) {
+    if (node.dataset.infoZh === undefined) node.dataset.infoZh = node.dataset.info;
+    node.dataset.info = language === 'en' ? node.dataset.infoEn : node.dataset.infoZh;
+  }
+  // Anything the script drew itself has to be drawn again.
+  if (scope.views.length) buildSlots(true);
+  if (cells.length) {
+    // The picker holds one translated name among the digits, so it has to be
+    // relabelled too -- keeping the selection, which is the whole point.
+    const chosen = $('#progression').value;
+    buildProgressionPicker();
+    if (chosen) $('#progression').value = chosen;
+  }
+  renderScopeSource();
+  showGates();
+  syncAxes();
+  updateStatus();
+  updateVoice();
+  drawMap();
+}
 
 /* ---------- map ---------- */
 
@@ -488,7 +628,7 @@ function applyCompressor(chain) {
 }
 
 function activeChain() {
-  return scope.source === '实时' ? live.chain : live.fileChain;
+  return scope.source === 'live' ? live.chain : live.fileChain;
 }
 
 /* ---------- scope: several views of the same analyser ---------- */
@@ -502,7 +642,8 @@ function activeChain() {
  */
 const scope = {
   analyser: null,
-  source: '静音',
+  source: 'silent',
+  detail: '',
   running: false,
   freq: null,
   time: null,
@@ -521,11 +662,11 @@ const mel = frequency => 2595 * Math.log10(1 + frequency / 700);
 const melInverse = value => 700 * (10 ** (value / 2595) - 1);
 
 const SCOPE_VIEWS = [
-  {key: 'spectrogram', label: '频谱图 SPECTROGRAM', draw: () => viewSpectrogram},
-  {key: 'ridge', label: '瀑布 WATERFALL', draw: () => viewRidge},
-  {key: 'loudness', label: '响度 LOUDNESS', draw: () => viewLoudness},
-  {key: 'spectrum', label: '频谱 SPECTRUM', draw: () => viewSpectrum},
-  {key: 'wave', label: '波形 OSCILLOSCOPE', draw: () => viewWave},
+  {key: 'spectrogram', draw: () => viewSpectrogram},
+  {key: 'ridge', draw: () => viewRidge},
+  {key: 'loudness', draw: () => viewLoudness},
+  {key: 'spectrum', draw: () => viewSpectrum},
+  {key: 'wave', draw: () => viewWave},
 ];
 const DEFAULT_SLOTS = ['spectrogram', 'ridge', 'loudness'];
 
@@ -533,7 +674,8 @@ function makeView(slot, key) {
   const canvas = $(`#scope-${slot}`);
   const entry = SCOPE_VIEWS.find(item => item.key === key) || SCOPE_VIEWS[0];
   const tag = canvas.parentElement.querySelector('.scope-tag');
-  if (tag) tag.textContent = entry.label.split(' ').at(-1);
+  // The tag is the ASCII half of the label in either language.
+  if (tag) tag.textContent = t(`view.${entry.key}`).split(' ').at(-1);
   return {
     slot, key: entry.key, draw: entry.draw(), canvas,
     strip: document.createElement('canvas'),
@@ -578,11 +720,20 @@ function melRows(view, analyser, rate) {
   });
 }
 
-function useAnalyser(analyser, label) {
+/** Redraw the scope's source label in the current language. */
+function renderScopeSource() {
+  const named = scope.detail
+    ? `${scope.detail}${scope.source === 'loop' ? ' \u21bb' : ''}`
+    : t(`scope.${scope.source}`);
+  $('#scope-source').textContent = named;
+}
+
+function useAnalyser(analyser, source, detail = '') {
   scope.analyser = analyser;
-  scope.source = label;
+  scope.source = source;
+  scope.detail = detail || '';
   for (const view of scope.views) view.rows = null;
-  $('#scope-source').textContent = label;
+  renderScopeSource();
   if (!scope.running) {
     scope.running = true;
     scope.last = performance.now();
@@ -603,15 +754,16 @@ function restoreScopeSource() {
   const fileBusy = (player && !player.paused && !player.ended)
     || !!live.loop || !!preview.source;
   if (fileBusy) {
-    if (live.fileChain) useAnalyser(live.fileChain.analyser, live.playLabel || '渲染片段');
+    if (live.fileChain) useAnalyser(live.fileChain.analyser, 'clip', live.playLabel);
     return;
   }
   if (live.connected && live.chain) {
-    useAnalyser(live.chain.analyser, '实时');
+    useAnalyser(live.chain.analyser, 'live');
   } else {
     scope.analyser = null;
-    scope.source = '静音';
-    $('#scope-source').textContent = '静音';
+    scope.source = 'silent';
+    scope.detail = '';
+    renderScopeSource();
   }
 }
 
@@ -631,7 +783,7 @@ function scopeFrame(now) {
   analyser.getByteFrequencyData(scope.freq);
   analyser.getByteTimeDomainData(scope.time);
   $('#scope-range').textContent =
-    `40Hz–${(scopeTop(rate) / 1000).toFixed(1)}kHz · 流 ${(rate / 2000).toFixed(1)}kHz`;
+    `40Hz–${(scopeTop(rate) / 1000).toFixed(1)}kHz · ${t('scope.stream')} ${(rate / 2000).toFixed(1)}kHz`;
 
   for (const view of scope.views) {
     if (!view.width || view.canvas.clientWidth < 2) continue;
@@ -841,8 +993,8 @@ function viewLoudness(context, view, {elapsed}) {
   if (latest) {
     context.textAlign = 'right';
     context.fillStyle = INK;
-    context.fillText(`RMS ${latest.rms.toFixed(1)}  峰值 ${latest.peak.toFixed(1)} dB`
-      + `  压缩 ${latest.reduction.toFixed(1)}`, view.width - 6, 12);
+    context.fillText(`RMS ${latest.rms.toFixed(1)}  ${t('level.peak')} ${latest.peak.toFixed(1)} dB`
+      + `  ${t('level.squeeze')} ${latest.reduction.toFixed(1)}`, view.width - 6, 12);
   }
 }
 
@@ -888,9 +1040,10 @@ function updateCompressorMeter() {
   const limited = chain.limiter ? chain.limiter.reduction : 0;
   $('#compMeter').textContent =
     `GR ${reductions.map(value => value.toFixed(0).padStart(3)).join('/')}`
-    + (limited < -0.5 ? ` 限幅${limited.toFixed(0)}` : '');
+    + (limited < -0.5 ? ` ${t('level.limit')}${limited.toFixed(0)}` : '');
   $('#bands').textContent =
-    `低 ${reductions[0].toFixed(1)} dB　中 ${reductions[1].toFixed(1)} dB　高 ${reductions[2].toFixed(1)} dB`;
+    `${t('band.low')} ${reductions[0].toFixed(1)} dB　${t('band.mid')} ${reductions[1].toFixed(1)} dB`
+    + `　${t('band.high')} ${reductions[2].toFixed(1)} dB`;
 }
 
 /* ---------- control ---------- */
@@ -1058,15 +1211,16 @@ function nudgeVoice() {
 function updateStatus() {
   const parts = [];
   if (live.connected) {
-    parts.push(`规划 ${live.planMs.toFixed(0)}ms`);
+    parts.push(`${t('meta.plan')} ${live.planMs.toFixed(0)}ms`);
     if (live.rate) parts.push(`${live.rate.toFixed(0)}kbit/s`);
-    parts.push(`缓冲 ${live.buffered.toFixed(1)}s`);
-    if (live.underruns) parts.push(`欠载 ${live.underruns}`);
-    if (live.dropped) parts.push(`弃流 ${live.dropped}`);
+    parts.push(`${t('meta.buffer')} ${live.buffered.toFixed(1)}s`);
+    if (live.underruns) parts.push(`${t('meta.underrun')} ${live.underruns}`);
+    if (live.dropped) parts.push(`${t('meta.dropped')} ${live.dropped}`);
   }
   parts.push(`PC1 ${coordinate ? coordinate[0].toFixed(2) : '—'}`);
   parts.push(`PC2 ${coordinate ? coordinate[1].toFixed(2) : '—'}`);
-  info.title = `[${live.connected ? 'LIVE' : 'IDLE'}] ${live.shown}`;
+  const label = STRINGS[`state.${live.shown}`] ? t(`state.${live.shown}`) : live.shown;
+  info.title = `[${live.connected ? 'LIVE' : 'IDLE'}] ${label}`;
   info.meta = parts.join('  ·  ');
   renderInfo();
 }
@@ -1086,10 +1240,10 @@ function updateVoice() {
   }
   const resting = audioMode() === 'cached'
     ? !preview.source
-    : ['idle', 'release', '离线'].includes(live.shown);
+    : ['idle', 'release', 'offline', 'stopped'].includes(live.shown);
   info.body = sounding
-    ? `${sounding.label}${sounding.loner ? '（单点）' : ''} ${resting ? '刚才响的' : '正在响'}`
-      + `　连通域 ${sounding.component}`
+    ? `${sounding.label}${sounding.loner ? t('voice.loner') : ''} `
+      + `${resting ? t('voice.resting') : t('voice.sounding')}　${t('voice.component')} ${sounding.component}`
     : '';
   renderInfo();
 }
@@ -1127,9 +1281,9 @@ async function connect() {
   live.seq = 0;
   live.bytes = 0;
   live.since = performance.now();
-  gateState('连接中'); live.shown = '连接中';
+  gateState('connecting'); live.shown = 'connecting';
   updateStatus();
-  useAnalyser(live.chain.analyser, '实时');
+  useAnalyser(live.chain.analyser, 'live');
 
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   live.socket = new WebSocket(`${scheme}//${location.host}/live/runtime`);
@@ -1172,7 +1326,7 @@ async function connect() {
       });
       $('#wire').textContent =
         `[WIRE] ${value.sampleRate / 1000}kHz ${value.channels === 1 ? 'mono' : 'stereo'} `
-        + `${value.format} · 上限 ${value.kbitPerSecond} kbit/s`;
+        + `${value.format} · ${t('wire.ceiling')} ${value.kbitPerSecond} kbit/s`;
     }
     if (value.type === 'telemetry') {
       live.lifecycle = value.lifecycle;
@@ -1184,7 +1338,7 @@ async function connect() {
       // agree with the crosshair or it tells you the wrong preset.
       nudgeVoice();
       updateStatus();
-      if (scope.source !== '实时') restoreScopeSource();
+      if (scope.source !== 'live') restoreScopeSource();
     }
     if (value.type === 'error') {
       live.lifecycle = value.message;
@@ -1196,10 +1350,10 @@ async function connect() {
     live.connected = false;
     live.audible = null;
     live.shownAudible = null;
-    live.lifecycle = event.code === 1001 ? '已被另一个标签页接管' : '离线';
+    live.lifecycle = event.code === 1001 ? 'taken_over' : 'offline';
     // Closing the socket on purpose when switching to cached mode is not an
     // outage, so it must not report one.
-    live.shown = audioMode() === 'cached' ? '预取模式' : live.lifecycle;
+    live.shown = audioMode() === 'cached' ? 'cached' : live.lifecycle;
     sounding = null;
     updateStatus();
     updateVoice();
@@ -1215,7 +1369,7 @@ async function startAudio() {
   await filePlayback().catch(() => null);
   await live.fileContext?.resume().catch(() => {});
   applyCompressor(live.fileChain);
-  live.shown = '预取模式';
+  live.shown = 'cached';
   updateStatus();
   warmPreviews();
 }
@@ -1239,7 +1393,7 @@ function retrigger() {
 async function renderCurrent() {
   const button = $('#render');
   button.disabled = true;
-  setWork('渲染中…');
+  setWork(t('work.rendering'));
   if ($('#hold').getAttribute('aria-pressed') !== 'true') live.lifecycle = 'release';
   await primeAudio();          // while the click still counts as a gesture
   try {
@@ -1258,10 +1412,10 @@ async function renderCurrent() {
       }),
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `渲染失败 ${response.status}`);
-    addTake(payload, sounding ? sounding.label : '自由坐标');
+    if (!response.ok) throw new Error(payload.error || `${t('work.renderFailed')} ${response.status}`);
+    addTake(payload, sounding ? sounding.label : t('work.freeCoord'));
     setWork(`${payload.seconds.toFixed(1)}s · ${(payload.bytes / 1024).toFixed(0)}KB`);
-    play(pickAudio(payload), '渲染片段');
+    play(pickAudio(payload), t('scope.clip'));
   } catch (error) {
     setWork(String(error.message || error));
   } finally {
@@ -1279,11 +1433,12 @@ function addTake(payload, label) {
     button.className = 'chip';
     button.textContent = `${take.label} ${take.seconds.toFixed(1)}s`;
     button.title = take.recorded
-      ? `录制 · ${(take.bytes / 1024).toFixed(0)} KB`
-      : `全速率渲染 · ${(take.bytes / 1024).toFixed(0)} KB · 峰值 ${take.peakDbfs} dBFS · GPU ${(take.renderMs / 1000).toFixed(1)} s`;
+      ? `${t('take.recorded')} · ${(take.bytes / 1024).toFixed(0)} KB`
+      : `${t('take.rendered')} · ${(take.bytes / 1024).toFixed(0)} KB · ${t('level.peak')} ${take.peakDbfs} dBFS`
+        + ` · GPU ${(take.renderMs / 1000).toFixed(1)} s`;
     button.addEventListener('click', () => {
       const url = take.recorded ? take.url : pickAudio(take);
-      const label = take.recorded ? '录音' : take.label;
+      const label = take.recorded ? t('work.recordTake') : take.label;
       if (looping() && !take.recorded) playLooping(url, label, take.take?.release ?? 2.4);
       else play(url, label);
     });
@@ -1299,7 +1454,7 @@ function toggleRecording() {
     return;
   }
   if (!live.chain || typeof MediaRecorder === 'undefined') {
-    setWork('这个浏览器不支持录制');
+    setWork(t('work.noRecorder'));
     return;
   }
   const destination = live.chain.context.createMediaStreamDestination();
@@ -1311,22 +1466,22 @@ function toggleRecording() {
     live.chain.limiter.disconnect(destination);
     live.recorder = null;
     button.setAttribute('aria-pressed', 'false');
-    button.textContent = '○ 录制';
+    button.textContent = t('work.recordChip');
     const blob = new Blob(live.chunks, {type: recorder.mimeType});
     const url = URL.createObjectURL(blob);
     const seconds = (performance.now() - started) / 1000;
     addTake({
       id: url, url, seconds, bytes: blob.size, recorded: true,
       peakDbfs: 0, renderMs: 0,
-    }, '录音');
-    setWork(`录了 ${seconds.toFixed(1)}s`);
+    }, t('work.recordTake'));
+    setWork(`${t('work.recorded')} ${seconds.toFixed(1)}s`);
   };
   const started = performance.now();
   recorder.start();
   live.recorder = recorder;
   button.setAttribute('aria-pressed', 'true');
-  button.textContent = '● 录制中';
-  setWork('录制中…');
+  button.textContent = t('work.recordingChip');
+  setWork(t('work.recording'));
 }
 
 async function filePlayback() {
@@ -1350,17 +1505,17 @@ async function filePlayback() {
  */
 async function primeAudio() {
   const chain = await filePlayback().catch(error => {
-    setWork(`播放链路失败 ${error.name || error}`);
+    setWork(`${t('work.chainFailed')} ${error.name || error}`);
     return null;
   });
   await live.fileContext?.resume().catch(() => {});
   return chain && live.fileContext?.state === 'running';
 }
 
-async function play(url, label = '渲染片段') {
+async function play(url, label = null) {
   const player = $('#player');
   const chain = await filePlayback().catch(error => {
-    setWork(`播放链路失败 ${error.name || error}`);
+    setWork(`${t('work.chainFailed')} ${error.name || error}`);
     return null;
   });
   applyCompressor(chain);
@@ -1374,12 +1529,12 @@ async function play(url, label = '渲染片段') {
   } catch (error) {
     // NotAllowedError means the browser refused, not that the audio is broken.
     setWork(error.name === 'NotAllowedError'
-      ? '浏览器拦截了播放，点一下页面再试'
-      : `播放失败 ${error.name || error}`);
+      ? t('work.blocked')
+      : `${t('work.playFailed')} ${error.name || error}`);
     return;
   }
   if (live.fileContext && live.fileContext.state !== 'running') {
-    setWork('音频上下文被挂起，点一下页面恢复');
+    setWork(t('work.suspended'));
   }
 }
 
@@ -1436,7 +1591,7 @@ async function previewFor(cell, note) {
     preview.buffers.set(key, buffer);
     return buffer;
   } catch (error) {
-    setWork(`预取失败 ${error.message || error}`);
+    setWork(`${t('work.prefetchFail')} ${error.message || error}`);
     return null;
   } finally {
     preview.pending.delete(key);
@@ -1474,7 +1629,7 @@ function playPreview(buffer, cell = null) {
     updateVoice();
     drawMap();
   }
-  useAnalyser(chain.analyser, '预取片段');
+  useAnalyser(chain.analyser, 'preview');
 }
 
 function stopPreview(fade = 0.02) {
@@ -1504,14 +1659,14 @@ async function warmPreviews() {
       const cell = queue.shift();
       await previewFor(cell, note);
       done += 1;
-      setWork(`预取 ${done}/${cells.length}`);
+      setWork(`${t('work.prefetch')} ${done}/${cells.length}`);
     }
   });
   await Promise.all(workers);
   preview.warming = false;
   if (preview.note === note) {
-    setWork(`预取就绪 ${cells.length} 个 · 悬停即响`);
-    if (queue.length === 0) live.shown = '预取模式';
+    setWork(`${t('work.prefetchDone')} ${cells.length}${t('work.prefetchHint')}`);
+    if (queue.length === 0) live.shown = 'cached';
     updateStatus();
   } else {
     warmPreviews();
@@ -1525,7 +1680,7 @@ async function auditionCell(cell) {
     playPreview(preview.buffers.get(key), cell);
     return;
   }
-  setWork(`取 ${cell.label}…`);
+  setWork(`${t('work.fetching')} ${cell.label}…`);
   const buffer = await previewFor(cell, note);
   if (buffer && hovered === cell) playPreview(buffer, cell);
   if (buffer) setWork('');
@@ -1760,7 +1915,8 @@ function startTrajectory() {
   trajectory.sentAt = null;
   trajectory.playing = true;
   trajectory.last = performance.now();
-  setWork(`[PATH] ${trajectory.points.length} 点 · ${Number($('#lap').value).toFixed(1)}s 单程`);
+  setWork(`[PATH] ${trajectory.points.length} ${t('path.points')}`
+    + ` · ${Number($('#lap').value).toFixed(1)}${t('path.oneWay')}`);
   if (audioMode() === 'live' && !live.connected) {
     connect().catch(() => {});
   } else if (['idle', 'release'].includes(live.lifecycle)) {
@@ -1840,8 +1996,8 @@ async function playLooping(url, label, releaseSeconds) {
   gain.connect(chain.input);
   source.start();
   live.loop = {source, gain};
-  useAnalyser(chain.analyser, `${label} ↻`);
-  setWork(`${label} 循环中 · ${looped.duration.toFixed(1)}s/圈 · 停止或再按循环可结束`);
+  useAnalyser(chain.analyser, 'loop', label);
+  setWork(`${label} ${t('loop.running')} · ${looped.duration.toFixed(1)}${t('loop.perLap')}`);
 }
 
 function stopLoop(fade = 0.05) {
@@ -1869,7 +2025,7 @@ const PROGRESSIONS = [
   {name: '6451', degrees: [6, 4, 5, 1]},
   {name: '1564', degrees: [1, 5, 6, 4]},
   {name: '2516', degrees: [2, 5, 1, 6]},
-  {name: '卡农 15634125', degrees: [1, 5, 6, 3, 4, 1, 2, 5]},
+  {key: 'prog.canon', name: '卡农 15634125', degrees: [1, 5, 6, 3, 4, 1, 2, 5]},
 ];
 
 const MAJOR_STEPS = [0, 2, 4, 5, 7, 9, 11];
@@ -1889,10 +2045,11 @@ function triad(root, degree) {
 
 function buildProgressionPicker() {
   const select = $('#progression');
+  select.textContent = '';     // it is rebuilt on a language change, not only once
   PROGRESSIONS.forEach((item, index) => {
     const option = document.createElement('option');
     option.value = String(index);
-    option.textContent = item.name;
+    option.textContent = progName(item);
     select.append(option);
   });
   select.value = '0';
@@ -1924,7 +2081,7 @@ async function playProgression() {
     return value;
   };
   button.disabled = true;
-  setWork(`${item.name} 渲染中…${onPath ? '（沿轨迹）' : ''}`);
+  setWork(`${progName(item)} ${t('work.rendering')}${onPath ? ` (${t('prog.onPath')})` : ''}`);
   // A walking path is the live voice the user asked for; do not cut it off.
   if (!trajectory.playing && $('#hold').getAttribute('aria-pressed') !== 'true') {
     liveSend({type: 'note_off'});
@@ -1949,23 +2106,23 @@ async function playProgression() {
       }),
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || `渲染失败 ${response.status}`);
+    if (!response.ok) throw new Error(payload.error || `${t('work.renderFailed')} ${response.status}`);
     addTake(payload, `${item.name} ${noteName(root)}${onPath ? ' ↗' : ''}`);
-    setWork(`${item.name} · ${payload.voices} 声部 · ${payload.seconds.toFixed(1)}s`
-      + `${onPath ? ' · 沿轨迹' : ''}`
-      + `${payload.cached ? ' · 缓存' : ` · GPU ${(payload.renderMs / 1000).toFixed(1)}s`}`);
+    setWork(`${progName(item)} · ${payload.voices} ${t('prog.voices')} · ${payload.seconds.toFixed(1)}s`
+      + `${onPath ? ` · ${t('prog.onPath')}` : ''}`
+      + `${payload.cached ? ` · ${t('prog.cached')}` : ` · GPU ${(payload.renderMs / 1000).toFixed(1)}s`}`);
     // The chord listing used to sit in its own paragraph; it belongs in the
     // info panel now, which is the one place that says what is sounding.
-    info.prog = `${item.name} 于 ${noteName(root)}：`
+    info.prog = `${progName(item)} ${t('prog.at')} ${noteName(root)}: `
       + chords.map(c => c.map(noteName).join('-')).join('　')
-      + `${onPath ? '　沿轨迹' : ''}`;
+      + `${onPath ? `　${t('prog.onPath')}` : ''}`;
     info.body = info.prog;
     renderInfo();
     const release = payload.take?.release ?? 2.4;
     if (looping()) {
-      await playLooping(pickAudio(payload), `进行 ${item.name}`, release);
+      await playLooping(pickAudio(payload), `${t('prog.progName')} ${progName(item)}`, release);
     } else {
-      play(pickAudio(payload), `进行 ${item.name}`);
+      play(pickAudio(payload), `${t('prog.progName')} ${progName(item)}`);
     }
   } catch (error) {
     setWork(String(error.message || error));
@@ -1986,8 +2143,8 @@ function stopAll() {
   player.currentTime = 0;
   if (live.recorder) live.recorder.stop();
   live.lifecycle = 'idle';
-  gateState('已停止');
-  live.shown = '已停止';
+  gateState('stopped');
+  live.shown = 'stopped';
   info.prog = '';
   sounding = null;
   updateStatus();
@@ -2010,13 +2167,16 @@ function syncAxes() {
 function setDrawer(shut) {
   $('#board').classList.toggle('drawer-shut', shut);
   $('#drawer').textContent = shut ? '‹ SCOPE' : '›';
-  $('#drawer').title = shut ? '展开频谱' : '收起频谱';
+  $('#drawer').title = shut ? t('drawer.open') : t('drawer.shut');
   // Both panes changed width; the map and every scope canvas must re-measure.
   requestAnimationFrame(() => { layout(); scopeLayout(); });
 }
 
 /** Which view sits in each of the three panes, chosen in settings. */
 function buildSlots(rebuildOnly = false) {
+  for (const select of document.querySelectorAll('.slot')) {
+    for (const option of select.options) option.textContent = t(`view.${option.value}`);
+  }
   const slots = ['spectrogram', 'ridge', 'loudness'];   // the three canvas ids
   scope.views = slots.map((slotId, index) => {
     const select = $(`#slot${index}`);
@@ -2024,7 +2184,7 @@ function buildSlots(rebuildOnly = false) {
       for (const entry of SCOPE_VIEWS) {
         const option = document.createElement('option');
         option.value = entry.key;
-        option.textContent = entry.label;
+        option.textContent = t(`view.${entry.key}`);
         select.append(option);
       }
       select.value = DEFAULT_SLOTS[index];
@@ -2075,7 +2235,7 @@ function showGates() {
   const gates = evaluation?.gates || {};
   const passed = Object.values(gates).filter(Boolean).length;
   const total = Object.keys(gates).length || 9;
-  $('#gates').textContent = `自动门禁 ${passed}/${total}：`
+  $('#gates').textContent = `${t('gates.auto')} ${passed}/${total}: `
     + Object.entries(gates).map(([name, value]) => `${value ? '✓' : '✗'} ${name}`).join('　');
   $('#limits').textContent = (status.limitations || []).join(' ');
 }
@@ -2131,7 +2291,7 @@ function wire() {
       if (trajectory.points.length >= 2) {
         startTrajectory();
       } else {
-        setWork('轨迹太短，再画一条');
+        setWork(t('work.pathShort'));
         trajectory.points = [];
       }
       drawMap();
@@ -2206,6 +2366,11 @@ function wire() {
       applyCompressor(live.fileChain);
     });
   }
+  $('#lang').value = language;
+  $('#lang').addEventListener('change', event => {
+    language = languages.includes(event.target.value) ? event.target.value : 'zh';
+    applyLanguage();
+  });
   $('#drawer').addEventListener('click', () => setDrawer(!$('#board').classList.contains('drawer-shut')));
   $('#stop').addEventListener('click', stopAll);
   $('#play').addEventListener('click', playProgression);
@@ -2217,13 +2382,14 @@ function wire() {
       stopTrajectory(true);        // disarming clears the path
       setWork('');
     } else {
-      setWork('在图谱上拖一条线，松手后音色沿着它往返');
+      setWork(t('path.hint'));
     }
   });
   $('#lap').addEventListener('input', event => {
     $('#lapOut').textContent = `${Number(event.target.value).toFixed(1)} s`;
     if (trajectory.playing) {
-      setWork(`[PATH] ${trajectory.points.length} 点 · ${Number(event.target.value).toFixed(1)}s 单程`);
+      setWork(`[PATH] ${trajectory.points.length} ${t('path.points')}`
+        + ` · ${Number(event.target.value).toFixed(1)}${t('path.oneWay')}`);
     }
   });
   $('#loop').addEventListener('click', event => {
@@ -2251,7 +2417,7 @@ function wire() {
     } else {
       liveSend({type: 'stop'});
       live.socket?.close();
-      live.shown = '预取模式';
+      live.shown = 'cached';
       updateStatus();
       warmPreviews();
     }
@@ -2292,11 +2458,11 @@ function wire() {
   // Surface failures in the page. "my colleague saw some JS errors" is not
   // something anyone can act on; a line in the rail naming the error is.
   window.addEventListener('error', event => {
-    setWork(`JS 错误 ${event.message || event.error}`);
+    setWork(`${t('work.jsError')} ${event.message || event.error}`);
   });
   window.addEventListener('unhandledrejection', event => {
     const reason = event.reason;
-    setWork(`未处理错误 ${reason?.name || ''} ${reason?.message || reason}`.trim());
+    setWork(`${t('work.unhandled')} ${reason?.name || ''} ${reason?.message || reason}`.trim());
   });
 }
 
@@ -2329,6 +2495,7 @@ async function boot() {
   // On a narrow window the scope would take almost half the map, so it starts
   // as a spine. It is still there, still one click away.
   setDrawer(window.innerWidth <= 1000);
+  applyLanguage();
   layout();
   scopeLayout();
   // The server knows whether it is on this machine or across a tunnel; take its
@@ -2342,11 +2509,11 @@ async function boot() {
   }
   $('#top-note').textContent = `${status.cuda} · ${status.checkpoint}`;
   $('#curtainNote').textContent = status.profile === 'local'
-    ? `本机运行（${status.cuda}）：连续漫游，缓冲 ${status.suggestedBufferSeconds} s`
-    : '预取模式：先把 50 个 preset 渲染好缓存，之后悬停零延迟';
+    ? `${t('curtain.local')} (${status.cuda})${t('curtain.localTail')} ${status.suggestedBufferSeconds} s`
+    : t('curtain.remote');
   const explained = status.pcaExplained || [];
-  live.lifecycle = '离线';
-  live.shown = '未连接';
+  live.lifecycle = 'offline';
+  live.shown = 'disconnected';
   updateStatus();
 }
 
@@ -2398,7 +2565,7 @@ window.atlasDebug = () => ({
 boot().catch(error => {
   // This used to write to an element the UI no longer has, so a boot failure
   // threw inside its own handler and hid the reason.
-  info.title = '[ERROR] 启动失败';
+  info.title = `[ERROR] ${t('boot.failed')}`;
   info.body = String(error && (error.stack || error.message) || error).slice(0, 220);
   renderInfo();
   console.error(error);
