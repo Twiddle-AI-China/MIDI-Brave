@@ -42,10 +42,10 @@ body {
 
 #map-pane { position: relative; min-width: 0; }
 #map { display: block; width: 100%; height: 100%; cursor: crosshair; }
-#voice { position: absolute; left: 14px; bottom: 46px; color: var(--ink); pointer-events: none; }
-#readout { position: absolute; left: 14px; bottom: 14px; color: var(--dim); pointer-events: none; white-space: pre; }
-#axis-note { position: absolute; right: 14px; bottom: 14px; color: var(--muted); pointer-events: none; }
-#legend { position: absolute; left: 14px; top: 12px; display: grid; gap: 4px; color: var(--muted); pointer-events: none; }
+#voice { position: absolute; left: 40px; bottom: 48px; color: var(--ink); pointer-events: none; }
+#readout { position: absolute; left: 40px; bottom: 16px; color: var(--dim); pointer-events: none; white-space: pre; }
+#axis-note { position: absolute; right: 14px; bottom: 32px; color: var(--muted); pointer-events: none; }
+#legend { position: absolute; left: 40px; top: 12px; display: grid; gap: 4px; color: var(--muted); pointer-events: none; }
 #legend span { display: flex; align-items: center; gap: 7px; }
 #legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .dot-cursor { border: 1px solid rgba(242, 242, 242, .55); }

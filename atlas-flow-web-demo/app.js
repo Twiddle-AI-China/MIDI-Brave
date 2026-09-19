@@ -103,6 +103,41 @@ function paintStatic() {
   ink.setTransform(ratio, 0, 0, ratio, 0, 0);
   ink.clearRect(0, 0, view.width, view.height);
 
+  // A sparse lattice so empty atlas regions read as space rather than void.
+  ink.fillStyle = 'rgba(242, 242, 242, 0.055)';
+  for (let x = view.width / 2 % 42; x < view.width; x += 42) {
+    for (let y = view.height / 2 % 42; y < view.height; y += 42) {
+      ink.fillRect(Math.round(x), Math.round(y), 1, 1);
+    }
+  }
+
+  // Axis rails: the map is a projection with units, so label them.
+  ink.font = '9px ui-monospace, monospace';
+  ink.fillStyle = 'rgba(242, 242, 242, 0.30)';
+  ink.strokeStyle = 'rgba(242, 242, 242, 0.14)';
+  ink.lineWidth = 1;
+  for (let step = -4; step <= 4; step++) {
+    const value = step / 4;
+    const [x, y] = view.toPixel([value, value]);
+    ink.beginPath();                       // left rail, PC2
+    ink.moveTo(0, Math.round(y) + 0.5);
+    ink.lineTo(step % 2 ? 4 : 8, Math.round(y) + 0.5);
+    ink.stroke();
+    ink.textAlign = 'left';
+    ink.textBaseline = 'middle';
+    if (step % 2 === 0 && y < view.height - 70) ink.fillText(value.toFixed(1), 12, y);
+    ink.beginPath();                       // bottom rail, PC1
+    ink.moveTo(Math.round(x) + 0.5, view.height);
+    ink.lineTo(Math.round(x) + 0.5, view.height - (step % 2 ? 4 : 8));
+    ink.stroke();
+    ink.textAlign = 'center';
+    ink.textBaseline = 'bottom';
+    // The bottom-left corner belongs to the [VOICE]/[ATLAS] readout; a tick
+    // label there just collides with it.
+    if (step % 2 === 0 && x > 300) ink.fillText(value.toFixed(1), x, view.height - 12);
+  }
+  ink.textBaseline = 'alphabetic';
+
   ink.globalCompositeOperation = 'lighter';
   for (const cell of cells) {
     const radius = cell.loner ? 34 : 66;
@@ -201,6 +236,67 @@ function drawMap() {
     paint.font = '600 10px ui-monospace, monospace';
     paint.textAlign = 'center';
     paint.fillText(hovered.label, hovered.x, hovered.y - 15);
+  }
+
+  if (sounding) drawInset(view, sounding);
+}
+
+/**
+ * The map can only show two of the eight atlas dimensions, so the sounding
+ * preset gets a framed readout of all eight, tied back to its ring by a
+ * hairline. The 62% of variance PC1 and PC2 carry is the part you can see;
+ * this is the rest.
+ */
+function drawInset(view, cell) {
+  const width = 132;
+  const height = 92;
+  const left = view.width - width - 18;
+  const top = 18;
+
+  const [ringX, ringY] = [cell.x, cell.y];
+  const anchorX = left;
+  const anchorY = top + height / 2;
+  if (Math.hypot(ringX - anchorX, ringY - anchorY) > 60) {
+    // Mostly orthogonal, like an annotation rule rather than a drawn line, and
+    // faint enough that it does not compete with the cells it crosses.
+    const elbow = anchorX - 26;
+    paint.strokeStyle = 'rgba(242, 242, 242, 0.13)';
+    paint.lineWidth = 1;
+    paint.setLineDash([3, 4]);
+    paint.beginPath();
+    paint.moveTo(ringX + 19, ringY);
+    paint.lineTo(elbow, ringY);
+    paint.lineTo(elbow, anchorY);
+    paint.lineTo(anchorX, anchorY);
+    paint.stroke();
+    paint.setLineDash([]);
+  }
+
+  paint.fillStyle = 'rgba(0, 0, 0, 0.72)';
+  paint.fillRect(left, top, width, height);
+  paint.strokeStyle = 'rgba(242, 242, 242, 0.28)';
+  paint.lineWidth = 1;
+  paint.strokeRect(left + 0.5, top + 0.5, width, height);
+
+  paint.font = '9px ui-monospace, monospace';
+  paint.textAlign = 'left';
+  paint.fillStyle = 'rgba(242, 242, 242, 0.55)';
+  paint.fillText(`[8D] ${cell.label}`, left + 7, top + 13);
+
+  const rows = cell.pca.length;
+  const usable = width - 34;
+  for (let axis = 0; axis < rows; axis++) {
+    const y = top + 24 + axis * 8;
+    paint.fillStyle = 'rgba(242, 242, 242, 0.34)';
+    paint.fillText(`${axis + 1}`, left + 7, y + 3);
+    const middle = left + 20 + usable / 2;
+    paint.fillStyle = 'rgba(242, 242, 242, 0.14)';
+    paint.fillRect(left + 20, y, usable, 1);          // the zero line
+    const extent = clamp(cell.pca[axis], -1, 1) * (usable / 2);
+    paint.fillStyle = 'rgba(242, 242, 242, 0.85)';
+    paint.fillRect(Math.min(middle, middle + extent), y - 2, Math.abs(extent), 4);
+    paint.fillStyle = 'rgba(242, 242, 242, 0.30)';
+    paint.fillRect(Math.round(middle), y - 4, 1, 8);  // centre tick
   }
 }
 
@@ -713,9 +809,11 @@ function liveSend(message) {
 }
 
 function updateReadout() {
-  $('#readout').textContent = hovered
-    ? `${hovered.label}   连通域 ${hovered.component}${hovered.loner ? '（单点）' : ''}\nPC1 ${coordinate[0].toFixed(2)}   PC2 ${coordinate[1].toFixed(2)}`
-    : `自由坐标\nPC1 ${coordinate[0].toFixed(2)}   PC2 ${coordinate[1].toFixed(2)}`;
+  const where = hovered
+    ? `${hovered.label}   连通域 ${hovered.component}${hovered.loner ? '（单点）' : ''}`
+    : '自由坐标';
+  $('#readout').textContent =
+    `[ATLAS] ${where}\n        PC1 ${coordinate[0].toFixed(2)}   PC2 ${coordinate[1].toFixed(2)}`;
 }
 
 function setWork(text) {
@@ -784,7 +882,7 @@ function updateStatus() {
     if (live.underruns) parts.push(`欠载 ${live.underruns}`);
     if (live.dropped) parts.push(`弃流 ${live.dropped}`);
   }
-  $('#status').textContent = parts.join('   ·   ');
+  $('#status').textContent = `[${live.connected ? 'LIVE' : 'IDLE'}] ` + parts.join('   ·   ');
 }
 
 function updateVoice() {
@@ -798,7 +896,7 @@ function updateVoice() {
     ? !preview.source
     : ['idle', 'release', '离线'].includes(live.shown);
   $('#voice').textContent = sounding
-    ? `${resting ? '刚才响的' : '正在响'}　${sounding.label}${sounding.loner ? '（单点）' : ''}`
+    ? `[VOICE] ${sounding.label}${sounding.loner ? '（单点）' : ''}　${resting ? '刚才响的' : '正在响'}`
     : '';
 }
 
@@ -879,7 +977,7 @@ async function connect() {
         cap: Math.round(value.targetSeconds * value.sampleRate * 3.0),
       });
       $('#wire').textContent =
-        `${value.sampleRate / 1000}kHz ${value.channels === 1 ? 'mono' : 'stereo'} `
+        `[WIRE] ${value.sampleRate / 1000}kHz ${value.channels === 1 ? 'mono' : 'stereo'} `
         + `${value.format} · 上限 ${value.kbitPerSecond} kbit/s`;
     }
     if (value.type === 'telemetry') {
@@ -1018,7 +1116,7 @@ function toggleRecording() {
     live.chain.limiter.disconnect(destination);
     live.recorder = null;
     button.setAttribute('aria-pressed', 'false');
-    button.textContent = '● 录制';
+    button.textContent = '○ 录制';
     const blob = new Blob(live.chunks, {type: recorder.mimeType});
     const url = URL.createObjectURL(blob);
     const seconds = (performance.now() - started) / 1000;
@@ -1032,7 +1130,7 @@ function toggleRecording() {
   recorder.start();
   live.recorder = recorder;
   button.setAttribute('aria-pressed', 'true');
-  button.textContent = '■ 停止';
+  button.textContent = '● 录制中';
   setWork('录制中…');
 }
 
@@ -1547,6 +1645,12 @@ function showGates() {
 
 /* ---------- wiring ---------- */
 
+/** ● when engaged, ○ when not — legible without colour. */
+function markToggle(button) {
+  const on = button.getAttribute('aria-pressed') === 'true';
+  button.textContent = button.textContent.replace(/^[●○]/, on ? '●' : '○');
+}
+
 function wire() {
   const place = event => {
     const box = map.getBoundingClientRect();
@@ -1613,11 +1717,19 @@ function wire() {
   $('#hold').addEventListener('click', event => {
     const on = event.target.getAttribute('aria-pressed') === 'true';
     event.target.setAttribute('aria-pressed', String(!on));
+    markToggle(event.target);
+    markToggle(event.target);
+    markToggle(event.target);
+    markToggle(event.target);
     if (on && live.connected) liveSend({type: 'note_off'});
   });
   $('#comp').addEventListener('click', event => {
     const on = event.target.getAttribute('aria-pressed') === 'true';
     event.target.setAttribute('aria-pressed', String(!on));
+    markToggle(event.target);
+    markToggle(event.target);
+    markToggle(event.target);
+    markToggle(event.target);
     applyCompressor(live.chain);
     applyCompressor(live.fileChain);
   });
@@ -1645,6 +1757,10 @@ function wire() {
   $('#loop').addEventListener('click', event => {
     const on = event.target.getAttribute('aria-pressed') === 'true';
     event.target.setAttribute('aria-pressed', String(!on));
+    markToggle(event.target);
+    markToggle(event.target);
+    markToggle(event.target);
+    markToggle(event.target);
     if (on) { stopLoop(); setWork(''); }
   });
   $('#rec').addEventListener('click', toggleRecording);
@@ -1745,7 +1861,7 @@ async function boot() {
   const explained = status.pcaExplained || [];
   if (explained.length) {
     $('#axis-note').textContent =
-      `PC1 ${(explained[0] * 100).toFixed(0)}% × PC2 ${(explained[1] * 100).toFixed(0)}%`
+      `[PROJECTION] PC1 ${(explained[0] * 100).toFixed(0)}% × PC2 ${(explained[1] * 100).toFixed(0)}%`
       + ` ＝ 音色锚点方差的 ${((explained[0] + explained[1]) * 100).toFixed(0)}%`;
   }
   live.lifecycle = '离线';
