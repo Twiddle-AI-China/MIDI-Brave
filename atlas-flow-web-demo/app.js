@@ -448,10 +448,22 @@ const scopeTop = rate => Math.min(SCOPE_CEILING, rate / 2);
 const mel = frequency => 2595 * Math.log10(1 + frequency / 700);
 const melInverse = value => 700 * (10 ** (value / 2595) - 1);
 
-function makeView(key, draw) {
-  const canvas = $(`#scope-${key}`);
+const SCOPE_VIEWS = [
+  {key: 'spectrogram', label: '频谱图 SPECTROGRAM', draw: () => viewSpectrogram},
+  {key: 'ridge', label: '瀑布 WATERFALL', draw: () => viewRidge},
+  {key: 'loudness', label: '响度 LOUDNESS', draw: () => viewLoudness},
+  {key: 'spectrum', label: '频谱 SPECTRUM', draw: () => viewSpectrum},
+  {key: 'wave', label: '波形 OSCILLOSCOPE', draw: () => viewWave},
+];
+const DEFAULT_SLOTS = ['spectrogram', 'ridge', 'loudness'];
+
+function makeView(slot, key) {
+  const canvas = $(`#scope-${slot}`);
+  const entry = SCOPE_VIEWS.find(item => item.key === key) || SCOPE_VIEWS[0];
+  const tag = canvas.parentElement.querySelector('.scope-tag');
+  if (tag) tag.textContent = entry.label.split(' ').at(-1);
   return {
-    key, draw, canvas,
+    slot, key: entry.key, draw: entry.draw(), canvas,
     strip: document.createElement('canvas'),
     width: 0, height: 0, carry: 0,
     rows: null, ridges: [], levels: [],
@@ -637,6 +649,57 @@ function viewRidge(context, view, {rate, elapsed}) {
   }
   context.restore();
   logFrequencyGrid(context, view, rate, lowest, true);
+}
+
+function viewSpectrum(context, view, {rate, elapsed}) {
+  const bins = scope.freq.length;
+  const nyquist = rate / 2;
+  const bars = Math.min(180, Math.floor(view.width / 3));
+  if (!view.peaks || view.peaks.length !== bars) view.peaks = new Float32Array(bars);
+  const lowest = 40;
+  const span = Math.log2(scopeTop(rate) / lowest);
+  for (let index = 0; index < bars; index++) {
+    const from = lowest * 2 ** (span * index / bars);
+    const to = lowest * 2 ** (span * (index + 1) / bars);
+    const start = Math.max(0, Math.floor(from / nyquist * bins));
+    const end = Math.max(start + 1, Math.min(bins, Math.ceil(to / nyquist * bins)));
+    let peak = 0;
+    for (let bin = start; bin < end; bin++) peak = Math.max(peak, scope.freq[bin]);
+    const level = peak / 255;
+    view.peaks[index] = Math.max(level, view.peaks[index] - elapsed * 0.55);
+    const x = index / bars * view.width;
+    const width = view.width / bars - 1;
+    context.fillStyle = `rgba(242, 242, 242, ${0.25 + 0.65 * level})`;
+    context.fillRect(x, view.height * (1 - level), width, view.height * level);
+    context.fillStyle = 'rgba(242, 242, 242, 0.85)';
+    context.fillRect(x, view.height * (1 - view.peaks[index]) - 1, width, 1);
+  }
+  logFrequencyGrid(context, view, rate, lowest);
+}
+
+/** Triggered on a rising zero crossing, so the wave stands still. */
+function viewWave(context, view) {
+  const samples = scope.time;
+  let trigger = 0;
+  for (let index = 1; index < samples.length / 2; index++) {
+    if (samples[index - 1] < 128 && samples[index] >= 128) { trigger = index; break; }
+  }
+  const count = Math.floor(samples.length / 2);
+  context.strokeStyle = 'rgba(242, 242, 242, 0.14)';
+  context.beginPath();
+  context.moveTo(0, view.height / 2);
+  context.lineTo(view.width, view.height / 2);
+  context.stroke();
+  context.beginPath();
+  for (let index = 0; index < count; index++) {
+    const value = (samples[trigger + index] - 128) / 128;
+    const x = index / (count - 1) * view.width;
+    const y = view.height / 2 - value * view.height * 0.42;
+    index ? context.lineTo(x, y) : context.moveTo(x, y);
+  }
+  context.strokeStyle = INK;
+  context.lineWidth = 1.2;
+  context.stroke();
 }
 
 function viewLoudness(context, view, {elapsed}) {
@@ -842,12 +905,24 @@ function liveSend(message) {
   if (live.socket?.readyState === WebSocket.OPEN) live.socket.send(JSON.stringify(message));
 }
 
+/**
+ * One small panel that says what is happening, or what you are pointing at.
+ *
+ * Ableton's info view: hover a control and it explains that control; hover
+ * nothing and it reports state. Everything it shows used to be scattered —
+ * status in the top right, the sounding preset and the coordinate in two more
+ * overlays, a projection note across the middle of the map.
+ */
+const info = {title: '—', body: '', meta: '', hover: null, prog: ''};
+
+function renderInfo() {
+  $('#info-title').textContent = info.hover ? info.hover.title : info.title;
+  $('#info-body').textContent = info.hover ? info.hover.body : info.body;
+  $('#info-meta').textContent = info.meta;
+}
+
 function updateReadout() {
-  const where = hovered
-    ? `${hovered.label}   连通域 ${hovered.component}${hovered.loner ? '（单点）' : ''}`
-    : '自由坐标';
-  $('#readout').textContent =
-    `[ATLAS] ${where}\n        PC1 ${coordinate[0].toFixed(2)}   PC2 ${coordinate[1].toFixed(2)}`;
+  renderInfo();
 }
 
 function setWork(text) {
@@ -908,7 +983,7 @@ function nudgeVoice() {
 }
 
 function updateStatus() {
-  const parts = [live.shown];
+  const parts = [];
   if (live.connected) {
     parts.push(`规划 ${live.planMs.toFixed(0)}ms`);
     if (live.rate) parts.push(`${live.rate.toFixed(0)}kbit/s`);
@@ -916,22 +991,34 @@ function updateStatus() {
     if (live.underruns) parts.push(`欠载 ${live.underruns}`);
     if (live.dropped) parts.push(`弃流 ${live.dropped}`);
   }
-  $('#status').textContent = `[${live.connected ? 'LIVE' : 'IDLE'}] ` + parts.join('   ·   ');
+  parts.push(`PC1 ${coordinate ? coordinate[0].toFixed(2) : '—'}`);
+  parts.push(`PC2 ${coordinate ? coordinate[1].toFixed(2) : '—'}`);
+  info.title = `[${live.connected ? 'LIVE' : 'IDLE'}] ${live.shown}`;
+  info.meta = parts.join('  ·  ');
+  renderInfo();
 }
 
 function updateVoice() {
   // Cached mode has no socket, so this cannot be gated on the live connection:
   // what is sounding is whatever last started, from either path.
+  if (info.prog) {
+    info.body = info.prog;               // a running progression owns this line
+    renderInfo();
+    return;
+  }
   if (!sounding || (!live.connected && audioMode() === 'live')) {
-    $('#voice').textContent = '';
+    info.body = '';
+    renderInfo();
     return;
   }
   const resting = audioMode() === 'cached'
     ? !preview.source
     : ['idle', 'release', '离线'].includes(live.shown);
-  $('#voice').textContent = sounding
-    ? `[VOICE] ${sounding.label}${sounding.loner ? '（单点）' : ''}　${resting ? '刚才响的' : '正在响'}`
+  info.body = sounding
+    ? `${sounding.label}${sounding.loner ? '（单点）' : ''} ${resting ? '刚才响的' : '正在响'}`
+      + `　连通域 ${sounding.component}`
     : '';
+  renderInfo();
 }
 
 /* ---------- live link ---------- */
@@ -1646,8 +1733,13 @@ async function playProgression() {
     setWork(`${item.name} · ${payload.voices} 声部 · ${payload.seconds.toFixed(1)}s`
       + `${onPath ? ' · 沿轨迹' : ''}`
       + `${payload.cached ? ' · 缓存' : ` · GPU ${(payload.renderMs / 1000).toFixed(1)}s`}`);
-    $('#chordNote').textContent =
-      `${item.name} 于 ${noteName(root)}：` + chords.map(c => c.map(noteName).join('-')).join('　');
+    // The chord listing used to sit in its own paragraph; it belongs in the
+    // info panel now, which is the one place that says what is sounding.
+    info.prog = `${item.name} 于 ${noteName(root)}：`
+      + chords.map(c => c.map(noteName).join('-')).join('　')
+      + `${onPath ? '　沿轨迹' : ''}`;
+    info.body = info.prog;
+    renderInfo();
     const release = payload.take?.release ?? 2.4;
     if (looping()) {
       await playLooping(pickAudio(payload), `进行 ${item.name}`, release);
@@ -1675,6 +1767,7 @@ function stopAll() {
   live.lifecycle = 'idle';
   gateState('已停止');
   live.shown = '已停止';
+  info.prog = '';
   sounding = null;
   updateStatus();
   updateVoice();
@@ -1754,6 +1847,34 @@ function syncAxes() {
   });
 }
 
+/** Open or collapse the scope pane, and re-measure everything it moved. */
+function setDrawer(shut) {
+  $('#board').classList.toggle('drawer-shut', shut);
+  $('#drawer').textContent = shut ? '‹ SCOPE' : '›';
+  $('#drawer').title = shut ? '展开频谱' : '收起频谱';
+  // Both panes changed width; the map and every scope canvas must re-measure.
+  requestAnimationFrame(() => { layout(); scopeLayout(); });
+}
+
+/** Which view sits in each of the three panes, chosen in settings. */
+function buildSlots(rebuildOnly = false) {
+  const slots = ['spectrogram', 'ridge', 'loudness'];   // the three canvas ids
+  scope.views = slots.map((slotId, index) => {
+    const select = $(`#slot${index}`);
+    if (!rebuildOnly && !select.options.length) {
+      for (const entry of SCOPE_VIEWS) {
+        const option = document.createElement('option');
+        option.value = entry.key;
+        option.textContent = entry.label;
+        select.append(option);
+      }
+      select.value = DEFAULT_SLOTS[index];
+      select.addEventListener('change', () => { buildSlots(true); scopeLayout(); });
+    }
+    return makeView(slotId, select.value);
+  });
+}
+
 function buildPanel() {
   const select = $('#profile');
   (status.streamProfiles || []).forEach((wire, index) => {
@@ -1795,11 +1916,8 @@ function showGates() {
   const gates = evaluation?.gates || {};
   const passed = Object.values(gates).filter(Boolean).length;
   const total = Object.keys(gates).length || 9;
-  const badge = $('#gate');
-  badge.textContent = `门禁 ${passed}/${total}`;
-  badge.className = `chip${evaluation?.passed ? ' on' : ' bad'}`;
-  $('#gates').textContent = Object.entries(gates)
-    .map(([name, value]) => `${value ? '✓' : '✗'} ${name}`).join('　');
+  $('#gates').textContent = `自动门禁 ${passed}/${total}：`
+    + Object.entries(gates).map(([name, value]) => `${value ? '✓' : '✗'} ${name}`).join('　');
   $('#limits').textContent = (status.limitations || []).join(' ');
 }
 
@@ -1833,7 +1951,7 @@ function wire() {
   });
 
   map.addEventListener('pointerdown', event => {
-    map.setPointerCapture(event.pointerId);
+    try { map.setPointerCapture(event.pointerId); } catch { /* pointer already gone */ }
     if (!live.connected && !live.fileChain) {
       $('#curtain').classList.add('gone');
       startAudio();
@@ -1911,17 +2029,11 @@ function wire() {
     const on = event.target.getAttribute('aria-pressed') === 'true';
     event.target.setAttribute('aria-pressed', String(!on));
     markToggle(event.target);
-    markToggle(event.target);
-    markToggle(event.target);
-    markToggle(event.target);
     if (on && live.connected) liveSend({type: 'note_off'});
   });
   $('#comp').addEventListener('click', event => {
     const on = event.target.getAttribute('aria-pressed') === 'true';
     event.target.setAttribute('aria-pressed', String(!on));
-    markToggle(event.target);
-    markToggle(event.target);
-    markToggle(event.target);
     markToggle(event.target);
     applyCompressor(live.chain);
     applyCompressor(live.fileChain);
@@ -1938,14 +2050,7 @@ function wire() {
       applyCompressor(live.fileChain);
     });
   }
-  $('#drawer').addEventListener('click', () => {
-    const board = $('#board');
-    const shut = board.classList.toggle('drawer-shut');
-    $('#drawer').textContent = shut ? '‹ SCOPE' : '›';
-    $('#drawer').title = shut ? '展开频谱' : '收起频谱';
-    // Both panes changed width; the map and every scope canvas must re-measure.
-    requestAnimationFrame(() => { layout(); scopeLayout(); });
-  });
+  $('#drawer').addEventListener('click', () => setDrawer(!$('#board').classList.contains('drawer-shut')));
   $('#stop').addEventListener('click', stopAll);
   $('#play').addEventListener('click', playProgression);
   $('#draw').addEventListener('click', event => {
@@ -1969,9 +2074,6 @@ function wire() {
     const on = event.target.getAttribute('aria-pressed') === 'true';
     event.target.setAttribute('aria-pressed', String(!on));
     markToggle(event.target);
-    markToggle(event.target);
-    markToggle(event.target);
-    markToggle(event.target);
     if (on) { stopLoop(); setWork(''); }
   });
   $('#rec').addEventListener('click', toggleRecording);
@@ -1981,7 +2083,6 @@ function wire() {
     panel.hidden = !panel.hidden;
     $('#gear').classList.toggle('on', !panel.hidden);
   });
-  $('#gate').addEventListener('click', () => $('#gear').click());
   $('#curtain').addEventListener('click', () => {
     $('#curtain').classList.add('gone');
     startAudio();
@@ -2014,6 +2115,22 @@ function wire() {
     $('#noteOut').textContent = `${KEYS[key]} · ${noteName(KEYS[key])}`;
     if (live.connected) retrigger();
   });
+  // Ableton-style: point at a control, the panel explains that control; point
+  // at nothing, it goes back to reporting state.
+  document.addEventListener('pointerover', event => {
+    const target = event.target.closest?.('[data-info]');
+    if (!target) return;
+    const [title, body] = (target.dataset.info || '').split('|');
+    info.hover = {title: title || '', body: body || ''};
+    renderInfo();
+  });
+  document.addEventListener('pointerout', event => {
+    const target = event.target.closest?.('[data-info]');
+    if (!target || target.contains(event.relatedTarget)) return;
+    info.hover = null;
+    renderInfo();
+  });
+
   window.addEventListener('resize', () => { layout(); scopeLayout(); });
 
   // Surface failures in the page. "my colleague saw some JS errors" is not
@@ -2051,11 +2168,10 @@ async function boot() {
   buildProgressionPicker();
   showGates();
   wire();
-  scope.views = [
-    makeView('spectrogram', viewSpectrogram),
-    makeView('ridge', viewRidge),
-    makeView('loudness', viewLoudness),
-  ];
+  buildSlots();
+  // On a narrow window the scope would take almost half the map, so it starts
+  // as a spine. It is still there, still one click away.
+  setDrawer(window.innerWidth <= 1000);
   layout();
   scopeLayout();
   // The server knows whether it is on this machine or across a tunnel; take its
@@ -2067,17 +2183,13 @@ async function boot() {
     $('#buffer').value = String(status.suggestedBufferSeconds);
     $('#bufferOut').textContent = `${status.suggestedBufferSeconds.toFixed(1)} s`;
   }
+  $('#top-note').textContent = `${status.cuda} · ${status.checkpoint}`;
   $('#curtainNote').textContent = status.profile === 'local'
     ? `本机运行（${status.cuda}）：连续漫游，缓冲 ${status.suggestedBufferSeconds} s`
     : '预取模式：先把 50 个 preset 渲染好缓存，之后悬停零延迟';
   const explained = status.pcaExplained || [];
-  if (explained.length) {
-    $('#axis-note').textContent =
-      `[PROJECTION] PC1 ${(explained[0] * 100).toFixed(0)}% × PC2 ${(explained[1] * 100).toFixed(0)}%`
-      + ` ＝ 音色锚点方差的 ${((explained[0] + explained[1]) * 100).toFixed(0)}%`;
-  }
   live.lifecycle = '离线';
-  live.shown = `${status.cuda} · ${status.checkpoint}`;
+  live.shown = '未连接';
   updateStatus();
 }
 
@@ -2101,8 +2213,25 @@ window.atlasDebug = () => ({
     ? {points: trajectory.points.length, playing: trajectory.playing,
        phase: Number(trajectory.phase.toFixed(3))}
     : null,
+  // "It is silent" and "it will not stop" are both answered by one number.
+  outputDb: (() => {
+    const node = scope.analyser;
+    if (!node) return null;
+    const frame = new Float32Array(node.fftSize);
+    node.getFloatTimeDomainData(frame);
+    let sum = 0;
+    for (const value of frame) sum += value * value;
+    return Number((20 * Math.log10(Math.sqrt(sum / frame.length) + 1e-9)).toFixed(1));
+  })(),
+  scopeSource: $('#scope-source').textContent,
+  slots: scope.views.map(view => view.key),
 });
 
 boot().catch(error => {
-  $('#status').textContent = `GPU 服务离线 · ${error.message || error}`;
+  // This used to write to an element the UI no longer has, so a boot failure
+  // threw inside its own handler and hid the reason.
+  info.title = '[ERROR] 启动失败';
+  info.body = String(error && (error.stack || error.message) || error).slice(0, 220);
+  renderInfo();
+  console.error(error);
 });
