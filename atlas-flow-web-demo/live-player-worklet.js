@@ -6,6 +6,11 @@
  * is what keeps a roam from stuttering: playback only starts once there is a
  * real cushion, and a starved sink re-primes instead of chattering.
  */
+// About 1.5 ms at 44.1 kHz: long enough to kill the step, short enough that a
+// genuine gap still reads as a gap rather than as a fade.
+const RAMP_SAMPLES = 64;
+const RAMP_PER_SAMPLE = 1 / RAMP_SAMPLES;
+
 class AtlasLivePlayer extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -41,6 +46,7 @@ class AtlasLivePlayer extends AudioWorkletProcessor {
     this.primed = false;
     this.threshold = this.prime;
     this.ticks = 0;
+    this.gain = 0;          // ramps, so starting and starving are not steps
   }
 
   push(buffer) {
@@ -69,19 +75,32 @@ class AtlasLivePlayer extends AudioWorkletProcessor {
     const left = output[0];
     const right = output[1] || output[0];
     for (let index = 0; index < left.length; index++) {
-      if (!this.primed || !this.queue.length) {
+      const empty = !this.primed || !this.queue.length;
+      if (empty && this.primed) {
+        this.underruns++;
+        this.primed = false;
+        this.threshold = this.reprime;
+      }
+      // Cutting to zero mid-waveform is a full-scale step, and a run of those
+      // is heard as a buzz rather than as a gap -- which is what a cold start
+      // produces, because the first plans are several times slower than the
+      // warm ones and the queue keeps running dry.
+      //
+      // The fade has to START while there is still data to fade: once the
+      // queue is empty there is nothing left to ramp, which is why fading only
+      // on the way back up removed just half the steps.
+      const ending = this.primed && this.frames <= RAMP_SAMPLES;
+      const want = (empty || ending) ? 0 : 1;
+      this.gain = Math.min(1, Math.max(0,
+        this.gain + Math.sign(want - this.gain) * RAMP_PER_SAMPLE));
+      if (empty || this.gain <= 0) {
         left[index] = 0;
         right[index] = 0;
-        if (this.primed) {
-          this.underruns++;
-          this.primed = false;
-          this.threshold = this.reprime;
-        }
         continue;
       }
       const [chunkLeft, chunkRight] = this.queue[0];
-      left[index] = chunkLeft[this.offset];
-      right[index] = chunkRight[this.offset];
+      left[index] = chunkLeft[this.offset] * this.gain;
+      right[index] = chunkRight[this.offset] * this.gain;
       this.offset++;
       this.frames--;
       if (this.offset >= chunkLeft.length) {

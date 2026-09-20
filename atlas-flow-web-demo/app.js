@@ -2307,6 +2307,41 @@ function buildSlots(rebuildOnly = false) {
   });
 }
 
+/**
+ * Which wire format to start on.
+ *
+ * Remote, this is a bandwidth question and the answer was measured on the
+ * Kraken link (Jagger -> Octopus -> Kraken, ~2.65 Mbit/s) over a 30 s roam:
+ * 22.05 kHz mono int16 held 1.03x real time with no underruns, 44.1 kHz mono
+ * managed 0.98x with two dropouts, stereo float32 saturated the link at 0.96x.
+ * So default to headroom and let the user trade up by hand.
+ *
+ * Local, there is no link -- it is a loopback socket -- and that same rule was
+ * doing real harm. It selected 22.05 kHz, which band-limited the audio to
+ * 11 kHz for no reason and, worse, forced the AudioContext to a rate no sound
+ * device runs natively, so every sample was resampled 22.05 -> 48 kHz on the
+ * way out. That is broadband and content-independent, which is what an atonal
+ * buzz behind everything sounds like.
+ *
+ * So locally, match the output device's own rate where a profile offers it and
+ * nothing is resampled at all; failing that take the highest fidelity on offer.
+ */
+function preferredProfile(profiles) {
+  if (!profiles.length) return 0;
+  if (status.profile !== 'local') {
+    const thin = profiles.findIndex(wire => wire.kbitPerSecond < 400);
+    return thin < 0 ? 0 : thin;
+  }
+  let deviceRate = 0;
+  try {
+    const probe = new AudioContext();
+    deviceRate = probe.sampleRate;
+    probe.close();
+  } catch (_error) { /* asking is optional; the fallback is still good */ }
+  const matched = profiles.findIndex(wire => wire.sampleRate === deviceRate);
+  return matched >= 0 ? matched : 0;
+}
+
 function buildPanel() {
   const select = $('#profile');
   (status.streamProfiles || []).forEach((wire, index) => {
@@ -2316,13 +2351,7 @@ function buildPanel() {
       + `${wire.channels === 1 ? 'mono' : 'stereo'} ${wire.format} · ${(wire.kbitPerSecond / 1000).toFixed(2)} Mbit/s`;
     select.append(option);
   });
-  // Measured on the Kraken link (Jagger -> Octopus -> Kraken, ~2.65 Mbit/s) in a
-  // 30 s roam: 22.05 kHz mono int16 held 1.03x real time with no underruns;
-  // 44.1 kHz mono managed 0.98x with two dropouts; stereo float32 saturates the
-  // link at 0.96x. V100 planning is also slower than the retired GB10 host
-  // (~150 ms re-plan vs ~70 ms), so default to headroom and trade up by hand.
-  const preferred = (status.streamProfiles || []).findIndex(wire => wire.kbitPerSecond < 400);
-  select.value = String(preferred < 0 ? 0 : preferred);
+  select.value = String(preferredProfile(status.streamProfiles || []));
 
   const axes = $('#axes');
   (status.pcaAxes || []).forEach((axis, index) => {
@@ -2653,6 +2682,26 @@ window.atlasDebug = () => ({
     ? {points: trajectory.points.length, playing: trajectory.playing,
        phase: Number(trajectory.phase.toFixed(3))}
     : null,
+  // Peak matters separately from RMS: clipping and underrun glitches are both
+  // peak events that barely move the average.
+  outputPeak: (() => {
+    const node = scope.analyser;
+    if (!node) return null;
+    const frame = new Float32Array(node.fftSize);
+    node.getFloatTimeDomainData(frame);
+    let peak = 0;
+    for (const value of frame) peak = Math.max(peak, Math.abs(value));
+    return Number(peak.toFixed(4));
+  })(),
+  compression: (() => {
+    const chain = activeChain();
+    if (!chain) return null;
+    return {
+      on: $('#comp').getAttribute('aria-pressed') === 'true',
+      bands: chain.compressors.map(item => Number(item.reduction.toFixed(1))),
+      limiter: chain.limiter ? Number(chain.limiter.reduction.toFixed(1)) : null,
+    };
+  })(),
   // "It is silent" and "it will not stop" are both answered by one number.
   outputDb: (() => {
     const node = scope.analyser;
@@ -2680,6 +2729,45 @@ window.atlasDebug = () => ({
       : null,
   },
 });
+
+/**
+ * Record what actually reaches the speakers, post-compression and post-limiter.
+ *
+ * atlasDebug() samples the analyser at frame rate, which is far too coarse to
+ * see a short artefact: "it buzzes for a second at startup" is invisible at
+ * 60 Hz and obvious in the waveform. This taps the end of the chain and hands
+ * back the raw float samples.
+ *
+ *   await atlasCapture(8)   ->  {sampleRate, samples: [...]}
+ */
+window.atlasCapture = async (seconds = 8) => {
+  const chain = activeChain();
+  if (!chain) throw new Error('nothing is playing');
+  const {context} = chain;
+  const taps = [];
+  const buffer = [];
+  // A ScriptProcessor is deprecated and perfect here: it is the only node that
+  // hands the main thread every sample rather than a smoothed summary.
+  const tap = context.createScriptProcessor(4096, 2, 2);
+  tap.onaudioprocess = event => {
+    buffer.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+  };
+  chain.limiter.connect(tap);
+  // ScriptProcessor only runs while connected to a destination; a zeroed gain
+  // keeps it running without adding a second copy of the signal to the output.
+  const mute = context.createGain();
+  mute.gain.value = 0;
+  tap.connect(mute);
+  mute.connect(context.destination);
+  taps.push(tap, mute);
+  await new Promise(resolve => setTimeout(resolve, seconds * 1000));
+  for (const node of taps) node.disconnect();
+  const total = buffer.reduce((sum, chunk) => sum + chunk.length, 0);
+  const samples = new Float32Array(total);
+  let at = 0;
+  for (const chunk of buffer) { samples.set(chunk, at); at += chunk.length; }
+  return {sampleRate: context.sampleRate, samples: Array.from(samples)};
+};
 
 boot().catch(error => {
   // This used to write to an element the UI no longer has, so a boot failure
