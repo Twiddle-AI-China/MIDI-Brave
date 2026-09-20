@@ -51,8 +51,25 @@ def bundle_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def usable(device: str) -> bool:
+    """Can this backend actually hold a tensor, not merely claim to exist?
+
+    is_available() answers "is the framework present", which is not the same
+    question. A macOS VM -- a CI runner, a remote session, a virtualised Mac --
+    reports Metal as available and then fails the first allocation with an
+    out-of-memory error against a pool that has nothing in it. Asking the
+    backend to hold 256 floats separates the two cases in about a millisecond.
+    """
+    import torch
+    try:
+        probe = torch.zeros(256, device=device)
+        return float((probe + 1.0).sum()) == 256.0
+    except (RuntimeError, AssertionError):
+        return False
+
+
 def pick_device(requested: str | None) -> str:
-    """Prefer the fastest backend present, and say so rather than guessing.
+    """Prefer the fastest backend that works, and settle for one that does.
 
     Metal roughly halves the plan on an M2 (283 ms against 567 ms, nearly all of
     it in the decoder) and CUDA is faster still, so try both before settling for
@@ -64,9 +81,10 @@ def pick_device(requested: str | None) -> str:
         import torch
     except ImportError:       # the caller will fail more usefully than we can
         return "cpu"
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and usable("cuda:0"):
         return "cuda:0"
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+    if (getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
+            and usable("mps")):
         return "mps"
     return "cpu"
 
