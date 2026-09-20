@@ -1,18 +1,73 @@
+/* ---------- themes ----------
+   The map and the scopes are canvases, which custom properties cannot reach, so
+   every theme also states --ink-rgb and --bg-rgb as bare triples; applyTheme()
+   in app.js copies those onto the drawing code. A theme changes the palette and
+   nothing else -- same hairlines, same layout, same information. */
 :root {
   color-scheme: dark;
   --bg: #000000;
+  --bg-rgb: 0, 0, 0;
   --panel: #0b0b0b;
   --line: #1f1f1f;
   --line-soft: #141414;
   --ink: #f2f2f2;
+  --ink-rgb: 242, 242, 242;
   --dim: #9a9a9a;
   --muted: #6e6e6e;
+  --cell: #d8d8d8;
+  --loner: #565656;
+  --hot: #ffffff;
   --rail: 56px;
   --top: 42px;
   /* The scope earns its width on a big display and must not eat the map on a
      small one, so it scales with the viewport between hard bounds. */
   --scope: clamp(240px, 26vw, 430px);
 }
+/* Amber CRT. The warmest of the dark set; the one people mean by "terminal". */
+:root[data-theme="amber"] {
+  --bg: #0a0600;  --bg-rgb: 10, 6, 0;
+  --panel: #120b01;
+  --line: #2e1f05; --line-soft: #1d1303;
+  --ink: #ffb000;  --ink-rgb: 255, 176, 0;
+  --dim: #a8741a;  --muted: #6d4c12;
+  --cell: #ffc142; --loner: #6b4a10; --hot: #fff0c4;
+}
+
+/* Green phosphor, the other obvious one. Kept slightly cyan so it does not
+   vibrate against the black the way pure #0f0 does. */
+:root[data-theme="phosphor"] {
+  --bg: #000a05;  --bg-rgb: 0, 10, 5;
+  --panel: #011109;
+  --line: #08301d; --line-soft: #051e12;
+  --ink: #3bffa3;  --ink-rgb: 59, 255, 163;
+  --dim: #23a86c;  --muted: #166d46;
+  --cell: #6effc0; --loner: #12603e; --hot: #d6fff0;
+}
+
+/* Ice. Cold blue reads as measurement rather than nostalgia, which suits the
+   analyser panes. */
+:root[data-theme="ice"] {
+  --bg: #00060d;  --bg-rgb: 0, 6, 13;
+  --panel: #010c18;
+  --line: #0b2740; --line-soft: #061829;
+  --ink: #8ad6ff;  --ink-rgb: 138, 214, 255;
+  --dim: #4f93bd;  --muted: #2f6180;
+  --cell: #b2e6ff; --loner: #1e4f6b; --hot: #eaf8ff;
+}
+
+/* Paper. The inverted one: dark ink on a warm off-white, for daylight and for
+   screenshots that have to survive being printed. */
+:root[data-theme="paper"] {
+  color-scheme: light;
+  --bg: #f3f1ea;  --bg-rgb: 243, 241, 234;
+  --panel: #e9e6dc;
+  --line: #c9c4b4; --line-soft: #dcd8cb;
+  --ink: #14120c;  --ink-rgb: 20, 18, 12;
+  --dim: #4f4b3f;  --muted: #7a7466;
+  --cell: #2a261c; --loner: #9a9484; --hot: #000000;
+}
+
+
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
@@ -36,7 +91,7 @@ body {
   letter-spacing: .06em;
 }
 .chip:hover { color: var(--ink); border-color: #3a3a3a; }
-.chip[aria-pressed="true"], .chip.on { color: #000; background: var(--ink); border-color: var(--ink); }
+.chip[aria-pressed="true"], .chip.on { color: var(--bg); background: var(--ink); border-color: var(--ink); }
 .chip.bad { color: var(--ink); border-color: #4a4a4a; border-style: dashed; }
 
 #board { display: grid; grid-template-columns: minmax(0, 1fr) var(--scope); min-height: 0; }
@@ -45,14 +100,14 @@ body {
 #map { display: block; width: 100%; height: 100%; cursor: crosshair; }
 #info {
   position: absolute; left: 18px; bottom: 16px; width: 306px; padding: 8px 10px;
-  border: 1px solid var(--line); background: rgba(0, 0, 0, 0.78);
+  border: 1px solid var(--line); background: rgba(var(--bg-rgb) / 0.82);
   pointer-events: none; line-height: 1.5;
 }
 #info-title { color: var(--ink); letter-spacing: .06em; }
 #info-body { color: var(--dim); margin-top: 3px; min-height: 2.4em; }
 #info-meta { color: var(--muted); margin-top: 4px; font-size: 9.5px; }
 
-#curtain { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, .8); cursor: pointer; }
+#curtain { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(var(--bg-rgb) / 0.82); cursor: pointer; }
 #curtain div { display: grid; gap: 7px; text-align: center; }
 #curtain b { font-size: 15px; font-weight: 600; letter-spacing: .08em; }
 #curtain span { color: var(--muted); font-size: 11px; }
@@ -67,7 +122,7 @@ body {
 .scope-cell canvas { display: block; width: 100%; height: 100%; }
 .scope-tag {
   position: absolute; left: 8px; top: 6px; z-index: 1; pointer-events: none;
-  font-size: 9px; letter-spacing: .14em; color: rgba(242, 242, 242, 0.42);
+  font-size: 9px; letter-spacing: .14em; color: rgba(var(--ink-rgb) / 0.45);
 }
 /* Collapsed, the pane becomes a full-height spine you reopen by clicking it —
    a 26px button tucked in a corner was, fairly, not findable. */
@@ -94,7 +149,7 @@ body {
   background: transparent; border: 0; color: var(--ink); font: inherit; font-size: 10px;
   letter-spacing: .08em; cursor: pointer; padding: 0; outline: none;
 }
-#scope-head select option { background: #0b0b0b; }
+#scope-head select option { background: var(--panel); }
 #scope-source { margin-left: auto; color: var(--dim); }
 
 
@@ -111,7 +166,7 @@ body {
 .knob input[type=range] { width: 84px; accent-color: var(--ink); }
 .knob output { color: var(--ink); font-size: 10.5px; min-width: 48px; }
 .knob input[type=number] {
-  width: 80px; background: #0b0b0b; border: 1px solid var(--line); color: var(--ink);
+  width: 80px; background: var(--panel); border: 1px solid var(--line); color: var(--ink);
   border-radius: 3px; padding: 3px 6px; font: inherit; font-size: 10.5px;
 }
 #compMeter { color: var(--dim); min-width: 92px; }
@@ -127,10 +182,10 @@ audio { display: none; }
   padding: 2px 14px 16px; display: grid; gap: 2px; z-index: 5;
 }
 #panel h3 { font-size: 10px; letter-spacing: .16em; color: var(--muted); margin: 15px 0 8px; font-weight: 500; }
-#panel input[type=number] { background: #0b0b0b; border: 1px solid var(--line); color: var(--ink); border-radius: 3px; padding: 4px 6px; font: inherit; font-size: 10.5px; grid-column: 2 / 4; }
+#panel input[type=number] { background: var(--panel); border: 1px solid var(--line); color: var(--ink); border-radius: 3px; padding: 4px 6px; font: inherit; font-size: 10.5px; grid-column: 2 / 4; }
 #panel label { display: grid; grid-template-columns: 52px 1fr 58px; gap: 8px; align-items: center; color: var(--muted); font-size: 10.5px; margin-bottom: 5px; }
 #panel select {
-  background: #0b0b0b; border: 1px solid var(--line); color: var(--ink); border-radius: 3px;
+  background: var(--panel); border: 1px solid var(--line); color: var(--ink); border-radius: 3px;
   padding: 4px 6px; font: inherit; font-size: 10.5px; grid-column: 2 / 4;
 }
 #panel input[type=range] { accent-color: var(--ink); }
@@ -138,7 +193,7 @@ audio { display: none; }
 #panel output { color: var(--ink); text-align: right; }
 .axes label { grid-template-columns: 64px 1fr 40px; }
 
-.knob select { background: #0b0b0b; border: 1px solid var(--line); color: var(--ink); border-radius: 3px; padding: 3px 5px; font: inherit; font-size: 10.5px; }
+.knob select { background: var(--panel); border: 1px solid var(--line); color: var(--ink); border-radius: 3px; padding: 3px 5px; font: inherit; font-size: 10.5px; }
 
 /* ---------- responsive ---------- */
 

@@ -28,9 +28,73 @@ const pickAudio = payload =>
 // Evaluation rows name their clips .ogg; the server transcodes on demand, so
 // asking for the other extension is enough.
 
-const INK = '#f2f2f2';
-const CELL = '#d8d8d8';
-const LONER = '#565656';
+/**
+ * Canvas colours, read from the stylesheet rather than written twice.
+ *
+ * The map and the scopes are canvases, so CSS custom properties cannot reach
+ * them; every shade used to be a literal rgba(242, 242, 242, x) spread across
+ * thirty call sites. These are refreshed from the active theme's tokens by
+ * applyTheme(), and `tint(alpha)` is what the drawing code asks for.
+ */
+let INK = '#f2f2f2';
+let CELL = '#d8d8d8';
+let LONER = '#565656';
+let HOT = '#ffffff';
+let INK_RGB = '242, 242, 242';
+let BG_RGB = '0, 0, 0';
+let BG = '#000000';
+
+let INK_TRIPLE = [242, 242, 242];
+let BG_TRIPLE = [0, 0, 0];
+
+// Named tint, not ink: paintStatic and the scope strips both call their
+// 2D context `ink`, which shadowed this in exactly the functions that draw.
+const tint = alpha => `rgba(${INK_RGB}, ${alpha})`;
+const shade = alpha => `rgba(${BG_RGB}, ${alpha})`;
+
+/**
+ * An opaque colour `level` of the way from background to ink.
+ *
+ * The spectrogram scrolls its strip sideways and paints one fresh column per
+ * frame, so it needs opaque pixels: a translucent fill would composite over
+ * whatever scrolled underneath and smear the history.
+ */
+function ramp(level) {
+  const t = clamp(level, 0, 1);
+  const mix = channel => Math.round(BG_TRIPLE[channel]
+    + (INK_TRIPLE[channel] - BG_TRIPLE[channel]) * t);
+  return `rgb(${mix(0)}, ${mix(1)}, ${mix(2)})`;
+}
+
+// Set at import time, before the first paint and before wire() reads it to
+// position the dropdown: doing this inside boot() meant the page came up in the
+// stored theme while the settings menu still claimed monochrome.
+document.documentElement.dataset.theme = localStorage.getItem('atlas.theme') || 'mono';
+
+/** Themes live in the stylesheet; this copies the active one onto the canvas. */
+function applyTheme(name) {
+  const root = document.documentElement;
+  if (name) {
+    root.dataset.theme = name;
+    localStorage.setItem('atlas.theme', name);
+  }
+  const style = getComputedStyle(root);
+  const token = (key, fallback) => (style.getPropertyValue(key) || fallback).trim();
+  INK_RGB = token('--ink-rgb', '242, 242, 242');
+  BG_RGB = token('--bg-rgb', '0, 0, 0');
+  INK_TRIPLE = INK_RGB.split(',').map(value => Number(value.trim()) || 0);
+  BG_TRIPLE = BG_RGB.split(',').map(value => Number(value.trim()) || 0);
+  INK = token('--ink', '#f2f2f2');
+  CELL = token('--cell', '#d8d8d8');
+  LONER = token('--loner', '#565656');
+  HOT = token('--hot', '#ffffff');
+  BG = token('--bg', '#000000');
+  // The map's background layer and every scope strip were painted in the old
+  // palette, so both have to be thrown away rather than drawn over.
+  staticLayer.ready = false;
+  scopeLayout();
+  drawMap();
+}
 
 let status = null;
 let evaluation = null;
@@ -181,7 +245,13 @@ function applyLanguage() {
     node.dataset.info = language === 'en' ? node.dataset.infoEn : node.dataset.infoZh;
   }
   // Anything the script drew itself has to be drawn again.
-  if (scope.views.length) buildSlots(true);
+  if (scope.views.length) {
+    // buildSlots hands back fresh views with no dimensions, and the frame loop
+    // skips a view of width 0 -- so rebuilding without re-measuring is how the
+    // visualiser went blank until the drawer was toggled.
+    buildSlots(true);
+    scopeLayout();
+  }
   if (cells.length) {
     // The picker holds one translated name among the digits, so it has to be
     // relabelled too -- keeping the selection, which is the whole point.
@@ -307,7 +377,7 @@ function paintStatic() {
   ink.clearRect(0, 0, view.width, view.height);
 
   // A sparse lattice so empty atlas regions read as space rather than void.
-  ink.fillStyle = 'rgba(242, 242, 242, 0.055)';
+  ink.fillStyle = tint(0.055);
   for (let x = view.width / 2 % 42; x < view.width; x += 42) {
     for (let y = view.height / 2 % 42; y < view.height; y += 42) {
       ink.fillRect(Math.round(x), Math.round(y), 1, 1);
@@ -316,8 +386,8 @@ function paintStatic() {
 
   // Axis rails: the map is a projection with units, so label them.
   ink.font = '9px ui-monospace, monospace';
-  ink.fillStyle = 'rgba(242, 242, 242, 0.30)';
-  ink.strokeStyle = 'rgba(242, 242, 242, 0.14)';
+  ink.fillStyle = tint(0.30);
+  ink.strokeStyle = tint(0.14);
   ink.lineWidth = 1;
   for (let step = -4; step <= 4; step++) {
     const value = step / 4;
@@ -346,7 +416,7 @@ function paintStatic() {
   // projection is lying about it.
   ink.lineWidth = 1;
   for (const edge of edges) {
-    ink.strokeStyle = `rgba(242, 242, 242, ${(0.05 + 0.13 * edge.weight).toFixed(3)})`;
+    ink.strokeStyle = tint((0.05 + 0.13 * edge.weight).toFixed(3));
     ink.setLineDash(edge.shown < FOLDED ? [2, 4] : []);
     edgePath(ink, edge);
   }
@@ -369,7 +439,7 @@ function drawMap() {
     paint.lineWidth = 1;
     for (const edge of edges) {
       if (edge.a !== sounding && edge.b !== sounding) continue;
-      paint.strokeStyle = `rgba(242, 242, 242, ${(0.22 + 0.3 * edge.weight).toFixed(3)})`;
+      paint.strokeStyle = tint((0.22 + 0.3 * edge.weight).toFixed(3));
       paint.setLineDash(edge.shown < FOLDED ? [2, 4] : []);
       edgePath(paint, edge);
     }
@@ -377,7 +447,7 @@ function drawMap() {
     for (const radius of [13, 17]) {
       paint.beginPath();
       paint.arc(sounding.x, sounding.y, radius, 0, Math.PI * 2);
-      paint.strokeStyle = 'rgba(242, 242, 242, 0.75)';
+      paint.strokeStyle = tint(0.75);
       paint.lineWidth = 1;
       paint.stroke();
     }
@@ -387,7 +457,7 @@ function drawMap() {
     if (cell.test) {
       paint.beginPath();
       paint.arc(cell.x, cell.y, 11, 0, Math.PI * 2);
-      paint.strokeStyle = 'rgba(242, 242, 242, 0.34)';
+      paint.strokeStyle = tint(0.34);
       paint.lineWidth = 1;
       paint.stroke();
     }
@@ -403,7 +473,7 @@ function drawMap() {
   // The leash makes the lag explicit: the voice is still travelling to the
   // coordinate you are pointing at.
   if (voice && cursor && Math.hypot(voice[0] - cursor[0], voice[1] - cursor[1]) > 14) {
-    paint.strokeStyle = 'rgba(242, 242, 242, 0.22)';
+    paint.strokeStyle = tint(0.22);
     paint.setLineDash([2, 3]);
     paint.lineWidth = 1;
     paint.beginPath();
@@ -415,7 +485,7 @@ function drawMap() {
   if (voice) {
     // The last soft halo on the map. A dashed reticle holds the same amount of
     // attention without blurring the hairlines it sits on top of.
-    paint.strokeStyle = 'rgba(242, 242, 242, 0.30)';
+    paint.strokeStyle = tint(0.30);
     paint.lineWidth = 1;
     paint.setLineDash([2, 4]);
     paint.beginPath();
@@ -439,7 +509,7 @@ function drawMap() {
   if (cursor) {
     paint.beginPath();
     paint.arc(cursor[0], cursor[1], 11, 0, Math.PI * 2);
-    paint.strokeStyle = 'rgba(242, 242, 242, 0.5)';
+    paint.strokeStyle = tint(0.5);
     paint.lineWidth = 1;
     paint.stroke();
   }
@@ -457,8 +527,8 @@ function drawMap() {
 
 function drawTrajectory(view) {
   paint.strokeStyle = trajectory.playing
-    ? 'rgba(242, 242, 242, 0.45)'
-    : 'rgba(242, 242, 242, 0.28)';
+    ? tint(0.45)
+    : tint(0.28);
   paint.lineWidth = 1;
   paint.setLineDash(trajectory.drawing ? [] : [5, 4]);
   paint.beginPath();
@@ -471,7 +541,7 @@ function drawTrajectory(view) {
 
   for (const end of [trajectory.points[0], trajectory.points.at(-1)]) {
     const [x, y] = view.toPixel(end);
-    paint.strokeStyle = 'rgba(242, 242, 242, 0.5)';
+    paint.strokeStyle = tint(0.5);
     paint.strokeRect(x - 3.5, y - 3.5, 7, 7);
   }
 
@@ -506,7 +576,7 @@ function drawInset(view, cell) {
     // Mostly orthogonal, like an annotation rule rather than a drawn line, and
     // faint enough that it does not compete with the cells it crosses.
     const elbow = anchorX - 26;
-    paint.strokeStyle = 'rgba(242, 242, 242, 0.13)';
+    paint.strokeStyle = tint(0.13);
     paint.lineWidth = 1;
     paint.setLineDash([3, 4]);
     paint.beginPath();
@@ -518,30 +588,30 @@ function drawInset(view, cell) {
     paint.setLineDash([]);
   }
 
-  paint.fillStyle = 'rgba(0, 0, 0, 0.72)';
+  paint.fillStyle = shade(0.72);
   paint.fillRect(left, top, width, height);
-  paint.strokeStyle = 'rgba(242, 242, 242, 0.28)';
+  paint.strokeStyle = tint(0.28);
   paint.lineWidth = 1;
   paint.strokeRect(left + 0.5, top + 0.5, width, height);
 
   paint.font = '9px ui-monospace, monospace';
   paint.textAlign = 'left';
-  paint.fillStyle = 'rgba(242, 242, 242, 0.55)';
+  paint.fillStyle = tint(0.55);
   paint.fillText(`[8D] ${cell.label}`, left + 7, top + 13);
 
   const rows = cell.pca.length;
   const usable = width - 34;
   for (let axis = 0; axis < rows; axis++) {
     const y = top + 24 + axis * 8;
-    paint.fillStyle = 'rgba(242, 242, 242, 0.34)';
+    paint.fillStyle = tint(0.34);
     paint.fillText(`${axis + 1}`, left + 7, y + 3);
     const middle = left + 20 + usable / 2;
-    paint.fillStyle = 'rgba(242, 242, 242, 0.14)';
+    paint.fillStyle = tint(0.14);
     paint.fillRect(left + 20, y, usable, 1);          // the zero line
     const extent = clamp(cell.pca[axis], -1, 1) * (usable / 2);
-    paint.fillStyle = 'rgba(242, 242, 242, 0.85)';
+    paint.fillStyle = tint(0.85);
     paint.fillRect(Math.min(middle, middle + extent), y - 2, Math.abs(extent), 4);
-    paint.fillStyle = 'rgba(242, 242, 242, 0.30)';
+    paint.fillStyle = tint(0.30);
     paint.fillRect(Math.round(middle), y - 4, 1, 8);  // centre tick
   }
 }
@@ -697,7 +767,7 @@ function scopeLayout() {
     view.strip.width = view.width;
     view.strip.height = view.height;
     const ink = view.strip.getContext('2d');
-    ink.fillStyle = '#000';
+    ink.fillStyle = BG;
     ink.fillRect(0, 0, view.width, view.height);
     view.rows = null;
     view.ridges = [];
@@ -786,9 +856,15 @@ function scopeFrame(now) {
     `40Hz–${(scopeTop(rate) / 1000).toFixed(1)}kHz · ${t('scope.stream')} ${(rate / 2000).toFixed(1)}kHz`;
 
   for (const view of scope.views) {
-    if (!view.width || view.canvas.clientWidth < 2) continue;
+    if (view.canvas.clientWidth < 2) continue;          // genuinely not on screen
+    // Self-heal. Twice now the scope has gone dead because something replaced
+    // or resized the views and did not lay them out again; the loop can see
+    // that for itself, and a view that is visible but unmeasured is a bug
+    // rather than a state worth preserving.
+    if (!view.width) scopeLayout();
+    if (!view.width) continue;
     const context = view.canvas.getContext('2d');
-    context.fillStyle = '#000';
+    context.fillStyle = BG;
     context.fillRect(0, 0, view.width, view.height);
     view.draw(context, view, {rate, elapsed});
   }
@@ -812,12 +888,11 @@ function viewSpectrogram(context, view, {rate, elapsed}) {
       let sum = 0;
       for (let bin = low; bin < high; bin++) sum += scope.freq[bin];
       const level = (sum / Math.max(1, high - low) / 255) ** 1.2;
-      const shade = Math.round(clamp(level, 0, 1) * 255);
-      strip.fillStyle = `rgb(${shade}, ${shade}, ${shade})`;
+      strip.fillStyle = ramp(level);
       strip.fillRect(view.width - columns, row, columns, 1);
     }
     if (dropped) {
-      strip.fillStyle = '#ffffff';
+      strip.fillStyle = HOT;
       strip.fillRect(view.width - columns, view.height - 3, Math.max(1, columns), 3);
     }
   }
@@ -865,9 +940,9 @@ function viewRidge(context, view, {rate, elapsed}) {
     }
     context.lineTo(view.width, base);
     context.closePath();
-    context.fillStyle = '#000';
+    context.fillStyle = BG;
     context.fill();
-    context.strokeStyle = `rgba(242, 242, 242, ${0.10 + 0.75 * fade})`;
+    context.strokeStyle = tint(0.10 + 0.75 * fade);
     context.lineWidth = 1;
     context.stroke();
   }
@@ -893,9 +968,9 @@ function viewSpectrum(context, view, {rate, elapsed}) {
     view.peaks[index] = Math.max(level, view.peaks[index] - elapsed * 0.55);
     const x = index / bars * view.width;
     const width = view.width / bars - 1;
-    context.fillStyle = `rgba(242, 242, 242, ${0.25 + 0.65 * level})`;
+    context.fillStyle = tint(0.25 + 0.65 * level);
     context.fillRect(x, view.height * (1 - level), width, view.height * level);
-    context.fillStyle = 'rgba(242, 242, 242, 0.85)';
+    context.fillStyle = tint(0.85);
     context.fillRect(x, view.height * (1 - view.peaks[index]) - 1, width, 1);
   }
   logFrequencyGrid(context, view, rate, lowest);
@@ -909,7 +984,7 @@ function viewWave(context, view) {
     if (samples[index - 1] < 128 && samples[index] >= 128) { trigger = index; break; }
   }
   const count = Math.floor(samples.length / 2);
-  context.strokeStyle = 'rgba(242, 242, 242, 0.14)';
+  context.strokeStyle = tint(0.14);
   context.beginPath();
   context.moveTo(0, view.height / 2);
   context.lineTo(view.width, view.height / 2);
@@ -957,12 +1032,12 @@ function viewLoudness(context, view, {elapsed}) {
   context.textAlign = 'left';
   for (const db of [-6, -12, -24, -36]) {
     const y = toY(db);
-    context.strokeStyle = 'rgba(242, 242, 242, 0.09)';
+    context.strokeStyle = tint(0.09);
     context.beginPath();
     context.moveTo(0, y);
     context.lineTo(view.width, y);
     context.stroke();
-    context.fillStyle = 'rgba(242, 242, 242, 0.32)';
+    context.fillStyle = tint(0.32);
     context.fillText(`${db}`, 4, y - 3);
   }
   const trace = (key, style, width) => {
@@ -976,7 +1051,7 @@ function viewLoudness(context, view, {elapsed}) {
     context.lineWidth = width;
     context.stroke();
   };
-  trace('peak', 'rgba(242, 242, 242, 0.30)', 1);
+  trace('peak', tint(0.30), 1);
   trace('rms', INK, 1.4);
   context.beginPath();
   view.levels.forEach((value, index) => {
@@ -984,7 +1059,7 @@ function viewLoudness(context, view, {elapsed}) {
     const y = -value.reduction / 24 * view.height;
     index ? context.lineTo(x, y) : context.moveTo(x, y);
   });
-  context.strokeStyle = 'rgba(242, 242, 242, 0.5)';
+  context.strokeStyle = tint(0.5);
   context.setLineDash([3, 3]);
   context.lineWidth = 1;
   context.stroke();
@@ -1006,12 +1081,12 @@ function frequencyGrid(context, view, rate) {
   for (const frequency of [100, 250, 500, 1000, 2000]) {
     if (frequency >= scopeTop(rate)) continue;
     const y = view.height * (1 - (mel(frequency) - bottom) / (top - bottom));
-    context.strokeStyle = 'rgba(242, 242, 242, 0.10)';
+    context.strokeStyle = tint(0.10);
     context.beginPath();
     context.moveTo(0, y);
     context.lineTo(view.width, y);
     context.stroke();
-    context.fillStyle = 'rgba(242, 242, 242, 0.34)';
+    context.fillStyle = tint(0.34);
     context.fillText(frequency >= 1000 ? `${frequency / 1000}k` : String(frequency), 4, y - 3);
   }
 }
@@ -1023,12 +1098,12 @@ function logFrequencyGrid(context, view, rate, lowest, faint = false) {
   for (const frequency of [100, 250, 500, 1000, 2000]) {
     if (frequency >= scopeTop(rate)) continue;
     const x = Math.log2(frequency / lowest) / span * view.width;
-    context.strokeStyle = `rgba(242, 242, 242, ${faint ? 0.05 : 0.09})`;
+    context.strokeStyle = tint(faint ? 0.05 : 0.09);
     context.beginPath();
     context.moveTo(x, 0);
     context.lineTo(x, view.height - 10);
     context.stroke();
-    context.fillStyle = 'rgba(242, 242, 242, 0.34)';
+    context.fillStyle = tint(0.34);
     context.fillText(frequency >= 1000 ? `${frequency / 1000}k` : String(frequency), x, view.height - 2);
   }
 }
@@ -2366,6 +2441,8 @@ function wire() {
       applyCompressor(live.fileChain);
     });
   }
+  $('#theme').value = document.documentElement.dataset.theme || 'mono';
+  $('#theme').addEventListener('change', event => applyTheme(event.target.value));
   $('#lang').value = language;
   $('#lang').addEventListener('change', event => {
     language = languages.includes(event.target.value) ? event.target.value : 'zh';
@@ -2498,6 +2575,7 @@ async function boot() {
   applyLanguage();
   layout();
   scopeLayout();
+  applyTheme(null);        // read the tokens the stylesheet just resolved
   // The server knows whether it is on this machine or across a tunnel; take its
   // word for it rather than guessing from a hostname that is 127.0.0.1 either way.
   if (status.suggestedMode) {
@@ -2550,6 +2628,9 @@ window.atlasDebug = () => ({
   full: coordinate && coordinate.slice(),
   scopeSource: $('#scope-source').textContent,
   slots: scope.views.map(view => view.key),
+  // A view with width 0 has never been laid out, and the frame loop
+  // skips it -- which looks exactly like a dead visualiser.
+  viewWidths: scope.views.map(view => view.width),
   graph: {
     k: KNN,
     edges: edges.length,
