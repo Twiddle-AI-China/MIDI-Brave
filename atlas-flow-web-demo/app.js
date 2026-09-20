@@ -47,22 +47,55 @@ let BG = '#000000';
 let INK_TRIPLE = [242, 242, 242];
 let BG_TRIPLE = [0, 0, 0];
 
+/**
+ * The roles a theme colours, beyond plain ink.
+ *
+ * Structure -- the grid, the axis rails, the labels, the panel frames -- stays
+ * neutral and uses tint(). These are the things that mean something: which
+ * preset you are hearing, where you are pointing, the path you drew, which
+ * cells the model never saw. Giving them one shared ink made the map readable
+ * but flat, and made every "theme" a different shade of the same monochrome.
+ */
+const ROLES = ['cell', 'loner', 'edge', 'accent', 'accent2', 'path', 'test', 'warn'];
+const PALETTE = {};
+const TRIPLES = {};
+let RAMP = [[0, 0, 0], [255, 255, 255]];
+
 // Named tint, not ink: paintStatic and the scope strips both call their
 // 2D context `ink`, which shadowed this in exactly the functions that draw.
 const tint = alpha => `rgba(${INK_RGB}, ${alpha})`;
 const shade = alpha => `rgba(${BG_RGB}, ${alpha})`;
+/** A role colour at partial opacity, for the same role at lower emphasis. */
+const role = (name, alpha = 1) => alpha >= 1
+  ? PALETTE[name]
+  : `rgba(${(TRIPLES[name] || INK_TRIPLE).join(', ')}, ${alpha})`;
+
+function parseColor(value) {
+  const text = String(value || '').trim();
+  const hex = text.replace('#', '');
+  if (/^[0-9a-f]{6}$/i.test(hex)) {
+    return [0, 2, 4].map(at => parseInt(hex.slice(at, at + 2), 16));
+  }
+  const numbers = text.match(/[\d.]+/g);
+  return numbers && numbers.length >= 3 ? numbers.slice(0, 3).map(Number) : [242, 242, 242];
+}
 
 /**
- * An opaque colour `level` of the way from background to ink.
+ * An opaque colour `level` of the way along the theme's ramp.
  *
  * The spectrogram scrolls its strip sideways and paints one fresh column per
  * frame, so it needs opaque pixels: a translucent fill would composite over
- * whatever scrolled underneath and smear the history.
+ * whatever scrolled underneath and smear the history. A ramp of several stops
+ * rather than background-to-ink is what makes a spectrogram legible -- the
+ * scientific colormaps exist because a single hue wastes most of its dynamic
+ * range on shades the eye cannot separate.
  */
 function ramp(level) {
-  const t = clamp(level, 0, 1);
-  const mix = channel => Math.round(BG_TRIPLE[channel]
-    + (INK_TRIPLE[channel] - BG_TRIPLE[channel]) * t);
+  const t = clamp(level, 0, 1) * (RAMP.length - 1);
+  const low = RAMP[Math.floor(t)];
+  const high = RAMP[Math.min(RAMP.length - 1, Math.floor(t) + 1)];
+  const f = t - Math.floor(t);
+  const mix = channel => Math.round(low[channel] + (high[channel] - low[channel]) * f);
   return `rgb(${mix(0)}, ${mix(1)}, ${mix(2)})`;
 }
 
@@ -82,13 +115,18 @@ function applyTheme(name) {
   const token = (key, fallback) => (style.getPropertyValue(key) || fallback).trim();
   INK_RGB = token('--ink-rgb', '242, 242, 242');
   BG_RGB = token('--bg-rgb', '0, 0, 0');
-  INK_TRIPLE = INK_RGB.split(',').map(value => Number(value.trim()) || 0);
-  BG_TRIPLE = BG_RGB.split(',').map(value => Number(value.trim()) || 0);
+  INK_TRIPLE = parseColor(INK_RGB);
+  BG_TRIPLE = parseColor(BG_RGB);
   INK = token('--ink', '#f2f2f2');
-  CELL = token('--cell', '#d8d8d8');
-  LONER = token('--loner', '#565656');
-  HOT = token('--hot', '#ffffff');
   BG = token('--bg', '#000000');
+  for (const key of ROLES) {
+    PALETTE[key] = token(`--${key}`, INK);
+    TRIPLES[key] = parseColor(PALETTE[key]);
+  }
+  CELL = PALETTE.cell;
+  LONER = PALETTE.loner;
+  HOT = PALETTE.warn;
+  RAMP = token('--ramp', '0 0 0 / 255 255 255').split('/').map(parseColor);
   // The map's background layer and every scope strip were painted in the old
   // palette, so both have to be thrown away rather than drawn over.
   staticLayer.ready = false;
@@ -416,7 +454,7 @@ function paintStatic() {
   // projection is lying about it.
   ink.lineWidth = 1;
   for (const edge of edges) {
-    ink.strokeStyle = tint((0.05 + 0.13 * edge.weight).toFixed(3));
+    ink.strokeStyle = role('edge', Number((0.10 + 0.22 * edge.weight).toFixed(3)));
     ink.setLineDash(edge.shown < FOLDED ? [2, 4] : []);
     edgePath(ink, edge);
   }
@@ -439,7 +477,7 @@ function drawMap() {
     paint.lineWidth = 1;
     for (const edge of edges) {
       if (edge.a !== sounding && edge.b !== sounding) continue;
-      paint.strokeStyle = tint((0.22 + 0.3 * edge.weight).toFixed(3));
+      paint.strokeStyle = role('edge', Number((0.38 + 0.42 * edge.weight).toFixed(3)));
       paint.setLineDash(edge.shown < FOLDED ? [2, 4] : []);
       edgePath(paint, edge);
     }
@@ -447,7 +485,7 @@ function drawMap() {
     for (const radius of [13, 17]) {
       paint.beginPath();
       paint.arc(sounding.x, sounding.y, radius, 0, Math.PI * 2);
-      paint.strokeStyle = tint(0.75);
+      paint.strokeStyle = role('accent', 0.85);
       paint.lineWidth = 1;
       paint.stroke();
     }
@@ -457,7 +495,7 @@ function drawMap() {
     if (cell.test) {
       paint.beginPath();
       paint.arc(cell.x, cell.y, 11, 0, Math.PI * 2);
-      paint.strokeStyle = tint(0.34);
+      paint.strokeStyle = role('test', 0.7);
       paint.lineWidth = 1;
       paint.stroke();
     }
@@ -473,7 +511,7 @@ function drawMap() {
   // The leash makes the lag explicit: the voice is still travelling to the
   // coordinate you are pointing at.
   if (voice && cursor && Math.hypot(voice[0] - cursor[0], voice[1] - cursor[1]) > 14) {
-    paint.strokeStyle = tint(0.22);
+    paint.strokeStyle = role('accent', 0.35);
     paint.setLineDash([2, 3]);
     paint.lineWidth = 1;
     paint.beginPath();
@@ -485,14 +523,14 @@ function drawMap() {
   if (voice) {
     // The last soft halo on the map. A dashed reticle holds the same amount of
     // attention without blurring the hairlines it sits on top of.
-    paint.strokeStyle = tint(0.30);
+    paint.strokeStyle = role('accent', 0.45);
     paint.lineWidth = 1;
     paint.setLineDash([2, 4]);
     paint.beginPath();
     paint.arc(voice[0], voice[1], 17, 0, Math.PI * 2);
     paint.stroke();
     paint.setLineDash([]);
-    paint.strokeStyle = INK;
+    paint.strokeStyle = role('accent');
     paint.lineWidth = 1.5;
     paint.beginPath();
     paint.arc(voice[0], voice[1], 6, 0, Math.PI * 2);
@@ -509,7 +547,7 @@ function drawMap() {
   if (cursor) {
     paint.beginPath();
     paint.arc(cursor[0], cursor[1], 11, 0, Math.PI * 2);
-    paint.strokeStyle = tint(0.5);
+    paint.strokeStyle = role('accent2', 0.75);
     paint.lineWidth = 1;
     paint.stroke();
   }
@@ -527,8 +565,8 @@ function drawMap() {
 
 function drawTrajectory(view) {
   paint.strokeStyle = trajectory.playing
-    ? tint(0.45)
-    : tint(0.28);
+    ? role('path', 0.85)
+    : role('path', 0.5);
   paint.lineWidth = 1;
   paint.setLineDash(trajectory.drawing ? [] : [5, 4]);
   paint.beginPath();
@@ -541,7 +579,7 @@ function drawTrajectory(view) {
 
   for (const end of [trajectory.points[0], trajectory.points.at(-1)]) {
     const [x, y] = view.toPixel(end);
-    paint.strokeStyle = tint(0.5);
+    paint.strokeStyle = role('path', 0.8);
     paint.strokeRect(x - 3.5, y - 3.5, 7, 7);
   }
 
@@ -551,7 +589,7 @@ function drawTrajectory(view) {
       const [x, y] = view.toPixel(place);
       paint.beginPath();
       paint.arc(x, y, 4, 0, Math.PI * 2);
-      paint.fillStyle = INK;
+      paint.fillStyle = role('path');
       paint.fill();
     }
   }
@@ -942,7 +980,7 @@ function viewRidge(context, view, {rate, elapsed}) {
     context.closePath();
     context.fillStyle = BG;
     context.fill();
-    context.strokeStyle = tint(0.10 + 0.75 * fade);
+    context.strokeStyle = ramp(0.15 + 0.85 * fade);
     context.lineWidth = 1;
     context.stroke();
   }
@@ -968,7 +1006,7 @@ function viewSpectrum(context, view, {rate, elapsed}) {
     view.peaks[index] = Math.max(level, view.peaks[index] - elapsed * 0.55);
     const x = index / bars * view.width;
     const width = view.width / bars - 1;
-    context.fillStyle = tint(0.25 + 0.65 * level);
+    context.fillStyle = ramp(0.2 + 0.8 * level);
     context.fillRect(x, view.height * (1 - level), width, view.height * level);
     context.fillStyle = tint(0.85);
     context.fillRect(x, view.height * (1 - view.peaks[index]) - 1, width, 1);
@@ -996,7 +1034,7 @@ function viewWave(context, view) {
     const y = view.height / 2 - value * view.height * 0.42;
     index ? context.lineTo(x, y) : context.moveTo(x, y);
   }
-  context.strokeStyle = INK;
+  context.strokeStyle = role('accent2');
   context.lineWidth = 1.2;
   context.stroke();
 }
@@ -1051,7 +1089,7 @@ function viewLoudness(context, view, {elapsed}) {
     context.lineWidth = width;
     context.stroke();
   };
-  trace('peak', tint(0.30), 1);
+  trace('peak', role('accent', 0.55), 1);
   trace('rms', INK, 1.4);
   context.beginPath();
   view.levels.forEach((value, index) => {
@@ -1059,7 +1097,7 @@ function viewLoudness(context, view, {elapsed}) {
     const y = -value.reduction / 24 * view.height;
     index ? context.lineTo(x, y) : context.moveTo(x, y);
   });
-  context.strokeStyle = tint(0.5);
+  context.strokeStyle = role('accent');
   context.setLineDash([3, 3]);
   context.lineWidth = 1;
   context.stroke();

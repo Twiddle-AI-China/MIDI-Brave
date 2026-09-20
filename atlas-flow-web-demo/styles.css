@@ -14,59 +14,84 @@
   --ink-rgb: 242, 242, 242;
   --dim: #9a9a9a;
   --muted: #6e6e6e;
+  /* Monochrome is the one theme that stays monochrome: every role is a grey. */
   --cell: #d8d8d8;
   --loner: #565656;
-  --hot: #ffffff;
+  --edge: #f2f2f2;
+  --accent: #ffffff;
+  --accent2: #bdbdbd;
+  --path: #e0e0e0;
+  --test: #8f8f8f;
+  --warn: #ffffff;
+  --ramp: 0 0 0 / 52 52 52 / 124 124 124 / 198 198 198 / 255 255 255;
   --rail: 56px;
   --top: 42px;
   /* The scope earns its width on a big display and must not eat the map on a
      small one, so it scales with the viewport between hard bounds. */
   --scope: clamp(240px, 26vw, 430px);
 }
-/* Amber CRT. The warmest of the dark set; the one people mean by "terminal". */
-:root[data-theme="amber"] {
-  --bg: #0a0600;  --bg-rgb: 10, 6, 0;
-  --panel: #120b01;
-  --line: #2e1f05; --line-soft: #1d1303;
-  --ink: #ffb000;  --ink-rgb: 255, 176, 0;
-  --dim: #a8741a;  --muted: #6d4c12;
-  --cell: #ffc142; --loner: #6b4a10; --hot: #fff0c4;
+/* The four below are properly polychrome: the ramp is a real colormap, and the
+   things that mean something -- what is sounding, where you point, the path you
+   drew, which cells are held out -- each get their own hue. Structure (grid,
+   rails, labels, frames) stays neutral in every theme, or the map turns into
+   confetti and stops being readable. */
+
+/* Ember. Magma ramp, which spends its range on hues the eye separates easily,
+   with a cyan focus that cannot be confused with anything in it. */
+:root[data-theme="ember"] {
+  --bg: #0b0510;  --bg-rgb: 11, 5, 16;
+  --panel: #150a1e;
+  --line: #34204a; --line-soft: #1f1430;
+  --ink: #f4e9f8;  --ink-rgb: 244, 233, 248;
+  --dim: #b795c6;  --muted: #7d5f8e;
+  --cell: #ffb37a; --loner: #6f4a66; --edge: #a763d8;
+  --accent: #35e0d3; --accent2: #ffc65e; --path: #ff6fae;
+  --test: #c2f549;  --warn: #ff4d4d;
+  --ramp: 4 2 12 / 87 16 110 / 187 55 84 / 249 142 8 / 252 253 191;
 }
 
-/* Green phosphor, the other obvious one. Kept slightly cyan so it does not
-   vibrate against the black the way pure #0f0 does. */
-:root[data-theme="phosphor"] {
-  --bg: #000a05;  --bg-rgb: 0, 10, 5;
-  --panel: #011109;
-  --line: #08301d; --line-soft: #051e12;
-  --ink: #3bffa3;  --ink-rgb: 59, 255, 163;
-  --dim: #23a86c;  --muted: #166d46;
-  --cell: #6effc0; --loner: #12603e; --hot: #d6fff0;
+/* Reef. Viridis, which stays legible converted to grey -- the one colormap
+   that survives being printed or screenshotted badly. Coral for focus. */
+:root[data-theme="reef"] {
+  --bg: #04121a;  --bg-rgb: 4, 18, 26;
+  --panel: #072028;
+  --line: #0f3f4a; --line-soft: #082a33;
+  --ink: #e4f7f3;  --ink-rgb: 228, 247, 243;
+  --dim: #8fc7c1;  --muted: #55908b;
+  --cell: #7fe3c4; --loner: #2b6b61; --edge: #2fa8b8;
+  --accent: #ff6b57; --accent2: #ffd447; --path: #b78cff;
+  --test: #d9f7ff;  --warn: #ff3b30;
+  --ramp: 68 1 84 / 59 82 139 / 33 145 140 / 94 201 98 / 253 231 37;
 }
 
-/* Ice. Cold blue reads as measurement rather than nostalgia, which suits the
-   analyser panes. */
-:root[data-theme="ice"] {
-  --bg: #00060d;  --bg-rgb: 0, 6, 13;
-  --panel: #010c18;
-  --line: #0b2740; --line-soft: #061829;
-  --ink: #8ad6ff;  --ink-rgb: 138, 214, 255;
-  --dim: #4f93bd;  --muted: #2f6180;
-  --cell: #b2e6ff; --loner: #1e4f6b; --hot: #eaf8ff;
+/* Dusk. Indigo night, blue through magenta, lime focus. The coolest ground of
+   the set, so the warm accents carry the whole foreground. */
+:root[data-theme="dusk"] {
+  --bg: #06081c;  --bg-rgb: 6, 8, 28;
+  --panel: #0c1030;
+  --line: #222a63; --line-soft: #141a42;
+  --ink: #e9ecff;  --ink-rgb: 233, 236, 255;
+  --dim: #9ba4da;  --muted: #6570a2;
+  --cell: #8fa6ff; --loner: #39417d; --edge: #7b6ae0;
+  --accent: #b9ff3d; --accent2: #ff8ad8; --path: #ffd166;
+  --test: #7ef5ff;  --warn: #ff4d6d;
+  --ramp: 8 10 40 / 46 40 140 / 130 55 180 / 224 84 150 / 255 214 236;
 }
 
-/* Paper. The inverted one: dark ink on a warm off-white, for daylight and for
-   screenshots that have to survive being printed. */
+/* Paper. Light and still coloured -- an inverted ramp, because on a white
+   ground the loud parts have to get darker, not brighter. */
 :root[data-theme="paper"] {
   color-scheme: light;
-  --bg: #f3f1ea;  --bg-rgb: 243, 241, 234;
-  --panel: #e9e6dc;
-  --line: #c9c4b4; --line-soft: #dcd8cb;
-  --ink: #14120c;  --ink-rgb: 20, 18, 12;
-  --dim: #4f4b3f;  --muted: #7a7466;
-  --cell: #2a261c; --loner: #9a9484; --hot: #000000;
+  --bg: #f4f1e8;  --bg-rgb: 244, 241, 232;
+  --panel: #e8e3d5;
+  --line: #c4bdab; --line-soft: #dbd5c5;
+  --ink: #1b1a16;  --ink-rgb: 27, 26, 22;
+  --dim: #55513f;  --muted: #857f6c;
+  --cell: #1f3a5f; --loner: #a69e8b; --edge: #5b7fa8;
+  --accent: #c1272d; --accent2: #16708b; --path: #7a4fa3;
+  --test: #2e7d32;  --warn: #c1272d;
+  --ramp: 244 241 232 / 245 213 150 / 232 146 84 / 193 66 58 / 74 16 36;
 }
-
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
