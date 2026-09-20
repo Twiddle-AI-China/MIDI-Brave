@@ -21,8 +21,12 @@ Python to install.
 
 ### Getting it
 
-Download the build for your platform from the **Atlas Flow desktop** workflow's
-artifacts, unzip, and run it.
+Download the build for your platform, unzip, and run it.
+
+> The builds attached to CI runs are named `…-TEST-WEIGHTS-plays-noise`, and
+> that is exactly what they do: CI has no access to the trained weights, so it
+> builds against random ones to test the machinery. A real build is the same
+> pipeline with `ATLAS_PACK_MODEL` pointed at `local-model/`.
 
 | | |
 |---|---|
