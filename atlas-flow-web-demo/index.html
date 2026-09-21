@@ -17,7 +17,7 @@
   <div id="board">
     <div id="map-pane">
       <canvas id="map"></canvas>
-      <div id="curtain"><div><b data-en="Click the atlas to begin">点一下图谱开始</b><span data-en="After that, moving the pointer is the audition — no need to hold">之后移动鼠标就是试听，不用按住</span><span id="curtainNote"></span></div></div>
+      <div id="curtain"><div><b data-en="Click the atlas to begin">点一下图谱开始</b><span data-en="After that, moving the pointer is the audition — no need to hold">之后移动鼠标就是试听，不用按住</span><span id="curtainNote" style="white-space:pre-line"></span></div></div>
       <div id="info" class="mono">
         <div id="info-title">—</div>
         <div id="info-body"></div>
@@ -101,6 +101,15 @@
       </select></label>
       <label data-info="音质|实时流的线路格式。窄链路降档位，局域网可以升上去。" data-info-en="WIRE|Stream format. Step down on a narrow link, step up on a LAN." data-en="wire">音质<select id="profile"></select></label>
       <label data-info="缓冲|缓冲就是延迟，也是抗抖动的余量。本机 0.3 s 足够，远程要 1.4 s 才不断。" data-info-en="BUFFER|Buffer is latency, and also the margin against jitter. 0.3 s is enough locally; remote needs 1.4 s to stay unbroken." data-en="buffer">缓冲<input id="buffer" type="range" min="0.2" max="4" step="0.1" value="0.6"><output id="bufferOut">0.6 s</output></label>
+      <label data-info="输出采样率|自动＝跟随输出设备，不做任何强制，声音链路里没有多余的重采样。只有在自动探测不对时才手动指定（例如虚拟声卡）。"
+        data-info-en="OUTPUT RATE|Auto follows the output device and forces nothing, so no stray resampling enters the chain. Set one by hand only if the probe is wrong -- a virtual audio device, say."
+        data-en="out rate">输出<select id="outrate">
+        <option value="0" data-en="auto (follow the device)">自动（跟随设备）</option>
+        <option value="44100">44100 Hz</option>
+        <option value="48000">48000 Hz</option>
+        <option value="88200">88200 Hz</option>
+        <option value="96000">96000 Hz</option>
+      </select></label>
       <p class="mono muted" id="wire">—</p>
     </section>
     <section>

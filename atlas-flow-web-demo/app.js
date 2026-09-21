@@ -203,6 +203,14 @@ const STRINGS = {
   'band.mid':           ['中', 'mid'],
   'band.high':          ['高', 'high'],
   'wire.ceiling':       ['上限', 'ceiling'],
+  'wire.device':        ['输出设备', 'output device'],
+  'wire.resampled':     ['由播放端重采样', 'resampled by the sink'],
+  'wire.direct':        ['直通，无重采样', 'direct, no resampling'],
+  'rate.switched':      ['输出采样率已切换，音频链路已重建',
+                         'output rate changed; the audio path was rebuilt'],
+  'curtain.device':     ['已检测到输出设备', 'output device detected at'],
+  'curtain.deviceUnknown': ['无法检测输出设备采样率，请在设置里手动指定',
+                            'could not detect the output device rate; set it in settings'],
   'work.rendering':     ['渲染中…', 'rendering...'],
   'work.renderFailed':  ['渲染失败', 'render failed'],
   'work.freeCoord':     ['自由坐标', 'free coordinate'],
@@ -1474,9 +1482,15 @@ function profile() {
 async function connect() {
   const wire = profile();
   const targetSeconds = Number($('#buffer').value);
-  if (!live.context || live.context.sampleRate !== wire.sampleRate) {
+  const forced = forcedRate();
+  if (!live.context || (forced && live.context.sampleRate !== forced)) {
     await live.context?.close();
-    live.context = new AudioContext({sampleRate: wire.sampleRate, latencyHint: 'playback'});
+    // Normally no sampleRate at all: forcing the context to the wire rate does
+    // not avoid a conversion when the device runs at something else, it hands
+    // the conversion to the browser and the OS, continuously and invisibly.
+    // The context comes up at the device rate and the sink resamples into it.
+    live.context = new AudioContext(
+      forced ? {sampleRate: forced, latencyHint: 'playback'} : {latencyHint: 'playback'});
     await live.context.audioWorklet.addModule('/live-player-worklet.js');
     live.player = new AudioWorkletNode(live.context, 'atlas-live-player', {outputChannelCount: [2]});
     live.chain = buildChain(live.context);
@@ -1531,6 +1545,7 @@ async function connect() {
     if (value.type === 'stream') {
       live.player.port.postMessage({
         type: 'format', channels: value.channels, dtype: value.format,
+        streamRate: value.sampleRate,
         prime: Math.round(value.targetSeconds * value.sampleRate * 0.8),
         reprime: Math.round(0.3 * value.sampleRate),
         // Only a genuine runaway should be shed; ordinary overshoot is cheaper
@@ -1540,9 +1555,17 @@ async function connect() {
         // of the level the producer is aiming at.
         cap: Math.round(value.targetSeconds * value.sampleRate * 3.0),
       });
+      // State the whole chain, because the interesting failure is a silent
+      // rate mismatch and the only way to see one is to print both ends.
+      const out = live.context ? live.context.sampleRate : 0;
+      const converting = out && Math.abs(out - value.sampleRate) > 1;
       $('#wire').textContent =
         `[WIRE] ${value.sampleRate / 1000}kHz ${value.channels === 1 ? 'mono' : 'stereo'} `
-        + `${value.format} · ${t('wire.ceiling')} ${value.kbitPerSecond} kbit/s`;
+        + `${value.format} · ${t('wire.ceiling')} ${value.kbitPerSecond} kbit/s\n`
+        + `[OUT]  ${out ? out / 1000 + 'kHz' : '?'} ${t('wire.device')}`
+        + (converting
+            ? ` · ${t('wire.resampled')} ${(value.sampleRate / out).toFixed(4)}x`
+            : ` · ${t('wire.direct')}`);
     }
     if (value.type === 'telemetry') {
       live.lifecycle = value.lifecycle;
@@ -2411,6 +2434,35 @@ function buildSlots(rebuildOnly = false) {
 }
 
 /**
+ * The rate the output device actually runs at.
+ *
+ * Probed by opening a context and asking, which is the only way a page can
+ * find out. It is cached because opening a context is not free, and it is
+ * overridable because the probe can be wrong -- a virtual audio device, or a
+ * default output that changes after the page loaded -- and being stuck with a
+ * bad answer and no way to say otherwise is worse than being asked.
+ */
+let deviceRate = 0;
+
+function detectDeviceRate() {
+  if (deviceRate) return deviceRate;
+  try {
+    const probe = new AudioContext();
+    deviceRate = probe.sampleRate;
+    probe.close();
+  } catch (error) {
+    deviceRate = 0;      // reported as unknown rather than guessed at
+  }
+  return deviceRate;
+}
+
+/** The rate to open playback contexts at: 0 means "whatever the device is". */
+function forcedRate() {
+  const chosen = Number($('#outrate')?.value || 0);
+  return Number.isFinite(chosen) && chosen > 0 ? chosen : 0;
+}
+
+/**
  * Which wire format to start on.
  *
  * Remote, this is a bandwidth question and the answer was measured on the
@@ -2431,18 +2483,19 @@ function buildSlots(rebuildOnly = false) {
  */
 function preferredProfile(profiles) {
   if (!profiles.length) return 0;
+  // Remote, this is a bandwidth question. Measured on the Kraken link
+  // (~2.65 Mbit/s) over a 30 s roam: 22.05 kHz mono int16 held 1.03x real time
+  // with no underruns, 44.1 kHz mono managed 0.98x with two dropouts, stereo
+  // float32 saturated the link. Default to headroom; trade up by hand.
   if (status.profile !== 'local') {
     const thin = profiles.findIndex(wire => wire.kbitPerSecond < 400);
     return thin < 0 ? 0 : thin;
   }
-  let deviceRate = 0;
-  try {
-    const probe = new AudioContext();
-    deviceRate = probe.sampleRate;
-    probe.close();
-  } catch (_error) { /* asking is optional; the fallback is still good */ }
-  const matched = profiles.findIndex(wire => wire.sampleRate === deviceRate);
-  return matched >= 0 ? matched : 0;
+  // Local, the link is a loopback socket, so take the best on offer. An
+  // earlier version tried to match the device rate here, which was pointless
+  // -- no profile is 48 kHz and most devices are -- and then forced the
+  // context to the mismatched rate anyway. The sink resamples now.
+  return 0;
 }
 
 function buildPanel() {
@@ -2611,6 +2664,24 @@ function wire() {
       applyCompressor(live.fileChain);
     });
   }
+  // Changing the output rate has to rebuild the context, so reconnect.
+  $('#outrate').value = localStorage.getItem('atlas.outrate') || '0';
+  $('#outrate').addEventListener('change', async event => {
+    localStorage.setItem('atlas.outrate', event.target.value);
+    // The rate is fixed when a context is created, so this has to tear the
+    // whole audio path down: socket, context, worklet and compressor chain.
+    stopAll();
+    live.socket?.close();
+    live.socket = null;
+    live.connected = false;
+    await live.context?.close().catch(() => {});
+    live.context = null;
+    live.chain = null;
+    live.fileChain = null;
+    live.player = null;
+    if (audioMode() === 'live') connect().catch(() => {});
+    setWork(t('rate.switched'));
+  });
   $('#theme').value = document.documentElement.dataset.theme || 'mono';
   $('#theme').addEventListener('change', event => applyTheme(event.target.value));
   $('#lang').value = language;
@@ -2756,9 +2827,14 @@ async function boot() {
     $('#bufferOut').textContent = `${status.suggestedBufferSeconds.toFixed(1)} s`;
   }
   $('#top-note').textContent = `${status.cuda} · ${status.checkpoint}`;
-  $('#curtainNote').textContent = status.profile === 'local'
+  // Probe the output device before anything is played, and say what was
+  // found. A silent rate mismatch is the failure worth catching here, and it
+  // is invisible unless someone states the number.
+  const found = detectDeviceRate();
+  $('#curtainNote').textContent = (status.profile === 'local'
     ? `${t('curtain.local')} (${status.cuda})${t('curtain.localTail')} ${status.suggestedBufferSeconds} s`
-    : t('curtain.remote');
+    : t('curtain.remote'))
+    + `\n${found ? `${t('curtain.device')} ${found / 1000} kHz` : t('curtain.deviceUnknown')}`;
   const explained = status.pcaExplained || [];
   live.lifecycle = 'offline';
   live.shown = 'disconnected';
@@ -2816,6 +2892,9 @@ window.atlasDebug = () => ({
     return Number((20 * Math.log10(Math.sqrt(sum / frame.length) + 1e-9)).toFixed(1));
   })(),
   full: coordinate && coordinate.slice(),
+  deviceRate: detectDeviceRate(),
+  contextRate: live.context ? live.context.sampleRate : null,
+  wireRate: (profile() || {}).sampleRate || null,
   scopeSource: $('#scope-source').textContent,
   slots: scope.views.map(view => view.key),
   // A view with width 0 has never been laid out, and the frame loop
