@@ -6,20 +6,31 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import json
 import math
+import os
 from numbers import Real
 from pathlib import Path
 import time
 from typing import Mapping
 
-from aiohttp import WSMsgType, web
+from aiohttp import WSCloseCode, WSMsgType, web
 import numpy as np
 
 from .atlas_flow_runtime import AtlasFlowLiveEngine
-from .atlas_flow_runtime import DEFAULT_MORPH_SECONDS
+from .atlas_flow_runtime import DEFAULT_MORPH_SECONDS, LIVE_BLOCK_SAMPLES
+from .atlas_flow_stream import StreamFormat, parse_stream, supported_profiles
+
+
+# Minimum spacing between plans. A roam asks for a new trajectory on every
+# pointer move, and each plan is a GPU burst that competes with block rendering
+# for the same device and interpreter; on V100 a plan costs ~180 ms against
+# ~70 ms on the retired GB10 host, so plans have to be spaced further apart
+# there or the audio buffer starves. Override with ATLAS_FLOW_PLAN_INTERVAL.
+PLAN_INTERVAL_SECONDS = float(os.environ.get("ATLAS_FLOW_PLAN_INTERVAL", "0.25"))
 
 
 _ENGINE = web.AppKey("atlas_flow_engine", AtlasFlowLiveEngine)
 _CLIENT_LOCK = web.AppKey("atlas_flow_client_lock", asyncio.Lock)
+_ACTIVE = web.AppKey("atlas_flow_active_client", dict)
 
 
 def _number(message: Mapping[str, object], name: str) -> float:
@@ -83,6 +94,7 @@ def parse_message(message: object) -> dict[str, object]:
         return {
             "type": "start", **_controls(message),
             "seed": _integer(message, "seed"),
+            "stream": parse_stream(message.get("stream")),
         }
     if message_type == "control":
         return {
@@ -105,6 +117,8 @@ class _ClientState:
     buffered_frames: int = 0
     underruns: int = 0
     running: bool = False
+    reported: bool = False
+    stream: StreamFormat = field(default_factory=StreamFormat)
     wake_producer: asyncio.Event = field(default_factory=asyncio.Event)
 
     def pause(self) -> None:
@@ -142,6 +156,7 @@ async def _receive(
                 if kind == "buffer":
                     state.buffered_frames = int(message["bufferedFrames"])
                     state.underruns = int(message["underruns"])
+                    state.reported = True
                     continue
                 if kind == "stop":
                     session.stop()
@@ -154,6 +169,11 @@ async def _receive(
                     planner_wake.set()
                     continue
                 if kind == "start":
+                    state.stream = message["stream"]
+                    await ws.send_json({
+                        "type": "stream",
+                        **state.stream.describe(LIVE_BLOCK_SAMPLES),
+                    })
                     session.request_start(
                         pca_normalized=message["pca_normalized"],
                         x=message["x"], y=message["y"],
@@ -193,7 +213,8 @@ async def _produce(
         if not state.running:
             await state.wake_producer.wait()
             continue
-        if state.buffered_frames > block_samples * 2:
+        target_frames = state.stream.target_frames(block_samples)
+        if state.buffered_frames > target_frames:
             await asyncio.sleep(0.005)
             continue
         started = time.perf_counter()
@@ -204,12 +225,28 @@ async def _produce(
             value = np.asarray(pcm, dtype="<f4")
             if value.shape != (block_samples, 2) or not np.isfinite(value).all():
                 raise RuntimeError("runtime emitted invalid PCM")
-            await ws.send_bytes(value.tobytes())
+            await ws.send_bytes(state.stream.encode(value))
             render_times.append(float(render_ms))
             if len(render_times) > 256:
                 del render_times[:-256]
             block_index += 1
-            if block_index % 8 == 0:
+            # An idle voice is silence, and silence is not worth a thin link.
+            # The next start message resumes production — but say so on the way
+            # out, because telemetry lives in this loop: pausing silently left
+            # the client sending control messages into a stopped producer,
+            # which is what made roaming look dead after a rendered take.
+            snapshot = session.snapshot()
+            if snapshot["lifecycle"] == "idle":
+                await ws.send_json({"type": "telemetry", "renderP50Ms": 0.0,
+                                    "renderP95Ms": 0.0, "bufferedFrames": state.buffered_frames,
+                                    "underruns": state.underruns, **snapshot})
+                state.pause()
+                continue
+            # Telemetry drives the on-map voice marker. At every fourth block it
+            # arrived about 2.7 times a second, which the eye reads as the marker
+            # teleporting; every second block halves that. It is a few hundred
+            # bytes against an audio stream measured in kilobytes.
+            if block_index % 2 == 0:
                 p50, p95 = np.percentile(render_times, (50, 95))
                 await ws.send_json({
                     "type": "telemetry",
@@ -220,7 +257,18 @@ async def _produce(
                     **session.snapshot(),
                 })
             elapsed = time.perf_counter() - started
-            pacing = 0.35 if state.buffered_frames < block_samples else 0.97
+            # Filling faster than real time refills a drained buffer quickly but
+            # overshoots the client's ceiling, and every overshoot the client
+            # sheds is an audible discontinuity. Until the client has reported a
+            # buffer level at all, there is nothing to fill toward — bursting
+            # then is pure guesswork, and on a fast link it discarded dozens of
+            # blocks before the first report arrived.
+            if not state.reported:
+                pacing = 0.95
+            elif state.buffered_frames < target_frames * 0.5:
+                pacing = 0.6
+            else:
+                pacing = 0.97
             await asyncio.sleep(max(0.0, block_seconds * pacing - elapsed))
         except asyncio.CancelledError:
             raise
@@ -242,7 +290,7 @@ async def _plan(
         await planner_wake.wait()
         planner_wake.clear()
         while session.plan_pending() and not ws.closed:
-            delay = 0.25 - (time.perf_counter() - last_started)
+            delay = PLAN_INTERVAL_SECONDS - (time.perf_counter() - last_started)
             if delay > 0.0:
                 await asyncio.sleep(delay)
             last_started = time.perf_counter()
@@ -258,19 +306,33 @@ def create_app(engine: AtlasFlowLiveEngine) -> web.Application:
     app = web.Application(client_max_size=64 * 1024)
     app[_ENGINE] = engine
     app[_CLIENT_LOCK] = asyncio.Lock()
+    app[_ACTIVE] = {"ws": None}
 
     async def health(_request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, **engine.status()})
+        return web.json_response({
+            "ok": True,
+            **engine.status(),
+            "streamProfiles": supported_profiles(LIVE_BLOCK_SAMPLES),
+        })
 
     async def runtime(request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=15.0, max_msg_size=64 * 1024)
         await ws.prepare(request)
+        # One voice, newest client wins. A reloaded tab (or one whose socket is
+        # still being reaped) would otherwise lock every later visitor out.
+        holder = request.app[_ACTIVE]
+        previous = holder.get("ws")
+        if previous is not None and previous is not ws and not previous.closed:
+            await previous.close(code=WSCloseCode.GOING_AWAY, message=b"superseded")
         lock = request.app[_CLIENT_LOCK]
-        if lock.locked():
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=10.0)
+        except asyncio.TimeoutError:
             await ws.send_json({"type": "error", "message": "runtime is busy"})
             await ws.close()
             return ws
-        async with lock:
+        holder["ws"] = ws
+        try:
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="atlas-flow")
             receiver = producer = planner = None
             try:
@@ -303,6 +365,10 @@ def create_app(engine: AtlasFlowLiveEngine) -> web.Application:
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
                 executor.shutdown(wait=True, cancel_futures=True)
+        finally:
+            lock.release()
+            if holder.get("ws") is ws:
+                holder["ws"] = None
         return ws
 
     app.router.add_get("/api/health", health)

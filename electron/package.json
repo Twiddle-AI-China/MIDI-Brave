@@ -1,0 +1,19 @@
+{
+  "name": "atlas-flow-desktop",
+  "productName": "AtlasFlow",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Atlas Flow — the Pad Top50 timbre map, running entirely on this machine",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:server": "node build-server.js",
+    "pack": "node prepack.js && node pack.js",
+    "build": "npm run build:server && npm run pack",
+    "test": "node smoke.js"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^33.0.0"
+  }
+}

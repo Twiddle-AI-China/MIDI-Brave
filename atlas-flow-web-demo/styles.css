@@ -1,0 +1,266 @@
+/* ---------- themes ----------
+   The map and the scopes are canvases, which custom properties cannot reach, so
+   every theme also states --ink-rgb and --bg-rgb as bare triples; applyTheme()
+   in app.js copies those onto the drawing code. A theme changes the palette and
+   nothing else -- same hairlines, same layout, same information. */
+:root {
+  color-scheme: dark;
+  --bg: #000000;
+  --bg-rgb: 0, 0, 0;
+  --panel: #0b0b0b;
+  --line: #1f1f1f;
+  --line-soft: #141414;
+  --ink: #f2f2f2;
+  --ink-rgb: 242, 242, 242;
+  --dim: #9a9a9a;
+  --muted: #6e6e6e;
+  /* Monochrome is the one theme that stays monochrome: every role is a grey. */
+  --cell: #d8d8d8;
+  --loner: #565656;
+  --edge: #f2f2f2;
+  --accent: #ffffff;
+  --accent2: #bdbdbd;
+  --path: #e0e0e0;
+  --test: #8f8f8f;
+  --warn: #ffffff;
+  --ramp: 0 0 0 / 52 52 52 / 124 124 124 / 198 198 198 / 255 255 255;
+  --rail: 56px;
+  --top: 42px;
+  /* The scope earns its width on a big display and must not eat the map on a
+     small one, so it scales with the viewport between hard bounds. */
+  --scope: clamp(240px, 26vw, 430px);
+}
+/* The four below are properly polychrome: the ramp is a real colormap, and the
+   things that mean something -- what is sounding, where you point, the path you
+   drew, which cells are held out -- each get their own hue. Structure (grid,
+   rails, labels, frames) stays neutral in every theme, or the map turns into
+   confetti and stops being readable. */
+
+/* Ember. Magma ramp, which spends its range on hues the eye separates easily,
+   with a cyan focus that cannot be confused with anything in it. */
+:root[data-theme="ember"] {
+  --bg: #0b0510;  --bg-rgb: 11, 5, 16;
+  --panel: #150a1e;
+  --line: #34204a; --line-soft: #1f1430;
+  --ink: #f4e9f8;  --ink-rgb: 244, 233, 248;
+  --dim: #b795c6;  --muted: #7d5f8e;
+  --cell: #ffb37a; --loner: #6f4a66; --edge: #a763d8;
+  --accent: #35e0d3; --accent2: #ffc65e; --path: #ff6fae;
+  --test: #c2f549;  --warn: #ff4d4d;
+  --ramp: 4 2 12 / 87 16 110 / 187 55 84 / 249 142 8 / 252 253 191;
+}
+
+/* Reef. Viridis, which stays legible converted to grey -- the one colormap
+   that survives being printed or screenshotted badly. Coral for focus. */
+:root[data-theme="reef"] {
+  --bg: #04121a;  --bg-rgb: 4, 18, 26;
+  --panel: #072028;
+  --line: #0f3f4a; --line-soft: #082a33;
+  --ink: #e4f7f3;  --ink-rgb: 228, 247, 243;
+  --dim: #8fc7c1;  --muted: #55908b;
+  --cell: #7fe3c4; --loner: #2b6b61; --edge: #2fa8b8;
+  --accent: #ff6b57; --accent2: #ffd447; --path: #b78cff;
+  --test: #d9f7ff;  --warn: #ff3b30;
+  --ramp: 68 1 84 / 59 82 139 / 33 145 140 / 94 201 98 / 253 231 37;
+}
+
+/* Dusk. Indigo night, blue through magenta, lime focus. The coolest ground of
+   the set, so the warm accents carry the whole foreground. */
+:root[data-theme="dusk"] {
+  --bg: #06081c;  --bg-rgb: 6, 8, 28;
+  --panel: #0c1030;
+  --line: #222a63; --line-soft: #141a42;
+  --ink: #e9ecff;  --ink-rgb: 233, 236, 255;
+  --dim: #9ba4da;  --muted: #6570a2;
+  --cell: #8fa6ff; --loner: #39417d; --edge: #7b6ae0;
+  --accent: #b9ff3d; --accent2: #ff8ad8; --path: #ffd166;
+  --test: #7ef5ff;  --warn: #ff4d6d;
+  --ramp: 8 10 40 / 46 40 140 / 130 55 180 / 224 84 150 / 255 214 236;
+}
+
+/* Paper. Light and still coloured -- an inverted ramp, because on a white
+   ground the loud parts have to get darker, not brighter. */
+:root[data-theme="paper"] {
+  color-scheme: light;
+  --bg: #f4f1e8;  --bg-rgb: 244, 241, 232;
+  --panel: #e8e3d5;
+  --line: #c4bdab; --line-soft: #dbd5c5;
+  --ink: #1b1a16;  --ink-rgb: 27, 26, 22;
+  --dim: #55513f;  --muted: #857f6c;
+  --cell: #1f3a5f; --loner: #a69e8b; --edge: #5b7fa8;
+  --accent: #c1272d; --accent2: #16708b; --path: #7a4fa3;
+  --test: #2e7d32;  --warn: #c1272d;
+  --ramp: 244 241 232 / 245 213 150 / 232 146 84 / 193 66 58 / 74 16 36;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 12.5px/1.5 ui-monospace, "SFMono-Regular", Menlo, "PingFang SC", monospace;
+  overflow: hidden; -webkit-font-smoothing: antialiased;
+}
+.mono { font-size: 10.5px; letter-spacing: .02em; }
+.muted { color: var(--muted); }
+
+#stage { display: grid; grid-template-rows: var(--top) minmax(0, 1fr) auto; height: 100vh; }
+
+#top { display: flex; align-items: center; gap: 12px; padding: 0 14px; border-bottom: 1px solid var(--line); }
+.brand { font-weight: 600; letter-spacing: .14em; font-size: 12px; }
+.brand em { font-style: normal; color: var(--muted); font-weight: 400; margin-left: 10px; font-size: 10px; letter-spacing: .12em; }
+#top-note { margin-left: auto; color: var(--muted); font-size: 10px; }
+
+.chip {
+  background: transparent; border: 1px solid var(--line); color: var(--muted);
+  border-radius: 3px; padding: 3px 9px; font: inherit; font-size: 10.5px; cursor: pointer;
+  letter-spacing: .06em;
+}
+.chip:hover { color: var(--ink); border-color: #3a3a3a; }
+.chip[aria-pressed="true"], .chip.on { color: var(--bg); background: var(--ink); border-color: var(--ink); }
+.chip.bad { color: var(--ink); border-color: #4a4a4a; border-style: dashed; }
+
+#board { display: grid; grid-template-columns: minmax(0, 1fr) var(--scope); min-height: 0; }
+
+#map-pane { position: relative; min-width: 0; }
+#map { display: block; width: 100%; height: 100%; cursor: crosshair; }
+#info {
+  position: absolute; left: 18px; bottom: 16px; width: 306px; padding: 8px 10px;
+  border: 1px solid var(--line); background: rgba(var(--bg-rgb) / 0.82);
+  pointer-events: none; line-height: 1.5;
+}
+#info-title { color: var(--ink); letter-spacing: .06em; }
+#info-body { color: var(--dim); margin-top: 3px; min-height: 2.4em; }
+#info-meta { color: var(--muted); margin-top: 4px; font-size: 9.5px; }
+
+#curtain { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(var(--bg-rgb) / 0.82); cursor: pointer; }
+#curtain div { display: grid; gap: 7px; text-align: center; }
+#curtain b { font-size: 15px; font-weight: 600; letter-spacing: .08em; }
+#curtain span { color: var(--muted); font-size: 11px; }
+#curtain.gone { display: none; }
+
+#scope-pane {
+  position: relative; border-left: 1px solid var(--line); min-width: 0;
+  display: grid; grid-template-rows: 26px repeat(3, minmax(0, 1fr));
+}
+.scope-cell { position: relative; min-height: 0; border-top: 1px solid var(--line-soft); }
+.scope-cell:first-of-type { border-top: 0; }
+.scope-cell canvas { display: block; width: 100%; height: 100%; }
+.scope-tag {
+  position: absolute; left: 8px; top: 6px; z-index: 1; pointer-events: none;
+  font-size: 9px; letter-spacing: .14em; color: rgba(var(--ink-rgb) / 0.45);
+}
+/* Collapsed, the pane becomes a full-height spine you reopen by clicking it —
+   a 26px button tucked in a corner was, fairly, not findable. */
+#board.drawer-shut { grid-template-columns: minmax(0, 1fr) 26px; }
+#board.drawer-shut .scope-cell,
+#board.drawer-shut #scope-range,
+#board.drawer-shut #scope-source,
+#board.drawer-shut #scope-head b { display: none; }
+#board.drawer-shut #scope-pane { grid-template-rows: 1fr; }
+#board.drawer-shut #scope-head {
+  padding: 0; border-bottom: 0; align-items: stretch; cursor: pointer;
+}
+#board.drawer-shut #drawer {
+  width: 100%; height: 100%; border: 0; border-radius: 0;
+  display: flex; align-items: center; justify-content: center;
+  writing-mode: vertical-rl; letter-spacing: .3em; font-size: 9px;
+}
+#board.drawer-shut #drawer:hover { background: #101010; color: var(--ink); }
+#scope-head {
+  display: flex; align-items: center; gap: 10px; padding: 0 10px;
+  border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 10px; letter-spacing: .08em;
+}
+#scope-head select {
+  background: transparent; border: 0; color: var(--ink); font: inherit; font-size: 10px;
+  letter-spacing: .08em; cursor: pointer; padding: 0; outline: none;
+}
+#scope-head select option { background: var(--panel); }
+#scope-source { margin-left: auto; color: var(--dim); }
+
+
+#rail {
+  display: flex; align-items: center; gap: 12px; padding: 6px 14px;
+  border-top: 1px solid var(--line); min-height: var(--rail);
+  flex-wrap: wrap; row-gap: 8px;
+}
+/* Nothing in the rail may shrink: a squeezed control wraps its label into a
+   stack of single characters, which is how it looked before. */
+#rail > * { flex: 0 0 auto; }
+.divider { width: 1px; height: 22px; background: var(--line); }
+.knob { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+.knob input[type=range] { width: 84px; accent-color: var(--ink); }
+.knob output { color: var(--ink); font-size: 10.5px; min-width: 48px; }
+.knob input[type=number] {
+  width: 80px; background: var(--panel); border: 1px solid var(--line); color: var(--ink);
+  border-radius: 3px; padding: 3px 6px; font: inherit; font-size: 10.5px;
+}
+#compMeter { color: var(--dim); min-width: 92px; }
+.takes { display: flex; align-items: center; gap: 5px; overflow-x: auto; }
+.takes { margin-left: auto; }
+audio { display: none; }
+
+#panel[hidden] { display: none; }
+#panel {
+  position: absolute; top: var(--top); right: 0; width: 350px;
+  max-height: calc(100vh - var(--top) - var(--rail)); overflow: auto;
+  background: var(--panel); border-left: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  padding: 2px 14px 16px; display: grid; gap: 2px; z-index: 5;
+}
+#panel h3 { font-size: 10px; letter-spacing: .16em; color: var(--muted); margin: 15px 0 8px; font-weight: 500; }
+#panel input[type=number] { background: var(--panel); border: 1px solid var(--line); color: var(--ink); border-radius: 3px; padding: 4px 6px; font: inherit; font-size: 10.5px; grid-column: 2 / 4; }
+#panel label { display: grid; grid-template-columns: 52px 1fr 58px; gap: 8px; align-items: center; color: var(--muted); font-size: 10.5px; margin-bottom: 5px; }
+#panel select {
+  background: var(--panel); border: 1px solid var(--line); color: var(--ink); border-radius: 3px;
+  padding: 4px 6px; font: inherit; font-size: 10.5px; grid-column: 2 / 4;
+}
+#panel input[type=range] { accent-color: var(--ink); }
+#panel p { margin: 6px 0; font-size: 10.5px; line-height: 1.7; }
+#panel output { color: var(--ink); text-align: right; }
+.axes label { grid-template-columns: 64px 1fr 40px; }
+
+.knob select { background: var(--panel); border: 1px solid var(--line); color: var(--ink); border-radius: 3px; padding: 3px 5px; font: inherit; font-size: 10.5px; }
+
+/* ---------- responsive ---------- */
+
+/* Laptop widths: tighten the knobs before anything has to be dropped. */
+@media (max-width: 1440px) {
+  .knob input[type=range] { width: 66px; }
+  .knob output { min-width: 42px; }
+  #rail { gap: 10px; }
+}
+
+/* Narrow: the least-used readouts go first, not the controls. */
+@media (max-width: 1180px) {
+  .knob input[type=range] { width: 54px; }
+}
+
+/* Narrow: the scope still exists, it just starts collapsed to its spine (see
+   boot()) and takes a smaller slice when you open it. Hiding it outright meant
+   the drawer control pointed at nothing. */
+@media (max-width: 1000px) {
+  :root { --scope: clamp(190px, 42vw, 300px); }
+  #panel { width: min(340px, 92vw); }
+}
+
+/* Phone-ish or a very narrow window: keep only what plays sound. */
+@media (max-width: 820px) {
+  .brand em { display: none; }
+  .knob { font-size: 10px; }
+  #takes { margin-left: 0; }
+  /* The rail is the last thing that may overflow: let its two scrolling
+     strips give up their width instead of pushing the page sideways. */
+  #rail { gap: 8px; padding: 6px 10px; }
+  .takes { min-width: 0; flex: 1 1 auto; }
+  #info { left: 10px; right: 10px; width: auto; }
+}
+
+/* Short windows: the chrome must not crowd out the map. */
+@media (max-height: 700px) {
+  :root { --top: 36px; --rail: 48px; }
+  #rail { padding: 4px 12px; row-gap: 6px; }
+  #info { bottom: 10px; }
+}
+
+#panel .chip { justify-self: start; margin-bottom: 6px; }
+#panel section > .chip + .mono { margin-left: 8px; color: var(--dim); }
+#panel select.slot { grid-column: 2 / 4; }

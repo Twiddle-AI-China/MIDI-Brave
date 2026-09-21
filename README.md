@@ -12,6 +12,122 @@ artifact source. The complete architecture, data, training, evaluation,
 operations, limitations, and recovery notes are maintained in
 `docs/Atlas-Flow-v5-完整交接文档-2026-08-26.md`.
 
+## Atlas Flow desktop app (v1)
+
+A self-contained desktop build of the Pad Top50 instrument: the timbre map, live
+roaming, chord progressions, drawn trajectories and the three scopes, with the
+model running on the machine in front of you. No cluster, no GPU, no tunnel, no
+Python to install.
+
+### Getting it
+
+Download the build for your platform, unzip, and run it.
+
+> The builds attached to CI runs are named `…-TEST-WEIGHTS-plays-noise`, and
+> that is exactly what they do: CI has no access to the trained weights, so it
+> builds against random ones to test the machinery. A real build is the same
+> pipeline with `ATLAS_PACK_MODEL` pointed at `local-model/`.
+
+| | |
+|---|---|
+| macOS (Apple silicon) | `AtlasFlow.app` — right-click → **Open** the first time. The build is unsigned, so a double-click gets refused with "unidentified developer"; opening it from the context menu once is enough, and macOS remembers. |
+| Windows (x64) | `AtlasFlow.exe` inside the unzipped folder. SmartScreen will warn for the same reason: **More info → Run anyway**. Keep the folder together — the .exe needs the files beside it. |
+
+It is about 1 GB unzipped, most of which is torch. The **first launch takes
+30–60 seconds** while the model and its runtime are read off disk for the first
+time; the window says so while it waits. Later launches take a few seconds.
+
+Where it puts things:
+
+| | macOS | Windows |
+|---|---|---|
+| Renders, takes, recordings | `~/Library/Application Support/AtlasFlow/model-cache` | `%APPDATA%\AtlasFlow\model-cache` |
+| Launch log | `~/Library/Application Support/AtlasFlow/desktop.log` | `%APPDATA%\AtlasFlow\desktop.log` |
+
+If the window says the server did not come up, that log is what to send.
+
+It picks the fastest backend it finds: CUDA, then Metal, then CPU. CPU works —
+measured on an M2 a five-second plan takes ~570 ms against ~290 ms on Metal, and
+sustaining a note costs nothing either way, because the runtime time-warps a
+plan it already has rather than generating continuously.
+
+### Running from a checkout
+
+For the same thing without packaging, needing only Python:
+
+```bash
+python -m pip install torch soundfile numpy scipy aiohttp PyYAML
+bash scripts/atlas_flow/fetch_local_model.sh    # once: 85 MB weights + atlas + evaluation
+python -m midibrave.atlas_flow_local            # then: http://127.0.0.1:18796
+```
+
+`atlas_flow_local` is the cross-platform entry point and takes `--port`,
+`--device`, `--model` and `--threads`; run it with `--help`. On Windows use it
+directly — `local_demo.sh` is a thin bash convenience wrapper around it, nothing
+more. Set `PYTHONPATH=src` if the package is not installed.
+
+To run the desktop shell against a checkout rather than a packaged build:
+
+```bash
+npm --prefix electron install
+npm --prefix electron start
+```
+
+### Building the app
+
+Both halves are built on the machine that will run them: the frozen server
+contains native torch libraries, so a macOS host produces the macOS app and a
+Windows host the Windows one. There is no cross-compiling.
+
+```bash
+python -m pip install torch soundfile numpy scipy aiohttp PyYAML pyinstaller
+npm --prefix electron install
+npm --prefix electron run build          # freeze the server, then package the app
+```
+
+`build` is the two steps together; run `build:server` and `pack` separately if
+you are iterating on one of them. The result lands in `electron/dist/`.
+
+By default the app is built around `local-model/`. Point it at a different set
+of weights with `ATLAS_PACK_MODEL`:
+
+```bash
+ATLAS_PACK_MODEL=/path/to/weights npm --prefix electron run build
+```
+
+### Testing it
+
+Two test suites, both of which CI runs on macOS and Windows:
+
+```bash
+python packaging/smoke_test.py --server build/pyi/atlas-flow-server/atlas-flow-server
+node electron/smoke.js
+```
+
+The first exercises the frozen server: the atlas loads with all 50 presets, the
+web assets are served from inside the bundle, a render produces audio that is
+not silence, the same seed reproduces the same bytes, a three-note chord sums
+three voices, and the live websocket negotiates a format and delivers PCM.
+
+The second asks the narrower question only a packaged build can answer — is the
+app actually self-contained? It runs the server from inside the app with no
+`PYTHONPATH`, no virtualenv and the working directory set to the filesystem
+root, so anything still reaching for the checkout fails there. It is pure Node
+on purpose: a test that needed Python could not tell the difference.
+
+To test without the trained weights — which is what CI does, since the real ones
+live on a cluster no runner can reach:
+
+```bash
+python packaging/make_test_model.py --out build/test-model
+ATLAS_PACK_MODEL=$PWD/build/test-model npm --prefix electron run build
+```
+
+That builds the same architecture from the same config with random parameters.
+Everything downstream behaves identically and the audio is noise, which is the
+point: it proves the machinery works on a platform without claiming anything
+about how the model sounds.
+
 ## Current v2 qualification rollout
 
 The active implementation is under `configs/v2/` and `scripts/v2/`: 44.1 kHz,
