@@ -432,7 +432,7 @@ function layout() {
  * and therefore scored as well-covered. It was brightest exactly where you are
  * most lost.
  */
-const FIELD_GRID = 72;
+const FIELD_GRID = 128;
 const FIELD_NEAR = 4;
 
 function overrideAt(place, scratch) {
@@ -475,15 +475,20 @@ function overrideAt(place, scratch) {
   return Math.sqrt(moved);
 }
 
-function coverageField(view, ink) {
-  if (cells.length < FIELD_NEAR) return;
-  const grid = document.createElement('canvas');
-  grid.width = grid.height = FIELD_GRID;
-  const cell = grid.getContext('2d');
-  const image = cell.createImageData(FIELD_GRID, FIELD_GRID);
-  const [ir, ig, ib] = INK_TRIPLE;
+/**
+ * The terrain itself, cached.
+ *
+ * The height is a function of the atlas in normalised coordinates, so it does
+ * not depend on the window at all -- only its scaling to pixels does. A full
+ * pass costs 47 ms, and the resize handler is not debounced, so recomputing it
+ * per layout made dragging a window edge stutter. It is computed once and
+ * survives every resize, drawer toggle and theme change.
+ */
+let terrain = null;
+
+function buildTerrain() {
   const scratch = new Float64Array(cells.length);
-  const samples = new Float32Array(FIELD_GRID * FIELD_GRID);
+  const raw = new Float32Array(FIELD_GRID * FIELD_GRID);
   let lowest = Infinity;
   let highest = 0;
   for (let row = 0; row < FIELD_GRID; row++) {
@@ -491,25 +496,138 @@ function coverageField(view, ink) {
       const x = (column / (FIELD_GRID - 1)) * 2 - 1;
       const y = 1 - (row / (FIELD_GRID - 1)) * 2;
       const value = overrideAt([x, y], scratch);
-      samples[row * FIELD_GRID + column] = value;
+      raw[row * FIELD_GRID + column] = value;
       if (value < lowest) lowest = value;
       if (value > highest) highest = value;
     }
   }
+  // Read it as ground: faithful is high, overruled is low.
   const span = Math.max(highest - lowest, 1e-6);
-  for (let index = 0; index < samples.length; index++) {
-    const faithful = 1 - (samples[index] - lowest) / span;
-    const alpha = Math.round(255 * 0.17 * faithful * faithful);
-    image.data[index * 4] = ir;
-    image.data[index * 4 + 1] = ig;
-    image.data[index * 4 + 2] = ib;
-    image.data[index * 4 + 3] = alpha;
+  const height = new Float32Array(raw.length);
+  for (let index = 0; index < raw.length; index++) {
+    height[index] = 1 - (raw[index] - lowest) / span;
+  }
+  // One box pass. The scalar is smooth but the grid is not fine, and relief
+  // shading differentiates it -- without this the facets of the sampling grid
+  // light up instead of the terrain.
+  const at = (row, column) => height[
+    Math.min(FIELD_GRID - 1, Math.max(0, row)) * FIELD_GRID
+    + Math.min(FIELD_GRID - 1, Math.max(0, column))];
+  const smooth = new Float32Array(height.length);
+  for (let row = 0; row < FIELD_GRID; row++) {
+    for (let column = 0; column < FIELD_GRID; column++) {
+      let sum = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) sum += at(row + dy, column + dx);
+      smooth[row * FIELD_GRID + column] = sum / 9;
+    }
+  }
+  return smooth;
+}
+
+function coverageField(view, ink) {
+  if (cells.length < FIELD_NEAR) return;
+  if (!terrain) terrain = buildTerrain();
+  const smooth = terrain;
+  const grid = document.createElement('canvas');
+  grid.width = grid.height = FIELD_GRID;
+  const cell = grid.getContext('2d');
+  const image = cell.createImageData(FIELD_GRID, FIELD_GRID);
+  const [ir, ig, ib] = INK_TRIPLE;
+
+  // --- light it from the north-west, the cartographic convention --------
+  const lift = at => Math.min(FIELD_GRID - 1, Math.max(0, at));
+  const sampleAt = (row, column) => smooth[lift(row) * FIELD_GRID + lift(column)];
+  const LIGHT = [-0.6, -0.6, 0.53];            // normalised below
+  const norm = Math.hypot(LIGHT[0], LIGHT[1], LIGHT[2]);
+  const lx = LIGHT[0] / norm;
+  const ly = LIGHT[1] / norm;
+  const lz = LIGHT[2] / norm;
+  const RELIEF = 26;                            // vertical exaggeration
+  for (let row = 0; row < FIELD_GRID; row++) {
+    for (let column = 0; column < FIELD_GRID; column++) {
+      const index = row * FIELD_GRID + column;
+      const dzdx = (sampleAt(row, column + 1) - sampleAt(row, column - 1)) * 0.5 * RELIEF;
+      const dzdy = (sampleAt(row + 1, column) - sampleAt(row - 1, column)) * 0.5 * RELIEF;
+      const length = Math.hypot(dzdx, dzdy, 1);
+      const shade = Math.max(0, (-dzdx * lx - dzdy * ly + lz) / length);
+      // Ambient keeps flat ground visible; the slope term is what reads as
+      // terrain. Ground level still gates the whole thing, so the basins the
+      // model does not cover stay dark however the light falls on them.
+      const lit = 0.30 + 0.70 * shade;
+      const ground = smooth[index] * smooth[index];
+      const alpha = Math.round(255 * 0.19 * lit * ground);
+      image.data[index * 4] = ir;
+      image.data[index * 4 + 1] = ig;
+      image.data[index * 4 + 2] = ib;
+      image.data[index * 4 + 3] = Math.min(255, alpha);
+    }
   }
   cell.putImageData(image, 0, 0);
   ink.save();
   ink.imageSmoothingEnabled = true;
   ink.imageSmoothingQuality = 'high';
   ink.drawImage(grid, 0, 0, view.width, view.height);
+  ink.restore();
+  contourLines(view, ink, smooth);
+}
+
+/**
+ * Iso-fidelity contours, by marching squares.
+ *
+ * Shading alone reads as smoke rather than ground -- what makes a height field
+ * legible as terrain is the lines. Each one here is a real threshold: every
+ * point along a given contour gets overruled by the runtime to the same
+ * degree, so the rings around a cluster are the reach of that cluster.
+ */
+const CONTOURS = [0.28, 0.42, 0.56, 0.70, 0.84];
+
+function contourLines(view, ink, height) {
+  const step = view.width / (FIELD_GRID - 1);
+  const stepY = view.height / (FIELD_GRID - 1);
+  const at = (row, column) => height[row * FIELD_GRID + column];
+  ink.save();
+  ink.lineWidth = 1;
+  for (let index = 0; index < CONTOURS.length; index++) {
+    const level = CONTOURS[index];
+    // Higher ground gets a firmer line, so the rings read as a stack rather
+    // than as a single tangle at one weight.
+    ink.strokeStyle = tint((0.05 + 0.055 * index).toFixed(3));
+    ink.beginPath();
+    for (let row = 0; row < FIELD_GRID - 1; row++) {
+      for (let column = 0; column < FIELD_GRID - 1; column++) {
+        const a = at(row, column);           // corners, clockwise from top-left
+        const b = at(row, column + 1);
+        const c = at(row + 1, column + 1);
+        const d = at(row + 1, column);
+        const code = (a > level ? 8 : 0) | (b > level ? 4 : 0)
+                   | (c > level ? 2 : 0) | (d > level ? 1 : 0);
+        if (code === 0 || code === 15) continue;
+        const x0 = column * step;
+        const y0 = row * stepY;
+        const mix = (p, q) => (level - p) / ((q - p) || 1e-9);
+        const top = [x0 + step * mix(a, b), y0];
+        const rightEdge = [x0 + step, y0 + stepY * mix(b, c)];
+        const bottom = [x0 + step * mix(d, c), y0 + stepY];
+        const leftEdge = [x0, y0 + stepY * mix(a, d)];
+        const draw = (from, to) => {
+          ink.moveTo(from[0], from[1]);
+          ink.lineTo(to[0], to[1]);
+        };
+        switch (code) {
+          case 1: case 14: draw(leftEdge, bottom); break;
+          case 2: case 13: draw(bottom, rightEdge); break;
+          case 3: case 12: draw(leftEdge, rightEdge); break;
+          case 4: case 11: draw(top, rightEdge); break;
+          case 6: case 9: draw(top, bottom); break;
+          case 7: case 8: draw(leftEdge, top); break;
+          // Saddles: two separate crossings rather than one line.
+          case 5: draw(leftEdge, top); draw(bottom, rightEdge); break;
+          case 10: draw(leftEdge, bottom); draw(top, rightEdge); break;
+        }
+      }
+    }
+    ink.stroke();
+  }
   ink.restore();
 }
 
