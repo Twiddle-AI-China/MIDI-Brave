@@ -94,17 +94,25 @@ jobs:
         working-directory: electron
         run: node smoke.js
 
-      # Named for what it is. These builds carry the random test weights, so
-      # they run and play noise; a release build is the same pipeline with
-      # ATLAS_PACK_MODEL pointed at the trained ones. Someone will eventually
-      # download one of these expecting an instrument, and the name is the
-      # only thing standing in the way.
+      # Only when someone asks for a build, or on a tag.
+      #
+      # This used to run on every push, and each run uploads ~1.1 GB of
+      # mostly-incompressible torch (700 MB macOS + 400 MB Windows). At 14-day
+      # retention that exhausted the repo's artifact storage in a handful of
+      # runs, and every job then failed on "Artifact storage quota has been
+      # hit" -- with the build and both test suites passing directly above it.
+      # A red main that means "the disk is full" is worse than no artifact.
+      #
+      # Named for what it is: these carry the random test weights, so they run
+      # and play noise. A release build is the same pipeline with
+      # ATLAS_PACK_MODEL pointed at the trained ones.
       - name: Upload the app
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: AtlasFlow-${{ runner.os }}-TEST-WEIGHTS-plays-noise
           path: electron/dist/AtlasFlow-*
-          retention-days: 14
+          retention-days: 5
           # Already ~1 GB of mostly-incompressible torch; do not spend the time.
           compression-level: 1
 
@@ -116,5 +124,5 @@ jobs:
           path: |
             build/pyi-work/**/warn*.txt
             build/smoke-cache/**/*.log
-          retention-days: 7
+          retention-days: 3
           if-no-files-found: ignore
