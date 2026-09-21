@@ -403,6 +403,80 @@ function layout() {
  * animation rate, and the voice marker needs animation rate to look like
  * motion rather than teleportation.
  */
+/**
+ * A coverage field: how close the atlas really is, everywhere on the plane.
+ *
+ * The map looked sparse because fifty dots on a black square is sparse, but the
+ * emptiness was also misleading. Measured over a 60x60 grid, the distance to
+ * the 4th-nearest preset runs 0.063-0.865 in the plane and 0.556-1.769 in the
+ * full 8-D space: the tightest-looking cluster on screen is nine times further
+ * apart than it appears, and 15% of the plane disagrees with its own 2-D
+ * impression by more than a standard deviation.
+ *
+ * So this shades by the 8-D distance, not the drawn one. Bright is territory
+ * the model actually covers; dark is where you are extrapolating and the
+ * runtime will quietly overrule you. It is neutral in every theme, because it
+ * is structure rather than meaning.
+ *
+ * Deliberately not the radial haloes this replaced: those were drawn from the
+ * 2-D positions and so could only restate what the dots already showed.
+ */
+const FIELD_GRID = 72;
+const FIELD_NEAR = 4;
+
+function coverageField(view, ink) {
+  if (cells.length < FIELD_NEAR) return;
+  const grid = document.createElement('canvas');
+  grid.width = grid.height = FIELD_GRID;
+  const cell = grid.getContext('2d');
+  const image = cell.createImageData(FIELD_GRID, FIELD_GRID);
+  const [ir, ig, ib] = INK_TRIPLE;
+
+  const distances = new Array(cells.length);
+  let lowest = Infinity;
+  let highest = 0;
+  const samples = new Float32Array(FIELD_GRID * FIELD_GRID);
+  for (let row = 0; row < FIELD_GRID; row++) {
+    for (let column = 0; column < FIELD_GRID; column++) {
+      // The plane runs -1..1 in both axes, matching view.toPixel.
+      const x = (column / (FIELD_GRID - 1)) * 2 - 1;
+      const y = 1 - (row / (FIELD_GRID - 1)) * 2;
+      const lifted = liftToAtlas([x, y]);
+      for (let index = 0; index < cells.length; index++) {
+        let sum = 0;
+        const pca = cells[index].pca;
+        for (let axis = 0; axis < 8; axis++) {
+          const delta = pca[axis] - lifted[axis];
+          sum += delta * delta;
+        }
+        distances[index] = sum;
+      }
+      distances.sort((left, right) => left - right);
+      const value = Math.sqrt(distances[FIELD_NEAR - 1]);
+      samples[row * FIELD_GRID + column] = value;
+      if (value < lowest) lowest = value;
+      if (value > highest) highest = value;
+    }
+  }
+  const span = Math.max(highest - lowest, 1e-6);
+  for (let index = 0; index < samples.length; index++) {
+    // Near reads bright, far reads black; squared so the covered core stands
+    // out rather than the whole plane turning uniformly grey.
+    const near = 1 - (samples[index] - lowest) / span;
+    const alpha = Math.round(255 * 0.17 * near * near);
+    image.data[index * 4] = ir;
+    image.data[index * 4 + 1] = ig;
+    image.data[index * 4 + 2] = ib;
+    image.data[index * 4 + 3] = alpha;
+  }
+  cell.putImageData(image, 0, 0);
+  ink.save();
+  ink.imageSmoothingEnabled = true;
+  ink.imageSmoothingQuality = 'high';
+  ink.drawImage(grid, 0, 0, view.width, view.height);
+  ink.restore();
+}
+
 function paintStatic() {
   const view = map.view;
   if (!view) return;
@@ -413,6 +487,8 @@ function paintStatic() {
   const ink = layer.getContext('2d');
   ink.setTransform(ratio, 0, 0, ratio, 0, 0);
   ink.clearRect(0, 0, view.width, view.height);
+
+  coverageField(view, ink);
 
   // A sparse lattice so empty atlas regions read as space rather than void.
   ink.fillStyle = tint(0.055);
@@ -1191,12 +1267,11 @@ function moveTo(place, {snap = true} = {}) {
   if (audioMode() === 'cached' && hovered && hovered !== previous && live.fileChain) {
     auditionCell(hovered);
   }
-  coordinate = hovered ? hovered.pca.slice() : (() => {
-    const value = coordinate.slice();
-    value[0] = place[0];
-    value[1] = place[1];
-    return value;
-  })();
+  // Off a preset, the six hidden axes used to stay wherever the last preset
+  // left them, so most of what separates two pads was pinned while you roamed
+  // and the timbre barely moved. Lift them out of the atlas instead, the same
+  // way a drawn trajectory does.
+  coordinate = hovered ? hovered.pca.slice() : liftToAtlas(place);
   syncAxes();
   sendControl();
   updateReadout();
