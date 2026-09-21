@@ -404,25 +404,68 @@ function layout() {
  * motion rather than teleportation.
  */
 /**
- * A coverage field: how close the atlas really is, everywhere on the plane.
+ * How much the runtime will overrule you, everywhere on the plane.
  *
- * The map looked sparse because fifty dots on a black square is sparse, but the
- * emptiness was also misleading. Measured over a 60x60 grid, the distance to
- * the 4th-nearest preset runs 0.063-0.865 in the plane and 0.556-1.769 in the
- * full 8-D space: the tightest-looking cluster on screen is nine times further
- * apart than it appears, and 15% of the plane disagrees with its own 2-D
- * impression by more than a standard deviation.
+ * Bright means the map is telling the truth there: ask for that coordinate and
+ * roughly that is what you hear. Dark means the request gets pulled somewhere
+ * else before it reaches the model, so the position under your cursor is
+ * decorative.
  *
- * So this shades by the 8-D distance, not the drawn one. Bright is territory
- * the model actually covers; dark is where you are extrapolating and the
- * runtime will quietly overrule you. It is neutral in every theme, because it
- * is structure rather than meaning.
+ * This mirrors atlas.project_details exactly, including the part that matters
+ * most: the projection is restricted to the connected component of the nearest
+ * preset, and 9 of the 50 presets are singletons, so 10.4% of the plane can
+ * only ever resolve to one preset however far away it is.
  *
- * Deliberately not the radial haloes this replaced: those were drawn from the
- * 2-D positions and so could only restate what the dots already showed.
+ * The first version of this shaded by 8-D neighbour distance instead, which
+ * sounded reasonable and measured as unrelated -- correlation 0.120 against
+ * the actual override. Worse, it was brightest in the corners: out there every
+ * Gaussian in the lift underflows, the weight floor takes over, and the lifted
+ * point collapses to the mean of all 50 presets, which sits centrally in 8-D
+ * and therefore scored as well-covered. It was brightest exactly where you are
+ * most lost.
  */
 const FIELD_GRID = 72;
 const FIELD_NEAR = 4;
+
+function overrideAt(place, scratch) {
+  const lifted = liftToAtlas(place);
+  let home = -1;
+  let best = Infinity;
+  for (let index = 0; index < cells.length; index++) {
+    const pca = cells[index].pca;
+    let sum = 0;
+    for (let axis = 0; axis < 8; axis++) {
+      const delta = pca[axis] - lifted[axis];
+      sum += delta * delta;
+    }
+    scratch[index] = sum;
+    if (sum < best) { best = sum; home = index; }
+  }
+  // Only presets reachable from the nearest one are candidates, exactly as the
+  // runtime does it -- this is what makes a singleton component a hard snap.
+  const component = cells[home].component;
+  const local = [];
+  for (let index = 0; index < cells.length; index++) {
+    if (cells[index].component === component) local.push(index);
+  }
+  local.sort((left, right) => scratch[left] - scratch[right]);
+  const take = Math.min(FIELD_NEAR, local.length);
+  let total = 0;
+  const projected = new Float64Array(8);
+  for (let n = 0; n < take; n++) {
+    const index = local[n];
+    const weight = 1 / Math.max(Math.sqrt(scratch[index]), 1e-6);
+    total += weight;
+    const pca = cells[index].pca;
+    for (let axis = 0; axis < 8; axis++) projected[axis] += pca[axis] * weight;
+  }
+  let moved = 0;
+  for (let axis = 0; axis < 8; axis++) {
+    const delta = projected[axis] / total - lifted[axis];
+    moved += delta * delta;
+  }
+  return Math.sqrt(moved);
+}
 
 function coverageField(view, ink) {
   if (cells.length < FIELD_NEAR) return;
@@ -431,28 +474,15 @@ function coverageField(view, ink) {
   const cell = grid.getContext('2d');
   const image = cell.createImageData(FIELD_GRID, FIELD_GRID);
   const [ir, ig, ib] = INK_TRIPLE;
-
-  const distances = new Array(cells.length);
+  const scratch = new Float64Array(cells.length);
+  const samples = new Float32Array(FIELD_GRID * FIELD_GRID);
   let lowest = Infinity;
   let highest = 0;
-  const samples = new Float32Array(FIELD_GRID * FIELD_GRID);
   for (let row = 0; row < FIELD_GRID; row++) {
     for (let column = 0; column < FIELD_GRID; column++) {
-      // The plane runs -1..1 in both axes, matching view.toPixel.
       const x = (column / (FIELD_GRID - 1)) * 2 - 1;
       const y = 1 - (row / (FIELD_GRID - 1)) * 2;
-      const lifted = liftToAtlas([x, y]);
-      for (let index = 0; index < cells.length; index++) {
-        let sum = 0;
-        const pca = cells[index].pca;
-        for (let axis = 0; axis < 8; axis++) {
-          const delta = pca[axis] - lifted[axis];
-          sum += delta * delta;
-        }
-        distances[index] = sum;
-      }
-      distances.sort((left, right) => left - right);
-      const value = Math.sqrt(distances[FIELD_NEAR - 1]);
+      const value = overrideAt([x, y], scratch);
       samples[row * FIELD_GRID + column] = value;
       if (value < lowest) lowest = value;
       if (value > highest) highest = value;
@@ -460,10 +490,8 @@ function coverageField(view, ink) {
   }
   const span = Math.max(highest - lowest, 1e-6);
   for (let index = 0; index < samples.length; index++) {
-    // Near reads bright, far reads black; squared so the covered core stands
-    // out rather than the whole plane turning uniformly grey.
-    const near = 1 - (samples[index] - lowest) / span;
-    const alpha = Math.round(255 * 0.17 * near * near);
+    const faithful = 1 - (samples[index] - lowest) / span;
+    const alpha = Math.round(255 * 0.17 * faithful * faithful);
     image.data[index * 4] = ir;
     image.data[index * 4 + 1] = ig;
     image.data[index * 4 + 2] = ib;
@@ -2815,6 +2843,16 @@ window.atlasDebug = () => ({
  *
  *   await atlasCapture(8)   ->  {sampleRate, samples: [...]}
  */
+/**
+ * The override magnitude at a coordinate: how far the runtime will move you.
+ *
+ * Same function the coverage field is built from, exposed so it can be checked
+ * against the Python it mirrors rather than eyeballed off the canvas -- where
+ * the inset panel and the graph sit on top of the field and confound any
+ * attempt to read it back from pixels.
+ */
+window.atlasField = (x, y) => overrideAt([x, y], new Float64Array(cells.length));
+
 window.atlasCapture = async (seconds = 8) => {
   const chain = activeChain();
   if (!chain) throw new Error('nothing is playing');
